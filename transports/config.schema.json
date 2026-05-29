@@ -492,6 +492,9 @@
         },
         "github-copilot": {
           "$ref": "#/$defs/provider_with_github_copilot_config"
+        },
+        "fishaudio": {
+          "$ref": "#/$defs/provider"
         }
       },
       "additionalProperties": true

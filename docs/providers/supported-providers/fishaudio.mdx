@@ -1,0 +1,315 @@
+---
+title: "Fish Audio"
+description: "Fish Audio API conversion guide - WebSocket text-to-speech, voice (reference_id) mapping, audio format handling, and model management"
+icon: "fish"
+---
+
+## Overview
+
+Fish Audio is a specialized **audio provider** for text-to-speech. Unlike most TTS providers, Fish synthesizes over a **WebSocket** (`/v1/tts/live`) that exchanges **MessagePack-encoded** events. Bifrost fully encapsulates this protocol inside the provider, so Fish Audio is consumed through the standard Speech / SpeechStream interface like any other TTS provider. Conversions include:
+
+- **Model header mapping** - The Bifrost `model` becomes the Fish `model` header (`s1` or `s2-pro`)
+- **Voice configuration** - The Bifrost `voice` becomes Fish's `reference_id` (voice model ID)
+- **Response format handling** - `mp3`, `pcm`, `wav`, `opus` (defaults to `mp3`)
+- **Synthesis parameters** - `temperature`, `top_p`, `normalize`, `sample_rate`, `chunk_length`, `mp3_bitrate`, `latency`, and prosody (`speed`, `volume`)
+- **Streaming audio frames** - Server audio frames are emitted as audio deltas; one-shot Speech accumulates them
+
+### Supported Operations
+
+| Operation | Non-Streaming | Streaming | Endpoint |
+|-----------|---------------|-----------|----------|
+| Speech (TTS) | ✅ | ✅ | `wss://api.fish.audio/v1/tts/live` |
+| List Models | ✅ | - | `GET /model` |
+| Transcriptions (STT) | ❌ | ❌ | - |
+| Chat Completions | ❌ | ❌ | - |
+| Responses API | ❌ | ❌ | - |
+| Text Completions | ❌ | ❌ | - |
+| Embeddings | ❌ | ❌ | - |
+| Image Generation | ❌ | ❌ | - |
+
+<Note>
+**Unsupported Operations** (❌): Chat Completions, Responses API, Text Completions, Embeddings, Transcriptions, and Image Generation are not supported by Fish Audio (TTS-focused provider). These return `UnsupportedOperationError`.
+
+Both non-streaming `Speech` and streaming `SpeechStream` drive the same `/v1/tts/live` WebSocket. The non-streaming path drives the socket to completion and concatenates the audio frames.
+</Note>
+
+## Setup & Configuration
+
+Configure Fish Audio as a provider.
+
+<Tabs>
+<Tab title="config.json">
+
+```json
+{
+  "providers": {
+    "fishaudio": {
+      "keys": [
+        {
+          "name": "fishaudio-key-1",
+          "value": "env.FISH_AUDIO_API_KEY",
+          "models": [
+            "*"
+          ],
+          "weight": 1.0
+        }
+      ]
+    }
+  }
+}
+```
+
+</Tab>
+<Tab title="API">
+
+```bash
+curl --location 'http://localhost:8080/api/providers' \
+--header 'Content-Type: application/json' \
+--data '{
+  "provider": "fishaudio",
+  "keys": [
+    {
+      "name": "fishaudio-key-1",
+      "value": "env.FISH_AUDIO_API_KEY",
+      "models": [
+        "*"
+      ],
+      "weight": 1.0
+    }
+  ]
+}'
+```
+
+</Tab>
+<Tab title="Go SDK">
+
+```go
+case schemas.FishAudio:
+    return []schemas.Key{{
+        Name:   "fishaudio-key-1",
+        Value:  *schemas.NewEnvVar("env.FISH_AUDIO_API_KEY"),
+        Models: []string{"*"},
+        Weight: 1.0,
+    }}, nil
+```
+
+</Tab>
+</Tabs>
+
+For text-to-speech calls, the Bifrost `model` is the Fish Audio model variant (`s1` or `s2-pro`, default `s2-pro`), and the Bifrost `voice` is the Fish `reference_id` (voice model ID).
+
+---
+
+# 1. Speech (Text-to-Speech)
+
+## Request Parameters
+
+### Core Parameters
+
+| Parameter | Mapping | Notes |
+|-----------|---------|-------|
+| `input.input` | `TextEvent.text` | The text to convert to speech (required) |
+| `model` | `model` header | Model variant: `s1` or `s2-pro` (default `s2-pro`) |
+| `voice` | `request.reference_id` | Fish voice model ID |
+| `response_format` | `request.format` | `mp3`, `pcm`, `wav`, `opus` (default `mp3`) |
+| `speed` | `request.prosody.speed` | 0.5–2.0 |
+
+### Advanced Parameters
+
+Use `extra_params` for Fish-specific synthesis features:
+
+<Tabs>
+<Tab title="Gateway">
+
+```bash
+curl -X POST http://localhost:8080/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "fishaudio/s2-pro",
+    "input": "Hello, how are you?",
+    "voice": "802e3bc2b27e49c2995d23ef70e6ac89",
+    "response_format": "mp3",
+    "speed": 1.0,
+    "temperature": 0.7,
+    "top_p": 0.7,
+    "normalize": true,
+    "sample_rate": 44100,
+    "chunk_length": 200,
+    "mp3_bitrate": 128,
+    "latency": "normal",
+    "volume": 0
+  }'
+```
+
+</Tab>
+<Tab title="Go SDK">
+
+```go
+resp, err := client.SpeechRequest(schemas.NewBifrostContext(ctx, schemas.NoDeadline), &schemas.BifrostSpeechRequest{
+    Provider: schemas.FishAudio,
+    Model:    "s2-pro",
+    Input: &schemas.SpeechInput{
+        Input: "Hello, how are you?",
+    },
+    Params: &schemas.SpeechParameters{
+        VoiceConfig: &schemas.SpeechVoiceInput{
+            Voice: schemas.Ptr("802e3bc2b27e49c2995d23ef70e6ac89"),
+        },
+        Speed:          schemas.Ptr(1.0),
+        ResponseFormat: "mp3",
+        ExtraParams: map[string]interface{}{
+            "temperature":  0.7,
+            "top_p":        0.7,
+            "normalize":    true,
+            "sample_rate":  44100,
+            "chunk_length": 200,
+            "mp3_bitrate":  128,
+            "latency":      "normal",
+            "volume":       0.0,
+        },
+    },
+})
+```
+
+</Tab>
+</Tabs>
+
+#### Advanced TTS Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `temperature` | float | Expressiveness (0–1) |
+| `top_p` | float | Nucleus sampling diversity (0–1) |
+| `normalize` | boolean | Text normalization for English/Chinese |
+| `sample_rate` | integer | Output sample rate in Hz |
+| `chunk_length` | integer | Text segment size (100–300) |
+| `mp3_bitrate` | integer | MP3 bitrate in kbps (64, 128, 192) |
+| `latency` | string | Trade-off mode: `low`, `normal`, `balanced` |
+| `volume` | float | Prosody volume in dB (-20 to 20) |
+
+### Response Format
+
+| Format | Output | Notes |
+|--------|--------|-------|
+| `mp3` | MP3 | Default; bitrate via `mp3_bitrate` |
+| `opus` | Opus | |
+| `wav` | WAV | |
+| `pcm` | Raw PCM | |
+
+<Note>
+Defaults to MP3 if not specified. Unknown formats fall back to MP3.
+</Note>
+
+## Response Conversion
+
+Non-streaming `Speech` returns the concatenated audio bytes:
+
+```json
+{
+  "audio": "<binary audio data>"
+}
+```
+
+## Streaming
+
+Fish Audio uses a **MessagePack WebSocket** protocol. Bifrost sends `start` (config) + `text` + `stop` and relays each server `audio` frame as an audio delta until the server sends `finish(stop)`:
+
+```json
+{
+  "type": "audio.delta",
+  "audio": "<binary audio chunk>"
+}
+```
+
+Final chunk:
+```json
+{
+  "type": "audio.done"
+}
+```
+
+## Authentication
+
+**Bearer token + model header** (sent on the WebSocket handshake):
+
+```
+Authorization: Bearer <FISH_AUDIO_API_KEY>
+model: s2-pro
+```
+
+## Configuration
+
+**HTTP / WebSocket Settings:**
+- **Base URL**: `https://api.fish.audio` (default); the WebSocket URL is derived as `wss://api.fish.audio/v1/tts/live`
+- **List Models endpoint**: `GET /model`
+- **Default model variant**: `s2-pro`
+
+---
+
+## Caveats
+
+<Accordion title="MessagePack WebSocket protocol">
+**Severity**: Low
+**Behavior**: Synthesis runs over a msgpack WebSocket, not HTTP. The protocol is fully encapsulated in the provider; callers use the standard Speech / SpeechStream interface.
+**Impact**: None for callers — Fish behaves like any other TTS provider.
+**Code**: `fishaudio/utils.go` (`runSynthesis`, `dial`)
+</Accordion>
+
+<Accordion title="Model header vs voice">
+**Severity**: Medium
+**Behavior**: The Bifrost `model` maps to Fish's `model` header (`s1`/`s2-pro`), while the Bifrost `voice` maps to Fish's `reference_id` (voice model ID).
+**Impact**: Set both `model` and `voice` for predictable output. `model` defaults to `s2-pro` if omitted.
+**Code**: `fishaudio/fishaudio.go` (`resolveModel`), `fishaudio/speech.go` (`ToFishAudioSpeechRequest`)
+</Accordion>
+
+<Accordion title="Rate limits surface as RESOURCE_EXHAUSTED">
+**Severity**: Low
+**Behavior**: A 429 handshake or a `finish(error)` with a rate-limit message is surfaced with a 429 status.
+**Impact**: Downstream maps to `RESOURCE_EXHAUSTED`.
+**Code**: `fishaudio/utils.go` (`fishServerError`, `isRateLimitMessage`)
+</Accordion>
+
+---
+
+# 2. List Models
+
+## Request Parameters
+
+By default, ListModels returns the **account's own** voice models (`GET /model?self=true`), which is bounded. You can list **public** voices and narrow the (very large) catalog with Fish filters, passed as query params (forwarded via `ExtraParams`):
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `self` | bool | `true` (default) = your own voices; `false` = public catalog |
+| `title` | string | Filter by title/search term |
+| `language` | string | Filter by language (e.g. `en`, `ja`) |
+| `tag` | string | Filter by tag |
+| `sort_by` | string | Sort order (e.g. `score`, `created_at`) |
+
+Pagination is capped at 20 pages (≈2000 models); when a public listing is truncated, a warning is logged suggesting you narrow it with a filter.
+
+```bash
+# Own voices (default)
+curl "http://localhost:8080/v1/models?provider=fishaudio"
+
+# Public English voices, searched by title
+curl "http://localhost:8080/v1/models?provider=fishaudio&self=false&language=en&title=news"
+```
+
+## Response Conversion
+
+```json
+{
+  "total": 1,
+  "items": [
+    {
+      "_id": "802e3bc2b27e49c2995d23ef70e6ac89",
+      "title": "My Voice",
+      "type": "tts",
+      "languages": ["en"]
+    }
+  ],
+  "has_more": false
+}
+```
+
+Each item's `_id` becomes the Bifrost model ID (`fishaudio/<_id>`) and `title` becomes the display name.
