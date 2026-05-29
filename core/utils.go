@@ -95,6 +95,7 @@ var dynamicallyConfigurableProviders = []schemas.ModelProvider{
 	schemas.Cohere,
 	schemas.DeepSeek,
 	schemas.Elevenlabs,
+	schemas.FishAudio,
 	schemas.Gemini,
 	schemas.Groq,
 	schemas.HuggingFace,
