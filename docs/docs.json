@@ -141,6 +141,7 @@
                   "providers/supported-providers/deepseek",
                   "providers/supported-providers/elevenlabs",
                   "providers/supported-providers/fireworks",
+                  "providers/supported-providers/fishaudio",
                   "providers/supported-providers/gemini",
                   "providers/supported-providers/groq",
                   "providers/supported-providers/huggingface",

@@ -14,6 +14,12 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
+// FishAudioDocVoiceID is the voice reference_id used in Fish Audio's own API
+// documentation examples. Fish has no fixed "default" voices (the catalog is a
+// large community library), so this documented example is used as the test
+// voice.
+const FishAudioDocVoiceID = "802e3bc2b27e49c2995d23ef70e6ac89"
+
 // Shared test texts for TTS->SST round-trip validation
 const (
 	// Basic test text for simple round-trip validation
@@ -71,6 +77,10 @@ func GetProviderVoice(provider schemas.ModelProvider, voiceType string) string {
 		default:
 			return "troy"
 		}
+	case schemas.FishAudio:
+		// Fish publishes no fixed default voices; use the reference_id from
+		// Fish's own API-docs examples for every voice type.
+		return FishAudioDocVoiceID
 	case schemas.Elevenlabs:
 		switch voiceType {
 		case "primary":

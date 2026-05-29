@@ -115,8 +115,6 @@ func RunSpeechSynthesisStreamTest(t *testing.T, client *bifrost.Bifrost, ctx con
 					},
 				}
 
-				
-
 				responseChannel, err := WithStreamRetry(t, retryConfig, retryContext, func() (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
 					requestCtx := schemas.NewBifrostContext(ctx, schemas.NoDeadline)
 					return client.SpeechStreamRequest(requestCtx, request)
@@ -406,6 +404,10 @@ func RunSpeechSynthesisStreamAdvancedTest(t *testing.T, client *bifrost.Bifrost,
 			// it's not possible to test all voices with Elevenlabs, we are using a few
 			elevenlabsVoices := []string{"21m00Tcm4TlvDq8ikWAM", "29vD33N1CtxCmqQRPOHJ", "2EiwWnXFnvU5JabPnv8n"}
 
+			// Fish Audio voices are reference_id model IDs. Fish has no fixed
+			// default voices, so use the reference_id from its API-docs examples.
+			fishAudioVoices := []string{FishAudioDocVoiceID}
+
 			testText := "Testing streaming speech synthesis with different voice options."
 
 			switch testConfig.Provider {
@@ -415,6 +417,8 @@ func RunSpeechSynthesisStreamAdvancedTest(t *testing.T, client *bifrost.Bifrost,
 				voices = geminiVoices
 			case schemas.Elevenlabs:
 				voices = elevenlabsVoices
+			case schemas.FishAudio:
+				voices = fishAudioVoices
 			}
 
 			for _, voice := range voices {
@@ -452,14 +456,13 @@ func RunSpeechSynthesisStreamAdvancedTest(t *testing.T, client *bifrost.Bifrost,
 						},
 					}
 
-					
 					// Use retry framework with stream validation
 					var accumulatedAudio bytes.Buffer // Accumulate audio for codec validation
 					validationResult := WithSpeechStreamValidationRetry(
 						t,
 						retryConfig,
 						retryContext,
-						func() (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {							
+						func() (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
 							accumulatedAudio.Reset() // Reset buffer on retry
 							requestCtx := schemas.NewBifrostContext(ctx, schemas.NoDeadline)
 							return client.SpeechStreamRequest(requestCtx, request)

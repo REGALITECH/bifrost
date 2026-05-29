@@ -453,6 +453,9 @@
         },
         "sarvam": {
           "$ref": "#/$defs/provider"
+        },
+        "fishaudio": {
+          "$ref": "#/$defs/provider"
         }
       },
       "additionalProperties": true
