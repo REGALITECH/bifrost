@@ -203,6 +203,21 @@ type RealtimeProvider interface {
 	ShouldAccumulateRealtimeOutput(eventType RealtimeEventType) bool
 }
 
+// RealtimeBinaryProvider is an optional interface for realtime providers whose
+// upstream WebSocket speaks a binary wire format (e.g. Fish Audio's MessagePack
+// tts-live) rather than JSON text frames. When a provider implements this and
+// returns true, the realtime transport:
+//   - writes translated client events to the upstream as binary frames,
+//   - decodes inbound binary frames via ToBifrostRealtimeEvent, and
+//   - forwards canonical JSON to the client (taken from the event's RawData,
+//     which the provider populates with the client-facing payload).
+//
+// Providers that do not implement this interface keep the default JSON-text
+// pass-through behavior, so existing realtime providers are unaffected.
+type RealtimeBinaryProvider interface {
+	RealtimeUsesBinaryProtocol() bool
+}
+
 // RealtimeLegacyWebRTCProvider is an optional interface for providers that
 // support the beta WebRTC handshake (e.g., OpenAI's /v1/realtime).
 // Only checked for legacy integration routes via type assertion.
