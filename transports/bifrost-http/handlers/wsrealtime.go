@@ -338,6 +338,16 @@ func (h *WSRealtimeHandler) runRealtimeSession(
 	}
 }
 
+// realtimeUsesBinary reports whether the provider's upstream WebSocket speaks a
+// binary wire format (e.g. Fish Audio's MessagePack). Providers that don't
+// implement RealtimeBinaryProvider keep the default JSON-text behavior.
+func realtimeUsesBinary(provider schemas.RealtimeProvider) bool {
+	if bp, ok := provider.(schemas.RealtimeBinaryProvider); ok {
+		return bp.RealtimeUsesBinaryProtocol()
+	}
+	return false
+}
+
 func (h *WSRealtimeHandler) relayClientToRealtimeProvider(
 	clientConn *realtimeClientConn,
 	session *bfws.Session,
@@ -348,6 +358,11 @@ func (h *WSRealtimeHandler) relayClientToRealtimeProvider(
 	model string,
 	key schemas.Key,
 ) error {
+	binaryUpstream := realtimeUsesBinary(provider)
+	upstreamMsgType := ws.TextMessage
+	if binaryUpstream {
+		upstreamMsgType = ws.BinaryMessage
+	}
 	for {
 		messageType, message, err := clientConn.ReadMessage()
 		if err != nil {
@@ -437,7 +452,12 @@ func (h *WSRealtimeHandler) relayClientToRealtimeProvider(
 			}
 		}
 
-		if err := upstream.WriteMessage(ws.TextMessage, providerEvent); err != nil {
+		// Binary-protocol providers may map a client event to no upstream frame
+		// (e.g. an unmapped event); skip the write in that case.
+		if binaryUpstream && len(providerEvent) == 0 {
+			continue
+		}
+		if err := upstream.WriteMessage(upstreamMsgType, providerEvent); err != nil {
 			finalizeRealtimeTurnHooksWithError(
 				h.client,
 				bifrostCtx,
@@ -465,6 +485,7 @@ func (h *WSRealtimeHandler) relayRealtimeProviderToClient(
 	model string,
 	key schemas.Key,
 ) error {
+	binaryUpstream := realtimeUsesBinary(provider)
 	for {
 		disconnectAfterWrite := false
 		messageType, message, err := upstream.ReadMessage()
@@ -498,7 +519,11 @@ func (h *WSRealtimeHandler) relayRealtimeProviderToClient(
 			return err
 		}
 
-		if messageType == ws.TextMessage {
+		// Client always receives JSON text. For binary-protocol providers the
+		// translated event is sent as text (canonical JSON from RawData); for
+		// JSON providers the original frame type is preserved.
+		clientMsgType := messageType
+		if messageType == ws.TextMessage || (binaryUpstream && messageType == ws.BinaryMessage) {
 			event, err := provider.ToBifrostRealtimeEvent(message)
 			if err != nil {
 				finalizeRealtimeTurnHooksWithError(
@@ -567,7 +592,11 @@ func (h *WSRealtimeHandler) relayRealtimeProviderToClient(
 				} else if inputSummary != "" {
 					session.RecordRealtimeInput(inputItemID, inputSummary, string(message))
 				}
-				if len(event.RawData) == 0 {
+				if binaryUpstream {
+					// Client speaks canonical JSON; the provider placed it in RawData.
+					clientMsgType = ws.TextMessage
+					message = event.RawData
+				} else if len(event.RawData) == 0 {
 					message, err = provider.ToProviderRealtimeEvent(event)
 					if err != nil {
 						clientConn.writeRealtimeError(newRealtimeWireBifrostError(502, "server_error", "failed to encode translated realtime event"))
@@ -577,7 +606,12 @@ func (h *WSRealtimeHandler) relayRealtimeProviderToClient(
 			}
 		}
 
-		if err := clientConn.WriteMessage(messageType, message); err != nil {
+		// Nothing to forward (e.g. a binary provider produced no client payload).
+		if binaryUpstream && len(message) == 0 {
+			continue
+		}
+
+		if err := clientConn.WriteMessage(clientMsgType, message); err != nil {
 			finalizeRealtimeTurnHooksOnTransportError(
 				h.client,
 				bifrostCtx,
