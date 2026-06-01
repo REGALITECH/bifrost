@@ -19,6 +19,7 @@ Fish Audio is a specialized **audio provider** for text-to-speech. Unlike most T
 | Operation | Non-Streaming | Streaming | Endpoint |
 |-----------|---------------|-----------|----------|
 | Speech (TTS) | ✅ | ✅ | `wss://api.fish.audio/v1/tts/live` |
+| Realtime (TTS) | - | ✅ | `wss://api.fish.audio/v1/tts/live` (via Bifrost `/v1/realtime`) |
 | List Models | ✅ | - | `GET /model` |
 | Transcriptions (STT) | ❌ | ❌ | - |
 | Chat Completions | ❌ | ❌ | - |
@@ -313,3 +314,45 @@ curl "http://localhost:8080/v1/models?provider=fishaudio&self=false&language=en&
 ```
 
 Each item's `_id` becomes the Bifrost model ID (`fishaudio/<_id>`) and `title` becomes the display name.
+
+---
+
+# 3. Realtime (bidirectional streaming TTS)
+
+Fish's `/v1/tts/live` WebSocket is bidirectional: you stream text chunks in while audio streams back on the same connection. Bifrost exposes this through its standard Realtime API (`/v1/realtime`), so clients speak the **OpenAI-realtime JSON protocol** and Bifrost translates to/from Fish's MessagePack frames.
+
+Fish's wire format is binary MessagePack rather than JSON, so the provider opts into the internal `RealtimeBinaryProvider` capability; the realtime transport frames the upstream leg as binary while the client leg stays JSON. (Existing JSON realtime providers are unaffected.)
+
+### Event mapping
+
+| Client event (OpenAI-realtime JSON) | Fish event | Notes |
+|-------------------------------------|------------|-------|
+| `session.update` | `StartEvent` | `session.voice` → `reference_id`; `output_audio_type` → `format` (default `pcm`) |
+| `conversation.item.create` (input_text) | `TextEvent` | the text to synthesize |
+| `response.create` | `FlushEvent` | forces synthesis of buffered text |
+| `response.cancel` / disconnect | `CloseEvent` (stop) | ends the session |
+
+| Fish event | Client event (JSON) |
+|------------|---------------------|
+| `audio` | `response.audio.delta` (`delta` = base64 audio) |
+| `finish(stop)` | `response.audio.done` |
+| `finish(error)` / `error` | `error` |
+
+### Lifecycle
+
+```
+session.update            → StartEvent (once; configures voice/format)
+conversation.item.create  → TextEvent   (repeat per text chunk)
+response.create           → FlushEvent  (audio streams back as response.audio.delta)
+...                       (stream more text + receive audio concurrently)
+response.cancel / close   → CloseEvent(stop) → response.audio.done
+```
+
+<Note>
+**Caveats (v1):**
+- The model variant header defaults to `s2-pro` (the realtime interface doesn't surface the requested model to the header layer).
+- Fish only emits `finish` at the end of the session, so there's no per-chunk audio boundary — the client receives a continuous `response.audio.delta` stream and a single terminal `response.audio.done`.
+- Send `session.update` first; Fish requires `StartEvent` before any text.
+
+For one-shot synthesis, prefer `Speech` / `SpeechStream` (SSE) — Realtime is for interactive, incrementally-fed text (e.g. an LLM token stream).
+</Note>
