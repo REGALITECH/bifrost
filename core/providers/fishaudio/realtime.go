@@ -106,6 +106,18 @@ func (provider *FishAudioProvider) ShouldAccumulateRealtimeOutput(_ schemas.Real
 	return false
 }
 
+// RealtimeInputUsage reports the turn's billable usage as the UTF-8 byte count
+// of the synthesized input text — Fish Audio bills per byte, and emits no token
+// usage on its terminal event. The byte count is surfaced as input tokens so the
+// per-token pricing dimension (configured as the per-byte rate) computes cost.
+func (provider *FishAudioProvider) RealtimeInputUsage(inputText string) *schemas.BifrostLLMUsage {
+	n := schemas.SpeechBillableInputUnits(schemas.FishAudio, inputText) // UTF-8 bytes
+	if n == 0 {
+		return nil
+	}
+	return &schemas.BifrostLLMUsage{PromptTokens: n, TotalTokens: n}
+}
+
 // ToProviderRealtimeEvent maps a client (OpenAI-realtime) event to a single Fish
 // msgpack frame. Returns (nil, nil) for events that should not be forwarded
 // upstream (the transport skips empty binary frames).

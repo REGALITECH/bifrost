@@ -445,6 +445,30 @@ func extractRealtimeResponseDoneContentText(content []realtimeResponseDoneConten
 	return ""
 }
 
+// applyRealtimeInputUsage fills in usage derived from the turn's input text for
+// providers that bill on input and report no token usage on their terminal
+// event (e.g. Fish Audio, which bills per UTF-8 byte). Isolated to providers
+// implementing RealtimeInputUsageProvider; a no-op when the provider doesn't, or
+// when usage is already present.
+func applyRealtimeInputUsage(resp *schemas.BifrostResponse, rtProvider schemas.RealtimeProvider, turnInputs []bfws.RealtimeTurnInput) {
+	if resp == nil || resp.ResponsesResponse == nil || resp.ResponsesResponse.Usage != nil {
+		return
+	}
+	usageProvider, ok := rtProvider.(schemas.RealtimeInputUsageProvider)
+	if !ok {
+		return
+	}
+	var b strings.Builder
+	for _, in := range turnInputs {
+		if in.Role == string(schemas.ChatMessageRoleUser) {
+			b.WriteString(in.Summary)
+		}
+	}
+	if usage := usageProvider.RealtimeInputUsage(b.String()); usage != nil {
+		resp.ResponsesResponse.Usage = buildRealtimeResponsesUsage(usage)
+	}
+}
+
 func buildRealtimeResponsesUsage(usage *schemas.BifrostLLMUsage) *schemas.ResponsesResponseUsage {
 	if usage == nil {
 		return nil
@@ -674,6 +698,11 @@ func finalizeRealtimeTurnHooks(
 		return nil
 	}
 
+	// Capture turn-start (first-input arrival) and first-output (first audio/text
+	// delta) before consuming clears them, so the fallback path can report real
+	// input->first-output latency for providers with no explicit turn-start signal.
+	turnStartedAt := session.RealtimeTurnStartedAt()
+	firstOutputAt := session.RealtimeFirstOutputAt()
 	turnInputs := session.ConsumeRealtimeTurnInputs()
 	rawRequest := combineRealtimeInputRaw(turnInputs)
 
@@ -692,6 +721,7 @@ func finalizeRealtimeTurnHooks(
 			contentOverride,
 			time.Since(activeHooks.StartedAt).Milliseconds(),
 		)
+		applyRealtimeInputUsage(postResponse, rtProvider, turnInputs)
 		postCtx := newRealtimeTurnContext(baseCtx, activeHooks.RequestID, session.ID(), session.ProviderSessionID(), realtimeTurnSourceLM, rtProvider.RealtimeTurnFinalEvent(), key)
 		applyRealtimeTurnContextValues(postCtx, activeHooks.PreHookValues)
 		restoreRealtimeTurnTraceContext(postCtx, activeHooks.TraceID, activeHooks.PreHookValues)
@@ -702,7 +732,20 @@ func finalizeRealtimeTurnHooks(
 		return bifrostErr
 	}
 
-	startedAt := time.Now()
+	// Prefer the real turn start (first-input arrival) so latency reflects the
+	// synthesis duration; fall back to now only when no input was recorded.
+	startedAt := turnStartedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now()
+	}
+	// Latency is input->first-output (TTFB) when both are known. Providers that
+	// stream continuously and only signal turn completion at disconnect (Fish)
+	// would otherwise report the entire session duration. Fall back to elapsed
+	// time when no output arrived.
+	latencyMs := time.Since(startedAt).Milliseconds()
+	if !turnStartedAt.IsZero() && firstOutputAt.After(turnStartedAt) {
+		latencyMs = firstOutputAt.Sub(turnStartedAt).Milliseconds()
+	}
 	storeRaw := shouldStoreRealtimeRawPayloads(baseCtx)
 	preCtx := newRealtimeTurnContext(baseCtx, "", session.ID(), session.ProviderSessionID(), realtimeTurnSourceEI, "", key)
 	applyRealtimeRawStorageContext(preCtx, storeRaw)
@@ -726,8 +769,9 @@ func finalizeRealtimeTurnHooks(
 		rawRequest,
 		rawResponse,
 		contentOverride,
-		time.Since(startedAt).Milliseconds(),
+		latencyMs,
 	)
+	applyRealtimeInputUsage(postResponse, rtProvider, turnInputs)
 	postCtx := newRealtimeTurnContext(baseCtx, requestID, session.ID(), session.ProviderSessionID(), realtimeTurnSourceLM, rtProvider.RealtimeTurnFinalEvent(), key)
 	applyRealtimeTurnContextValues(postCtx, preHookValues)
 	restoreRealtimeTurnTraceContext(postCtx, traceID, preHookValues)

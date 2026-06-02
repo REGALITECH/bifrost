@@ -354,6 +354,9 @@ func (provider *FishAudioProvider) SpeechStream(ctx *schemas.BifrostContext, pos
 				Latency:    time.Since(startTime).Milliseconds(),
 			},
 		}
+		// Populate usage (input char/byte counts) on the terminal chunk; unlike
+		// the non-streaming path, streaming has no central BackfillParams call.
+		finalResponse.BackfillParams(request)
 		ctx.SetValue(schemas.BifrostContextKeyStreamEndIndicator, true)
 		providerUtils.ProcessAndSendResponse(ctx, postHookRunner, providerUtils.GetBifrostResponseForStreamResponse(nil, nil, nil, finalResponse, nil, nil), responseChan, postHookSpanFinalizer)
 	}()

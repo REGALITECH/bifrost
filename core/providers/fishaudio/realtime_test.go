@@ -139,4 +139,19 @@ func TestFishRealtime_Capabilities(t *testing.T) {
 	// Ensure the provider satisfies the optional interfaces.
 	var _ schemas.RealtimeProvider = provider
 	var _ schemas.RealtimeBinaryProvider = provider
+	var _ schemas.RealtimeInputUsageProvider = provider
+}
+
+func TestFishRealtime_InputUsage(t *testing.T) {
+	provider := &FishAudioProvider{}
+
+	// "バイフロスト" = 6 runes / 18 UTF-8 bytes; Fish bills per byte.
+	usage := provider.RealtimeInputUsage("バイフロスト")
+	if usage == nil || usage.PromptTokens != 18 || usage.TotalTokens != 18 {
+		t.Fatalf("RealtimeInputUsage = %+v, want PromptTokens/TotalTokens = 18 (bytes)", usage)
+	}
+
+	if provider.RealtimeInputUsage("") != nil {
+		t.Fatal("RealtimeInputUsage(\"\") should be nil")
+	}
 }

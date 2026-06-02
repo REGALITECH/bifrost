@@ -592,6 +592,21 @@ func (p *LoggerPlugin) applyNonStreamingOutputToEntry(entry *logstore.Log, resul
 		} else {
 			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 		}
+	case result.SpeechResponse != nil && result.SpeechResponse.Usage != nil:
+		// Speech providers bill on input characters/bytes (InputChars), not
+		// tokens; surface that as PromptTokens so speech usage shows in the
+		// dashboard instead of 0.
+		usage = &schemas.BifrostLLMUsage{}
+		usage.PromptTokens = result.SpeechResponse.Usage.InputTokens
+		if usage.PromptTokens == 0 {
+			usage.PromptTokens = result.SpeechResponse.Usage.InputChars
+		}
+		usage.CompletionTokens = result.SpeechResponse.Usage.OutputTokens
+		if result.SpeechResponse.Usage.TotalTokens > 0 {
+			usage.TotalTokens = result.SpeechResponse.Usage.TotalTokens
+		} else {
+			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
+		}
 	case result.PassthroughResponse != nil:
 		if su := result.PassthroughResponse.PassthroughUsage; su != nil {
 			usage = su.LLMUsage
