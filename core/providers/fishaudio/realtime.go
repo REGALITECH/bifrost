@@ -49,8 +49,9 @@ func (provider *FishAudioProvider) RealtimeUsesBinaryProtocol() bool {
 // runtime type assertion, so a signature drift would otherwise silently turn
 // Fish realtime into "provider does not support realtime".
 var (
-	_ schemas.RealtimeProvider       = (*FishAudioProvider)(nil)
-	_ schemas.RealtimeBinaryProvider = (*FishAudioProvider)(nil)
+	_ schemas.RealtimeProvider           = (*FishAudioProvider)(nil)
+	_ schemas.RealtimeBinaryProvider     = (*FishAudioProvider)(nil)
+	_ schemas.RealtimeInputUsageProvider = (*FishAudioProvider)(nil)
 )
 
 // RealtimeWebSocketURL returns the tts-live endpoint. The model variant is sent
@@ -117,6 +118,18 @@ func (provider *FishAudioProvider) ShouldForwardRealtimeEvent(event *schemas.Bif
 // no text/transcript to accumulate.
 func (provider *FishAudioProvider) ShouldAccumulateRealtimeOutput(_ schemas.RealtimeEventType) bool {
 	return false
+}
+
+// RealtimeInputUsage reports the turn's billable usage as the UTF-8 byte count
+// of the synthesized input text — Fish Audio bills per byte, and emits no token
+// usage on its terminal event. The byte count is surfaced as input tokens so the
+// per-token pricing dimension (configured as the per-byte rate) computes cost.
+func (provider *FishAudioProvider) RealtimeInputUsage(inputText string) *schemas.BifrostLLMUsage {
+	n := schemas.SpeechBillableInputUnits(schemas.FishAudio, inputText) // UTF-8 bytes
+	if n == 0 {
+		return nil
+	}
+	return &schemas.BifrostLLMUsage{PromptTokens: n, TotalTokens: n}
 }
 
 // ToProviderRealtimeEvent maps a client (OpenAI-realtime) event to a single Fish
