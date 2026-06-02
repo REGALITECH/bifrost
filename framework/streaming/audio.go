@@ -75,10 +75,21 @@ func (a *Accumulator) processAccumulatedAudioStreamingChunks(requestID string, b
 	// Update metadata from the chunk with highest index (contains TokenUsage, Cost, CacheDebug)
 	if lastChunk := accumulator.getLastAudioChunkLocked(); lastChunk != nil {
 		if lastChunk.TokenUsage != nil {
+			// Speech providers bill on input characters/bytes (InputChars), not
+			// tokens; surface that as PromptTokens so streaming speech usage
+			// shows in the dashboard instead of 0.
+			promptTokens := lastChunk.TokenUsage.InputTokens
+			if promptTokens == 0 {
+				promptTokens = lastChunk.TokenUsage.InputChars
+			}
+			totalTokens := lastChunk.TokenUsage.TotalTokens
+			if totalTokens == 0 {
+				totalTokens = promptTokens + lastChunk.TokenUsage.OutputTokens
+			}
 			data.TokenUsage = &schemas.BifrostLLMUsage{
-				PromptTokens:     lastChunk.TokenUsage.InputTokens,
+				PromptTokens:     promptTokens,
 				CompletionTokens: lastChunk.TokenUsage.OutputTokens,
-				TotalTokens:      lastChunk.TokenUsage.TotalTokens,
+				TotalTokens:      totalTokens,
 			}
 		}
 		if lastChunk.Cost != nil {
