@@ -218,6 +218,17 @@ type RealtimeBinaryProvider interface {
 	RealtimeUsesBinaryProtocol() bool
 }
 
+// RealtimeInputUsageProvider is an optional interface for realtime providers
+// that bill on the turn's input (rather than tokens) and don't report usage on
+// their terminal event — e.g. Fish Audio, which bills per UTF-8 byte of input
+// text. The realtime transport calls RealtimeInputUsage with the turn's
+// accumulated input text only when the provider supplied no usage, letting the
+// provider report its billable quantity (the transport has the input the
+// stateless per-frame provider can't accumulate).
+type RealtimeInputUsageProvider interface {
+	RealtimeInputUsage(inputText string) *BifrostLLMUsage
+}
+
 // RealtimeLegacyWebRTCProvider is an optional interface for providers that
 // support the beta WebRTC handshake (e.g., OpenAI's /v1/realtime).
 // Only checked for legacy integration routes via type assertion.

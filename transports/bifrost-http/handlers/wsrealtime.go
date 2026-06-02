@@ -333,6 +333,17 @@ func (h *WSRealtimeHandler) runRealtimeSession(
 	_ = clientConn.Close()
 	secondErr := <-errCh
 
+	// Binary-protocol providers (e.g. Fish Audio) don't emit a per-utterance
+	// terminal event and close by dropping the socket, so their turns are
+	// finalized here instead of in the relay. Both relay goroutines have exited,
+	// so this runs single-threaded (no race on the session turn state). Gated on
+	// binary providers + pending input so it is a complete no-op for JSON
+	// realtime providers (OpenAI/Azure/ElevenLabs), which finalize per turn and
+	// have already consumed their inputs.
+	if realtimeUsesBinary(rtProvider) && len(session.PeekRealtimeTurnInputs()) > 0 {
+		_ = finalizeRealtimeTurnHooks(h.client, bifrostCtx, session, rtProvider, providerKey, model, &key, nil, session.ConsumeRealtimeOutputText())
+	}
+
 	if logErr := selectRealtimeRelayError(firstErr, secondErr); logErr != nil {
 		logger.Warn("realtime websocket relay ended for %s/%s on %s: %v", providerKey, model, path, logErr)
 	}
@@ -366,6 +377,11 @@ func (h *WSRealtimeHandler) relayClientToRealtimeProvider(
 	for {
 		messageType, message, err := clientConn.ReadMessage()
 		if err != nil {
+			// Binary-protocol providers (Fish): leave the turn for the session
+			// teardown to finalize + bill, regardless of how the client closed.
+			if binaryUpstream {
+				return nil
+			}
 			finalizeRealtimeTurnHooksOnTransportError(
 				h.client,
 				bifrostCtx,
@@ -444,6 +460,18 @@ func (h *WSRealtimeHandler) relayClientToRealtimeProvider(
 
 		// Record tool output / input only after the event passed validation.
 		if !startsTurn {
+			// Binary streaming providers (e.g. Fish Audio) emit a terminal event
+			// only at disconnect, so without segmentation the whole session
+			// collapses into one turn (one log row, one latency value). Treat a
+			// new client input that arrives after output was produced as a turn
+			// boundary: finalize the in-progress turn — giving it its own row and
+			// input->first-output latency — before recording the new input.
+			if binaryUpstream && (inputSummary != "" || toolSummary != "") && !session.RealtimeFirstOutputAt().IsZero() {
+				if finErr := finalizeRealtimeTurnHooks(h.client, bifrostCtx, session, provider, providerKey, model, &key, nil, session.ConsumeRealtimeOutputText()); finErr != nil {
+					clientConn.writeRealtimeError(finErr)
+					return nil
+				}
+			}
 			if toolSummary != "" {
 				session.RecordRealtimeToolOutput(toolItemID, toolSummary, string(message))
 			}
@@ -490,6 +518,16 @@ func (h *WSRealtimeHandler) relayRealtimeProviderToClient(
 		disconnectAfterWrite := false
 		messageType, message, err := upstream.ReadMessage()
 		if err != nil {
+			// Binary-protocol upstreams (e.g. Fish Audio) end the session by
+			// dropping the socket — a clean close OR an abrupt 1006/unexpected EOF
+			// after `stop` — with no per-utterance terminal event. Don't
+			// error-finalize/consume the turn here: it is finalized + billed at
+			// session teardown so usage is captured regardless of how the socket
+			// closed. (Isolated to binary providers; JSON providers below are
+			// unchanged.)
+			if binaryUpstream {
+				return nil
+			}
 			finalizeRealtimeTurnHooksOnTransportError(
 				h.client,
 				bifrostCtx,
@@ -546,9 +584,13 @@ func (h *WSRealtimeHandler) relayRealtimeProviderToClient(
 				}
 				// Track session tool definitions from session.created/session.updated.
 				updateRealtimeSessionFromEvent(session, event)
-				if event.Delta != nil && provider.ShouldAccumulateRealtimeOutput(event.Type) {
-					session.AppendRealtimeOutputText(event.Delta.Text)
-					session.AppendRealtimeOutputText(event.Delta.Transcript)
+				if event.Delta != nil {
+					// First audio/text delta marks input->first-output latency (TTFB).
+					session.MarkRealtimeFirstOutput()
+					if provider.ShouldAccumulateRealtimeOutput(event.Type) {
+						session.AppendRealtimeOutputText(event.Delta.Text)
+						session.AppendRealtimeOutputText(event.Delta.Transcript)
+					}
 				}
 				if provider.ShouldStartRealtimeTurn(event) && session.PeekRealtimeTurnHooks() == nil {
 					if bifrostErr := startRealtimeTurnHooks(h.client, bifrostCtx, session, provider, providerKey, model, &key, event); bifrostErr != nil {
