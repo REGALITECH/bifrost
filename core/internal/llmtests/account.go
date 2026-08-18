@@ -446,7 +446,7 @@ func (account *ComprehensiveTestAccount) GetKeysForProvider(ctx context.Context,
 	case schemas.FishAudio:
 		return []schemas.Key{
 			{
-				Value:          *schemas.NewEnvVar("env.FISH_AUDIO_API_KEY"),
+				Value:          *schemas.NewSecretVar("env.FISH_AUDIO_API_KEY"),
 				Models:         []string{"*"},
 				Weight:         1.0,
 				UseForBatchAPI: bifrost.Ptr(true),
