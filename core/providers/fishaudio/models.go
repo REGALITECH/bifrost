@@ -10,7 +10,7 @@ import (
 // ToBifrostListModelsResponse converts a Fish Audio /model response into the
 // unified Bifrost model list, applying the standard allow/blacklist/alias
 // filtering pipeline.
-func (response *FishAudioListModelsResponse) ToBifrostListModelsResponse(providerKey schemas.ModelProvider, allowedModels schemas.WhiteList, blacklistedModels schemas.BlackList, aliases map[string]string, unfiltered bool) *schemas.BifrostListModelsResponse {
+func (response *FishAudioListModelsResponse) ToBifrostListModelsResponse(providerKey schemas.ModelProvider, allowedModels schemas.WhiteList, blacklistedModels schemas.BlackList, aliases schemas.KeyAliases, unfiltered bool) *schemas.BifrostListModelsResponse {
 	if response == nil {
 		return nil
 	}
