@@ -65,7 +65,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: transports/Dockerfile
+          file: transports/Dockerfile.local
           platforms: ${{ matrix.platform }}
           build-args: |
             VERSION=${{ needs.prepare.outputs.version }}
