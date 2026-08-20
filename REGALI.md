@@ -88,7 +88,8 @@ No repository Actions secrets are configured, so provider-credential tests in `p
   convert a public fork to private — doing so would require re-creating the repository from a bare
   clone. Assume anything committed here is world-readable.
 - **Issues: enabled**, for REGALI's own tracking of fork work.
-- **Wiki: disabled.** A fork does not inherit the upstream wiki and none was ever created here.
+- **Wiki: enabled**, left at GitHub's default like the rest of the org. It is empty — a fork does
+  not inherit the upstream wiki and none was ever created here.
 - **Access: no repository-specific grants.** REGALITECH org members get `write` from the org default
   permission and owners get `admin`, the same as every other repository in the org. The org has no
   teams.
