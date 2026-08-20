@@ -72,10 +72,29 @@ The ~1,700 lines under `core/providers/fishaudio/` are new files and cost nothin
 behaviour in new files and hold edits to upstream files down to the few registration lines they
 genuinely need — that is what keeps a sync cheap.
 
-**Verify after merging.** At minimum the Fish Audio provider must still build and its tests pass;
-`82660c2b` ("Adapt Fish Audio provider to current upstream dev API") is an instance of upstream
-changing an API out from under it. This requires repository Actions secrets, which are not yet
-configured — see the Actions section.
+**Verify after merging — no credentials required.** The check that matters is that the Fish Audio
+provider still builds and its unit tests pass; `82660c2b` ("Adapt Fish Audio provider to current
+upstream dev API") is an instance of upstream changing an API out from under it, and that class of
+break shows up at compile time or in the transformation tests.
+
+```
+cd core && go build ./... && go test ./providers/fishaudio/
+```
+
+Provider tests that call a live API skip themselves when their key is absent, so this passes with no
+API key set: the four `realtime_test.go` unit tests run, `TestFishAudio` and `TestFishAudioIntegration`
+skip, and the package reports `ok`. The same holds for the wider unit layer — upstream's
+`test-core-unit` step deliberately excludes every package whose tests import `core/internal/llmtests`,
+which is exactly the set that needs credentials.
+
+Hitting the real Fish Audio API is a separate, occasional check, not part of a sync. It needs one
+secret (`FISH_AUDIO_API_KEY`) and is worth doing before a release rather than on every merge.
+
+**A sync is not finished in this repository.** Deployment is defined separately, in REGALI's private
+infrastructure Terraform repository, which pins both the upstream Helm chart version and the container
+image tag. Merging upstream here changes nothing that is running until those pins are raised there.
+Treat the two as one unit of work: whoever performs the sync is responsible for the infrastructure
+bump, or for handing it over explicitly.
 
 **Upstream v2.0.0 is coming.** `transports/v2.0.0-prerelease3` was tagged 2026-08-13. A major
 version will not be an ordinary sync; budget for it separately rather than folding it into a
@@ -136,9 +155,14 @@ Disabled:
 | E2E Tests | only triggers on a stale upstream branch name |
 | Dependency Review | every upstream sync PR carries a large dependency diff |
 
-No repository Actions secrets are configured, so provider-credential tests in `pr-tests.yml` and
-`run-core-tests.yml` cannot pass as-is. Add the secrets this fork actually needs (for example
-`FISH_AUDIO_API_KEY`) before relying on those jobs.
+No repository Actions secrets are configured. This does not break anything: tests that call a live
+provider skip themselves when their key is absent, and the credential-free unit layer runs regardless.
+It only means `pr-tests.yml` and `run-core-tests.yml` currently exercise nothing that needs a key.
+
+If that changes, add only the keys this fork actually needs. Each provider's tests run only when its
+own key is present, so the cost follows what you add — and it is not proportional to the number of
+keys: upstream enables 3 scenarios for Fish Audio but 57 for OpenAI and 51 for Gemini, including
+image generation. Use a credential issued for testing, never a production key.
 
 ## Repository settings
 
