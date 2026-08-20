@@ -36,6 +36,64 @@ As of 2026-08-20, relative to upstream commit `0a8a38c9` (2026-08-15):
 Keep this table current when the fork gains or drops a change; it is the checklist for resolving
 conflicts during an upstream sync.
 
+## Upstream sync
+
+Direction decided 2026-08-20.
+
+**Track upstream `main` at release boundaries.** Sync from the `transports/v*` tags — the gateway
+releases, which are also what this fork's own `v*-regali.*` tags are numbered after. Do not track
+upstream `dev`: it took 640 commits in the 30 days to 2026-08-20 and carries unreleased work.
+
+**Cadence: at least once a month, up to the newest `transports/v*` tag at that time.** Upstream cut
+7 gateway releases between 2026-07-14 and 2026-08-15 — roughly one every 4–5 days — so following
+literally every release is more work than it is worth. A month is the ceiling on drift, not a target:
+the cost of a sync grows with the size of the gap, so a longer pause is not a saving.
+
+**How.** Merge, not rebase, into `main` through a pull request. Rebasing rewrites the fork's commits
+and forces the same conflicts to be resolved again on every replayed commit; a merge resolves them
+once. The `main` ruleset requires the PR regardless.
+
+```
+git fetch upstream --tags
+git switch -c sync/transports-vX.Y.Z main
+git merge transports/vX.Y.Z
+# resolve conflicts, then open a PR against main
+```
+
+**Where the conflicts will be.** Only in files this fork modified that upstream also touched. New
+files never conflict. As of 2026-08-20, 17 of the fork's 25 modified files had already changed
+upstream within 5 days — `core/bifrost.go`, `core/utils.go`, `core/schemas/bifrost.go`,
+`core/internal/llmtests/account.go`, `plugins/logging/operations.go`,
+`transports/bifrost-http/handlers/wsrealtime.go`, `transports/bifrost-http/handlers/realtime_turn_pipeline.go`,
+`transports/config.schema.json`, `ui/lib/constants/{config.ts,logs.ts}`, `docs/docs.json`,
+the generated `docs/openapi/openapi.json`, `core/go.{mod,sum}` and the two workflow files.
+
+The ~1,700 lines under `core/providers/fishaudio/` are new files and cost nothing to carry. Keep new
+behaviour in new files and hold edits to upstream files down to the few registration lines they
+genuinely need — that is what keeps a sync cheap.
+
+**Verify after merging.** At minimum the Fish Audio provider must still build and its tests pass;
+`82660c2b` ("Adapt Fish Audio provider to current upstream dev API") is an instance of upstream
+changing an API out from under it. This requires repository Actions secrets, which are not yet
+configured — see the Actions section.
+
+**Upstream v2.0.0 is coming.** `transports/v2.0.0-prerelease3` was tagged 2026-08-13. A major
+version will not be an ordinary sync; budget for it separately rather than folding it into a
+monthly pass.
+
+## Fish Audio provider: propose upstream
+
+Direction decided 2026-08-20: aim to contribute the Fish Audio provider to maximhq/bifrost.
+
+If upstream accepts it, the provider stops being fork divergence altogether and upstream maintains
+its compatibility — the class of work represented by `82660c2b` disappears, and the largest part of
+this fork's diff goes away. Upstream's own guides for this: `docs/contributing/adding-a-provider.mdx`,
+`docs/contributing/code-conventions.mdx`, `docs/contributing/raising-a-pr.mdx`.
+
+The trade-off is that the implementation goes under public review and the timing depends on
+upstream's judgement. Until it lands, the provider stays fork divergence and is synced like
+everything else here.
+
 ## Releases
 
 Push a tag matching `v*-regali.*` (for example `v1.6.11-regali.1`). `regali-docker-release.yml`
