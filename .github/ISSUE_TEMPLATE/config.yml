@@ -1,2 +1,10 @@
-blank_issues_enabled: false
-
+# This repository is REGALITECH's fork of maximhq/bifrost.
+# Issues here are for REGALI's own work on the fork; upstream product reports go upstream.
+blank_issues_enabled: true
+contact_links:
+  - name: Bifrost bugs and feature requests (upstream)
+    url: https://github.com/maximhq/bifrost/issues
+    about: This repo is a fork. Report Bifrost product issues to maximhq/bifrost, not here.
+  - name: How this fork is operated
+    url: https://github.com/REGALITECH/bifrost/blob/main/REGALI.md
+    about: Fork divergence, disabled workflows, release tags and upstream sync policy.
