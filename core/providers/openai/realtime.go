@@ -30,7 +30,7 @@ func (provider *OpenAIProvider) RealtimeWebSocketURL(key schemas.Key, model stri
 }
 
 // RealtimeHeaders returns the headers required for the OpenAI Realtime WebSocket connection.
-func (provider *OpenAIProvider) RealtimeHeaders(_ *schemas.BifrostContext, key schemas.Key) (map[string]string, *schemas.BifrostError) {
+func (provider *OpenAIProvider) RealtimeHeaders(_ *schemas.BifrostContext, key schemas.Key, _ string) (map[string]string, *schemas.BifrostError) {
 	headers := map[string]string{
 		"Authorization": "Bearer " + key.Value.GetValue(),
 	}

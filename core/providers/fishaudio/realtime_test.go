@@ -142,6 +142,29 @@ func TestFishRealtime_Capabilities(t *testing.T) {
 	var _ schemas.RealtimeInputUsageProvider = provider
 }
 
+func TestFishRealtime_HeadersModel(t *testing.T) {
+	provider := &FishAudioProvider{}
+
+	for _, tt := range []struct {
+		name  string
+		model string
+		want  string
+	}{
+		{name: "requested model", model: "s2.1-pro-free", want: "s2.1-pro-free"},
+		{name: "default model", want: fishDefaultModel},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			headers, err := provider.RealtimeHeaders(nil, schemas.Key{}, tt.model)
+			if err != nil {
+				t.Fatalf("RealtimeHeaders() error = %v", err)
+			}
+			if got := headers["model"]; got != tt.want {
+				t.Fatalf("RealtimeHeaders() model = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFishRealtime_InputUsage(t *testing.T) {
 	provider := &FishAudioProvider{}
 
