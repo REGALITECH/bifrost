@@ -499,7 +499,7 @@ func (h *WSRealtimeHandler) runRealtimeSession(
 		clientConn.writeRealtimeError(urlErr)
 		return
 	}
-	realtimeHeaders, headerErr := rtProvider.RealtimeHeaders(bifrostCtx, key)
+	realtimeHeaders, headerErr := realtimeHeadersForModel(bifrostCtx, rtProvider, key, model)
 	if headerErr != nil {
 		clientConn.writeRealtimeError(headerErr)
 		return

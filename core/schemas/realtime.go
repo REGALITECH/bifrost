@@ -219,6 +219,19 @@ type RealtimeInputUsageProvider interface {
 	RealtimeInputUsage(inputText string) *BifrostLLMUsage
 }
 
+// RealtimeModelHeadersProvider is an optional interface for realtime providers
+// whose upstream handshake headers depend on the requested model — e.g. Fish
+// Audio, which selects the tts-live model with a "model" header rather than in
+// the URL. When a provider implements it, the realtime transport calls
+// RealtimeHeadersForModel with the requested model (after key alias
+// resolution) instead of RealtimeProvider.RealtimeHeaders.
+//
+// Providers that do not implement this interface keep using RealtimeHeaders,
+// so existing realtime providers are unaffected.
+type RealtimeModelHeadersProvider interface {
+	RealtimeHeadersForModel(ctx *BifrostContext, key Key, model string) (map[string]string, *BifrostError)
+}
+
 // RealtimeLegacyWebRTCProvider is an optional interface for providers that
 // support the beta WebRTC handshake (e.g., OpenAI's /v1/realtime).
 // Only checked for legacy integration routes via type assertion.

@@ -140,6 +140,44 @@ func TestFishRealtime_Capabilities(t *testing.T) {
 	var _ schemas.RealtimeProvider = provider
 	var _ schemas.RealtimeBinaryProvider = provider
 	var _ schemas.RealtimeInputUsageProvider = provider
+	var _ schemas.RealtimeModelHeadersProvider = provider
+}
+
+func TestFishRealtime_HeadersModel(t *testing.T) {
+	provider := &FishAudioProvider{}
+
+	for _, tt := range []struct {
+		name  string
+		model string
+		want  string
+	}{
+		{name: "requested model", model: "s2.1-pro-free", want: "s2.1-pro-free"},
+		{name: "default model", want: fishDefaultModel},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			headers, err := provider.RealtimeHeadersForModel(nil, schemas.Key{}, tt.model)
+			if err != nil {
+				t.Fatalf("RealtimeHeadersForModel() error = %v", err)
+			}
+			if got := headers["model"]; got != tt.want {
+				t.Fatalf("RealtimeHeadersForModel() model = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	// RealtimeHeaders is the upstream interface method, which carries no model.
+	t.Run("RealtimeHeaders uses default model", func(t *testing.T) {
+		headers, err := provider.RealtimeHeaders(nil, schemas.Key{Value: *schemas.NewSecretVar("fish-key")})
+		if err != nil {
+			t.Fatalf("RealtimeHeaders() error = %v", err)
+		}
+		if got := headers["model"]; got != fishDefaultModel {
+			t.Fatalf("RealtimeHeaders() model = %q, want %q", got, fishDefaultModel)
+		}
+		if got := headers["Authorization"]; got != "Bearer fish-key" {
+			t.Fatalf("RealtimeHeaders() Authorization = %q, want %q", got, "Bearer fish-key")
+		}
+	})
 }
 
 func TestFishRealtime_InputUsage(t *testing.T) {
