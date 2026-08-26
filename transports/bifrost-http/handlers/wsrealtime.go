@@ -299,7 +299,7 @@ func (h *WSRealtimeHandler) runRealtimeSession(
 	bifrostCtx.SetValue(schemas.BifrostContextKeyRealtimeTransport, "websocket")
 
 	wsURL := rtProvider.RealtimeWebSocketURL(key, model)
-	realtimeHeaders, headerErr := rtProvider.RealtimeHeaders(bifrostCtx, key)
+	realtimeHeaders, headerErr := rtProvider.RealtimeHeaders(bifrostCtx, key, model)
 	if headerErr != nil {
 		clientConn.writeRealtimeError(headerErr)
 		return

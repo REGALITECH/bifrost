@@ -28,11 +28,6 @@ import (
 //   finish(stop) -> response.audio.done
 //   finish/err   -> error
 
-// fishRealtimeModel is the model variant header used for realtime synthesis.
-// The realtime interface does not surface the requested model to RealtimeHeaders,
-// so v1 uses Fish's recommended default.
-const fishRealtimeModel = fishDefaultModel
-
 // SupportsRealtimeAPI reports that Fish Audio supports the realtime WebSocket.
 func (provider *FishAudioProvider) SupportsRealtimeAPI() bool {
 	return true
@@ -51,8 +46,11 @@ func (provider *FishAudioProvider) RealtimeWebSocketURL(_ schemas.Key, _ string)
 }
 
 // RealtimeHeaders returns the auth + model headers for the tts-live handshake.
-func (provider *FishAudioProvider) RealtimeHeaders(_ *schemas.BifrostContext, key schemas.Key) (map[string]string, *schemas.BifrostError) {
-	headers := map[string]string{"model": fishRealtimeModel}
+func (provider *FishAudioProvider) RealtimeHeaders(_ *schemas.BifrostContext, key schemas.Key, model string) (map[string]string, *schemas.BifrostError) {
+	if model == "" {
+		model = fishDefaultModel
+	}
+	headers := map[string]string{"model": model}
 	if value := key.Value.GetValue(); value != "" {
 		headers["Authorization"] = "Bearer " + value
 	}

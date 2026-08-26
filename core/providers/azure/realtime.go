@@ -38,7 +38,7 @@ func (provider *AzureProvider) RealtimeWebSocketURL(key schemas.Key, model strin
 		endpoint, url.QueryEscape(model))
 }
 
-func (provider *AzureProvider) RealtimeHeaders(ctx *schemas.BifrostContext, key schemas.Key) (map[string]string, *schemas.BifrostError) {
+func (provider *AzureProvider) RealtimeHeaders(ctx *schemas.BifrostContext, key schemas.Key, _ string) (map[string]string, *schemas.BifrostError) {
 	value := key.Value.GetValue()
 
 	// Ephemeral tokens from /client_secrets use Bearer auth.
