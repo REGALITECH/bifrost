@@ -206,7 +206,41 @@ func fishRealtimeStartRequest(session *schemas.RealtimeSession) FishAudioTTSRequ
 	if session.Temperature != nil {
 		req.Temperature = session.Temperature
 	}
+
+	req.SampleRate = fishRealtimeExtraParam[int](session.ExtraParams, "sample_rate")
+	req.Normalize = fishRealtimeExtraParam[bool](session.ExtraParams, "normalize")
+	req.TopP = fishRealtimeExtraParam[float64](session.ExtraParams, "top_p")
+	req.ChunkLength = fishRealtimeExtraParam[int](session.ExtraParams, "chunk_length")
+	req.MaxNewTokens = fishRealtimeExtraParam[int](session.ExtraParams, "max_new_tokens")
+	req.RepetitionPenalty = fishRealtimeExtraParam[float64](session.ExtraParams, "repetition_penalty")
+	req.MinChunkLength = fishRealtimeExtraParam[int](session.ExtraParams, "min_chunk_length")
+	req.ConditionOnPreviousChunks = fishRealtimeExtraParam[bool](session.ExtraParams, "condition_on_previous_chunks")
+	req.EarlyStopThreshold = fishRealtimeExtraParam[float64](session.ExtraParams, "early_stop_threshold")
+	if latency := fishRealtimeExtraParam[string](session.ExtraParams, "latency"); latency != nil {
+		req.Latency = *latency
+	}
+
+	speed := fishRealtimeExtraParam[float64](session.ExtraParams, "speed")
+	volume := fishRealtimeExtraParam[float64](session.ExtraParams, "volume")
+	if speed != nil || volume != nil {
+		req.Prosody = &FishAudioProsody{Speed: speed, Volume: volume}
+	}
 	return req
+}
+
+// fishRealtimeExtraParam decodes a provider-specific session field while
+// preserving the distinction between an explicit zero value and an omitted or
+// null field. Invalid values are omitted so Fish can retain its own defaults.
+func fishRealtimeExtraParam[T any](extraParams map[string]json.RawMessage, key string) *T {
+	raw, ok := extraParams[key]
+	if !ok {
+		return nil
+	}
+	var value *T
+	if err := schemas.Unmarshal(raw, &value); err != nil {
+		return nil
+	}
+	return value
 }
 
 // fishRealtimeTextFromItem extracts input text from a conversation item's content,
