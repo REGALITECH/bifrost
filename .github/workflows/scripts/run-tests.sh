@@ -24,10 +24,10 @@ report_result() {
   
   if [ "$result" -eq 0 ]; then
     echo -e "${GREEN}✅ $test_name passed${NC}"
-    ((TESTS_PASSED++))
+    ((++TESTS_PASSED))
   else
     echo -e "${RED}❌ $test_name failed${NC}"
-    ((TESTS_FAILED++))
+    ((++TESTS_FAILED))
   fi
 }
 
@@ -169,4 +169,3 @@ else
   echo -e "${GREEN}✅ All tests passed successfully!${NC}"
   exit 0
 fi
-

@@ -1,7 +1,13 @@
 name: PR Tests (Requires Approval)
 
 on:
-  # Manual trigger only - requires admin to click "Run workflow" button
+  # Start the CI pipeline whenever a pull request targeting main is opened or updated.
+  # The secret-bearing test job remains protected by the pr-testing environment.
+  pull_request:
+    branches:
+      - main
+
+  # Keep manual runs available for reruns and branch-level validation.
   workflow_dispatch:
     inputs:
       pr_number:
@@ -40,9 +46,9 @@ jobs:
           COMMIT_MESSAGE=$(git log -1 --pretty=%B)
           FIRST_LINE=$(echo "$COMMIT_MESSAGE" | head -n 1)
           if [[ "$FIRST_LINE" == *"--skip-ci"* ]]; then
-            echo "should-skip=true" >> $GITHUB_OUTPUT
+            echo "should-skip=true" >> "$GITHUB_OUTPUT"
           else
-            echo "should-skip=false" >> $GITHUB_OUTPUT
+            echo "should-skip=false" >> "$GITHUB_OUTPUT"
           fi
 
   # This job shows up immediately and waits for approval
