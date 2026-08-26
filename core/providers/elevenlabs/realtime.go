@@ -26,7 +26,7 @@ func (provider *ElevenlabsProvider) RealtimeWebSocketURL(key schemas.Key, model 
 }
 
 // RealtimeHeaders returns the headers required for the ElevenLabs Conversational AI WebSocket.
-func (provider *ElevenlabsProvider) RealtimeHeaders(_ *schemas.BifrostContext, key schemas.Key) (map[string]string, *schemas.BifrostError) {
+func (provider *ElevenlabsProvider) RealtimeHeaders(_ *schemas.BifrostContext, key schemas.Key, _ string) (map[string]string, *schemas.BifrostError) {
 	headers := map[string]string{
 		"xi-api-key": key.Value.GetValue(),
 	}
