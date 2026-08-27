@@ -7,6 +7,8 @@ import (
 
 	"github.com/fasthttp/router"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/configstore"
+	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/valyala/fasthttp"
@@ -19,6 +21,8 @@ type fishAudioUsageTestPlugin struct {
 	preContext   *schemas.BifrostContext
 	postResponse *schemas.BifrostResponse
 	shortCircuit *schemas.LLMPluginShortCircuit
+	preCalls     int
+	postCalls    int
 }
 
 func (p *fishAudioUsageTestPlugin) GetName() string { return p.name }
@@ -28,12 +32,14 @@ func (p *fishAudioUsageTestPlugin) PreRequestHook(_ *schemas.BifrostContext, _ *
 }
 func (p *fishAudioUsageTestPlugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (*schemas.BifrostRequest, *schemas.LLMPluginShortCircuit, error) {
 	*p.events = append(*p.events, p.name+".pre")
+	p.preCalls++
 	p.preRequest = req
 	p.preContext = ctx
 	return req, p.shortCircuit, nil
 }
 func (p *fishAudioUsageTestPlugin) PostLLMHook(_ *schemas.BifrostContext, response *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError, error) {
 	*p.events = append(*p.events, p.name+".post")
+	p.postCalls++
 	p.postResponse = response
 	return response, bifrostErr, nil
 }
@@ -58,7 +64,10 @@ func newFishAudioUsageTestContext(body, virtualKey, requestID string) *fasthttp.
 func newFishAudioUsageTestHandler(events *[]string) (*FishAudioUsageHandler, *fishAudioUsageTestPlugin, *fishAudioUsageTestPlugin) {
 	loggingPlugin := &fishAudioUsageTestPlugin{name: "logging", events: events}
 	governancePlugin := &fishAudioUsageTestPlugin{name: "governance", events: events}
-	return NewFishAudioUsageHandler(nil, loggingPlugin, governancePlugin), loggingPlugin, governancePlugin
+	config := &lib.Config{ClientConfig: &configstore.ClientConfig{}}
+	plugins := []schemas.BasePlugin{loggingPlugin, governancePlugin}
+	config.BasePlugins.Store(&plugins)
+	return NewFishAudioUsageHandler(config, "logging", "governance"), loggingPlugin, governancePlugin
 }
 
 func TestFishAudioUsageHandlerRegistersRoute(t *testing.T) {
@@ -148,6 +157,57 @@ func TestFishAudioUsageHandlerReturnsGovernanceRejection(t *testing.T) {
 	assert.Equal(t, fasthttp.StatusForbidden, ctx.Response.StatusCode())
 	assert.Contains(t, string(ctx.Response.Body()), "virtual key is inactive")
 	assert.Equal(t, []string{"logging.pre", "governance.pre", "governance.post", "logging.post"}, events)
+}
+
+func TestFishAudioUsageHandlerUsesReloadedGovernancePlugin(t *testing.T) {
+	events := []string{}
+	loggingPlugin := &fishAudioUsageTestPlugin{name: "logging", events: &events}
+	oldGovernancePlugin := &fishAudioUsageTestPlugin{name: "governance", events: &events}
+	config := &lib.Config{ClientConfig: &configstore.ClientConfig{}}
+	plugins := []schemas.BasePlugin{loggingPlugin, oldGovernancePlugin}
+	config.BasePlugins.Store(&plugins)
+	handler := NewFishAudioUsageHandler(config, "logging", "governance")
+
+	firstCtx := newFishAudioUsageTestContext(`{"billable_bytes":42,"audio_ms":1250,"outcome":"completed","turn_id":"turn-1","sub_id":"sub-1","model":"s2-pro"}`, "vk-test", "usage-5")
+	handler.recordUsage(firstCtx)
+	require.Equal(t, fasthttp.StatusAccepted, firstCtx.Response.StatusCode(), string(firstCtx.Response.Body()))
+	assert.Equal(t, []string{"logging.pre", "governance.pre", "governance.post", "logging.post"}, events)
+	oldGovernanceContext := oldGovernancePlugin.preContext
+	oldGovernanceResponse := oldGovernancePlugin.postResponse
+
+	newGovernancePlugin := &fishAudioUsageTestPlugin{name: "governance", events: &events}
+	require.NoError(t, config.ReloadPlugin(newGovernancePlugin))
+	events = nil
+
+	secondCtx := newFishAudioUsageTestContext(`{"billable_bytes":24,"audio_ms":750,"outcome":"cache_hit","turn_id":"turn-2","sub_id":"sub-2","model":"s2-pro"}`, "vk-test", "usage-6")
+	handler.recordUsage(secondCtx)
+
+	require.Equal(t, fasthttp.StatusAccepted, secondCtx.Response.StatusCode(), string(secondCtx.Response.Body()))
+	assert.Equal(t, []string{"logging.pre", "governance.pre", "governance.post", "logging.post"}, events)
+	assert.Same(t, oldGovernanceContext, oldGovernancePlugin.preContext)
+	assert.Same(t, oldGovernanceResponse, oldGovernancePlugin.postResponse)
+	assert.Equal(t, 1, oldGovernancePlugin.preCalls)
+	assert.Equal(t, 1, oldGovernancePlugin.postCalls)
+	assert.NotNil(t, newGovernancePlugin.preContext)
+	assert.NotNil(t, newGovernancePlugin.postResponse)
+	assert.Equal(t, 1, newGovernancePlugin.preCalls)
+	assert.Equal(t, 1, newGovernancePlugin.postCalls)
+}
+
+func TestFishAudioUsageHandlerRequiresBothPlugins(t *testing.T) {
+	events := []string{}
+	loggingPlugin := &fishAudioUsageTestPlugin{name: "logging", events: &events}
+	config := &lib.Config{ClientConfig: &configstore.ClientConfig{}}
+	plugins := []schemas.BasePlugin{loggingPlugin}
+	config.BasePlugins.Store(&plugins)
+	handler := NewFishAudioUsageHandler(config, "logging", "governance")
+	ctx := newFishAudioUsageTestContext(`{"billable_bytes":42,"audio_ms":1250,"outcome":"completed","turn_id":"turn-1","sub_id":"sub-1","model":"s2-pro"}`, "vk-test", "usage-7")
+
+	handler.recordUsage(ctx)
+
+	assert.Equal(t, fasthttp.StatusServiceUnavailable, ctx.Response.StatusCode())
+	assert.Contains(t, string(ctx.Response.Body()), "Fish Audio usage recording requires the logging and governance plugins")
+	assert.Empty(t, events)
 }
 
 func TestValidateFishAudioUsageRequest(t *testing.T) {

@@ -1877,7 +1877,7 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 		governancePluginName = name
 	}
 	governancePlugin, _ := lib.FindPluginAs[schemas.LLMPlugin](s.Config, governancePluginName)
-	fishAudioUsageHandler := handlers.NewFishAudioUsageHandler(s.Config, loggerPlugin, governancePlugin)
+	fishAudioUsageHandler := handlers.NewFishAudioUsageHandler(s.Config, logging.PluginName, governancePluginName)
 	if governancePlugin != nil {
 		governanceHandler, err = handlers.NewGovernanceHandler(callbacks, s.Config.ConfigStore, govLogManager, s.ExternalQuotaBudgetResolver)
 		if err != nil {

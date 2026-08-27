@@ -29,9 +29,9 @@ var fishAudioUsageOutcomes = map[string]struct{}{
 // such as playback of a cached TTS clip. Callers must reuse x-request-id when
 // retrying; the existing logging and governance hooks use it for deduplication.
 type FishAudioUsageHandler struct {
-	handlerStore     lib.HandlerStore
-	loggingPlugin    schemas.LLMPlugin
-	governancePlugin schemas.LLMPlugin
+	config               *lib.Config
+	loggingPluginName    string
+	governancePluginName string
 }
 
 type fishAudioUsageRequest struct {
@@ -48,11 +48,11 @@ type fishAudioUsageResponse struct {
 	Status string `json:"status"`
 }
 
-func NewFishAudioUsageHandler(handlerStore lib.HandlerStore, loggingPlugin, governancePlugin schemas.LLMPlugin) *FishAudioUsageHandler {
+func NewFishAudioUsageHandler(config *lib.Config, loggingPluginName, governancePluginName string) *FishAudioUsageHandler {
 	return &FishAudioUsageHandler{
-		handlerStore:     handlerStore,
-		loggingPlugin:    loggingPlugin,
-		governancePlugin: governancePlugin,
+		config:               config,
+		loggingPluginName:    loggingPluginName,
+		governancePluginName: governancePluginName,
 	}
 }
 
@@ -61,7 +61,9 @@ func (h *FishAudioUsageHandler) RegisterRoutes(r *router.Router, middlewares ...
 }
 
 func (h *FishAudioUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
-	if h.loggingPlugin == nil || h.governancePlugin == nil {
+	loggingPlugin, _ := lib.FindPluginAs[schemas.LLMPlugin](h.config, h.loggingPluginName)
+	governancePlugin, _ := lib.FindPluginAs[schemas.LLMPlugin](h.config, h.governancePluginName)
+	if loggingPlugin == nil || governancePlugin == nil {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "Fish Audio usage recording requires the logging and governance plugins")
 		return
 	}
@@ -77,7 +79,7 @@ func (h *FishAudioUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	bifrostCtx, cancel := lib.ConvertToBifrostContext(ctx, h.handlerStore)
+	bifrostCtx, cancel := lib.ConvertToBifrostContext(ctx, h.config)
 	defer cancel()
 	virtualKey, _ := bifrostCtx.Value(schemas.BifrostContextKeyVirtualKey).(string)
 	if strings.TrimSpace(virtualKey) == "" {
@@ -114,11 +116,11 @@ func (h *FishAudioUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 	}
 	response.PopulateExtraFields(schemas.SpeechRequest, provider, model, model)
 
-	request, _, hookErr := h.loggingPlugin.PreLLMHook(bifrostCtx, request)
+	request, _, hookErr := loggingPlugin.PreLLMHook(bifrostCtx, request)
 	if hookErr != nil {
 		logger.Warn("Fish Audio usage logging pre-hook failed: %v", hookErr)
 	}
-	request, shortCircuit, hookErr := h.governancePlugin.PreLLMHook(bifrostCtx, request)
+	request, shortCircuit, hookErr := governancePlugin.PreLLMHook(bifrostCtx, request)
 	if hookErr != nil {
 		logger.Warn("Fish Audio usage governance pre-hook failed: %v", hookErr)
 	}
@@ -127,7 +129,7 @@ func (h *FishAudioUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 		if bifrostErr != nil {
 			bifrostErr.PopulateExtraFields(schemas.SpeechRequest, provider, model, model)
 		}
-		response, bifrostErr = h.runPostHooks(bifrostCtx, response, bifrostErr)
+		response, bifrostErr = h.runPostHooks(bifrostCtx, loggingPlugin, governancePlugin, response, bifrostErr)
 		if bifrostErr != nil {
 			SendBifrostError(ctx, bifrostErr)
 			return
@@ -140,7 +142,7 @@ func (h *FishAudioUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	response, bifrostErr := h.runPostHooks(bifrostCtx, response, nil)
+	response, bifrostErr := h.runPostHooks(bifrostCtx, loggingPlugin, governancePlugin, response, nil)
 	if bifrostErr != nil {
 		SendBifrostError(ctx, bifrostErr)
 		return
@@ -152,13 +154,13 @@ func (h *FishAudioUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 	SendJSONWithStatus(ctx, fishAudioUsageResponse{ID: requestID, Status: "accepted"}, fasthttp.StatusAccepted)
 }
 
-func (h *FishAudioUsageHandler) runPostHooks(ctx *schemas.BifrostContext, response *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError) {
+func (h *FishAudioUsageHandler) runPostHooks(ctx *schemas.BifrostContext, loggingPlugin, governancePlugin schemas.LLMPlugin, response *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError) {
 	var err error
-	response, bifrostErr, err = h.governancePlugin.PostLLMHook(ctx, response, bifrostErr)
+	response, bifrostErr, err = governancePlugin.PostLLMHook(ctx, response, bifrostErr)
 	if err != nil {
 		logger.Warn("Fish Audio usage governance post-hook failed: %v", err)
 	}
-	response, bifrostErr, err = h.loggingPlugin.PostLLMHook(ctx, response, bifrostErr)
+	response, bifrostErr, err = loggingPlugin.PostLLMHook(ctx, response, bifrostErr)
 	if err != nil {
 		logger.Warn("Fish Audio usage logging post-hook failed: %v", err)
 	}
