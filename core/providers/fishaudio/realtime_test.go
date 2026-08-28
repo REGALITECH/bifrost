@@ -147,6 +147,57 @@ func TestFishRealtime_SessionUpdateParameters(t *testing.T) {
 	assertPointerValue(t, "prosody.volume", req.Prosody.Volume, 0.0)
 }
 
+func TestFishRealtime_SessionUpdateOutputAudioFormat(t *testing.T) {
+	provider := &FishAudioProvider{}
+
+	for _, tt := range []struct {
+		name        string
+		sessionJSON string
+		wantFormat  string
+	}{
+		{
+			name:        "output_audio_format pcm16 is normalized to pcm",
+			sessionJSON: `{"output_audio_format":"pcm16"}`,
+			wantFormat:  "pcm",
+		},
+		{
+			name:        "legacy output_audio_type remains supported",
+			sessionJSON: `{"output_audio_type":"wav"}`,
+			wantFormat:  "wav",
+		},
+		{
+			name:        "output_audio_format takes precedence",
+			sessionJSON: `{"output_audio_format":"opus","output_audio_type":"wav"}`,
+			wantFormat:  "opus",
+		},
+		{
+			name:        "unknown format keeps pcm default",
+			sessionJSON: `{"output_audio_format":"flac"}`,
+			wantFormat:  "pcm",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(`{"type":"session.update","session":` + tt.sessionJSON + `}`)
+			event, err := schemas.ParseRealtimeEvent(raw)
+			if err != nil {
+				t.Fatalf("ParseRealtimeEvent() error = %v", err)
+			}
+			frame, err := provider.ToProviderRealtimeEvent(event)
+			if err != nil {
+				t.Fatalf("ToProviderRealtimeEvent() error = %v", err)
+			}
+
+			var start FishAudioStartEvent
+			if err := msgpack.Unmarshal(frame, &start); err != nil {
+				t.Fatalf("failed to msgpack-decode start event: %v", err)
+			}
+			if start.Request.Format != tt.wantFormat {
+				t.Errorf("format = %q, want %q", start.Request.Format, tt.wantFormat)
+			}
+		})
+	}
+}
+
 func TestFishRealtime_SessionUpdateOmitsOptionalParameters(t *testing.T) {
 	provider := &FishAudioProvider{}
 	event, err := schemas.ParseRealtimeEvent([]byte(`{"type":"session.update","session":{}}`))

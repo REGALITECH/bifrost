@@ -200,7 +200,11 @@ func fishRealtimeStartRequest(session *schemas.RealtimeSession) FishAudioTTSRequ
 	if voice := strings.TrimPrefix(strings.TrimSpace(session.Voice), string(schemas.FishAudio)+"/"); voice != "" {
 		req.ReferenceID = schemas.Ptr(voice)
 	}
-	if format := normalizeFishFormat(session.OutputAudioType); format != "" {
+	requestedFormat := session.OutputAudioFormat
+	if requestedFormat == "" {
+		requestedFormat = session.OutputAudioType
+	}
+	if format := normalizeFishFormat(requestedFormat); format != "" {
 		req.Format = format
 	}
 	if session.Temperature != nil {

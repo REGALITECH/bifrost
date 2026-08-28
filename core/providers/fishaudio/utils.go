@@ -248,10 +248,14 @@ func fishVoiceFromRequest(request *schemas.BifrostSpeechRequest) string {
 	return ""
 }
 
-// normalizeFishFormat returns the requested format if Fish supports it, or ""
-// to fall back to the default (mp3).
+// normalizeFishFormat returns the Fish-compatible format, or "" to fall back
+// to the default (mp3).
 func normalizeFishFormat(format string) string {
 	normalized := strings.ToLower(strings.TrimSpace(format))
+	// OpenAI Realtime clients call PCM "pcm16", while Fish accepts "pcm".
+	if normalized == "pcm16" {
+		return "pcm"
+	}
 	if _, ok := supportedFishFormats[normalized]; ok {
 		return normalized
 	}
