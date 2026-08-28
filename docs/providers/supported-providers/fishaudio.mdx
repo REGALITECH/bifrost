@@ -327,7 +327,7 @@ Fish's wire format is binary MessagePack rather than JSON, so the provider opts 
 
 | Client event (OpenAI-realtime JSON) | Fish event | Notes |
 |-------------------------------------|------------|-------|
-| `session.update` | `StartEvent` | `session.voice` → `reference_id`; `output_audio_type` → `format` (default `pcm`) |
+| `session.update` | `StartEvent` | `session.voice` → `reference_id`; `output_audio_format` → `format` (default `pcm`) |
 | `conversation.item.create` (input_text) | `TextEvent` | the text to synthesize |
 | `response.create` | `FlushEvent` | forces synthesis of buffered text |
 | `response.cancel` / disconnect | `CloseEvent` (stop) | ends the session |
