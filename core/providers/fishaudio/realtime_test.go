@@ -147,6 +147,19 @@ func TestFishRealtime_SessionUpdateParameters(t *testing.T) {
 	assertPointerValue(t, "prosody.volume", req.Prosody.Volume, 0.0)
 }
 
+func TestFishRealtime_SessionUpdateExplicitExtraParamsSampleRate(t *testing.T) {
+	event, err := schemas.ParseRealtimeEvent([]byte(`{
+		"type":"session.update",
+		"session":{"extra_params":{"sample_rate":16000}}
+	}`))
+	if err != nil {
+		t.Fatalf("ParseRealtimeEvent() error = %v", err)
+	}
+
+	req := fishRealtimeStartRequest(event.Session)
+	assertPointerValue(t, "sample_rate", req.SampleRate, 16000)
+}
+
 func TestFishRealtime_SessionUpdateOutputAudioFormat(t *testing.T) {
 	provider := &FishAudioProvider{}
 

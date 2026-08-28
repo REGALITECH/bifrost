@@ -378,9 +378,10 @@ func TestExecuteRequestWithRetries_OrdinaryRetryPaysBackoff(t *testing.T) {
 	if callCount != 2 {
 		t.Fatalf("expected 2 attempts, got %d", callCount)
 	}
-	if elapsed < 250*time.Millisecond {
-		t.Fatalf("an ordinary retryable failure must still back off (configured %s), took %s",
-			config.NetworkConfig.RetryBackoffInitial, elapsed)
+	minimumJitteredBackoff := time.Duration(float64(config.NetworkConfig.RetryBackoffInitial) * 0.8)
+	if elapsed < minimumJitteredBackoff {
+		t.Fatalf("an ordinary retryable failure must still back off (minimum jittered backoff %s), took %s",
+			minimumJitteredBackoff, elapsed)
 	}
 }
 
