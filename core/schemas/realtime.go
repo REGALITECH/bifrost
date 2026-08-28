@@ -298,26 +298,22 @@ func ParseRealtimeEvent(raw []byte) (*BifrostRealtimeEvent, error) {
 		if len(savedSession) > 0 && Unmarshal(savedSession, &sessionRoot) == nil {
 			for _, key := range []string{
 				"id", "model", "modalities", "instructions", "voice", "temperature",
-				"max_output_tokens", "turn_detection", "input_audio_format", "output_audio_format", "tools",
+				"max_output_tokens", "turn_detection", "input_audio_format", "output_audio_format", "tools", "extra_params",
 			} {
 				delete(sessionRoot, key)
 			}
-			if len(sessionRoot) > 0 {
-				event.Session.ExtraParams = sessionRoot
-			}
+			event.Session.ExtraParams = mergeRealtimeExtraParams(event.Session.ExtraParams, sessionRoot)
 		}
 	}
 	if event.Item != nil {
 		var itemRoot map[string]json.RawMessage
 		if len(savedItem) > 0 && Unmarshal(savedItem, &itemRoot) == nil {
 			for _, key := range []string{
-				"id", "type", "role", "status", "content", "name", "call_id", "arguments", "output",
+				"id", "type", "role", "status", "content", "name", "call_id", "arguments", "output", "extra_params",
 			} {
 				delete(itemRoot, key)
 			}
-			if len(itemRoot) > 0 {
-				event.Item.ExtraParams = itemRoot
-			}
+			event.Item.ExtraParams = mergeRealtimeExtraParams(event.Item.ExtraParams, itemRoot)
 		}
 	}
 	if event.Error != nil {
@@ -333,4 +329,20 @@ func ParseRealtimeEvent(raw []byte) (*BifrostRealtimeEvent, error) {
 	}
 
 	return event, nil
+}
+
+// mergeRealtimeExtraParams combines the caller's explicit extra_params object
+// with the unknown top-level fields left over after the known keys are removed,
+// so both spellings reach the provider. An explicit entry wins a key collision:
+// naming the field inside extra_params is the more deliberate of the two.
+func mergeRealtimeExtraParams(explicit, unknown map[string]json.RawMessage) map[string]json.RawMessage {
+	if len(explicit) == 0 {
+		return unknown
+	}
+	for key, value := range unknown {
+		if _, exists := explicit[key]; !exists {
+			explicit[key] = value
+		}
+	}
+	return explicit
 }
