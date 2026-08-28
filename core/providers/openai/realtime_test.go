@@ -699,6 +699,31 @@ func TestToProviderRealtimeEventSerializesNestedSessionExtraParams(t *testing.T)
 	}
 }
 
+func TestToProviderRealtimeEventSerializesSessionOutputAudioFormat(t *testing.T) {
+	t.Parallel()
+
+	provider := &OpenAIProvider{}
+	out, err := provider.ToProviderRealtimeEvent(&schemas.BifrostRealtimeEvent{
+		Type: schemas.RTEventSessionUpdate,
+		Session: &schemas.RealtimeSession{
+			OutputAudioFormat: "pcm16",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ToProviderRealtimeEvent() error = %v", err)
+	}
+
+	var payload struct {
+		Session map[string]any `json:"session"`
+	}
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if payload.Session["output_audio_format"] != "pcm16" {
+		t.Fatalf("session.output_audio_format = %v, want pcm16", payload.Session["output_audio_format"])
+	}
+}
+
 func TestToProviderRealtimeEventOmitsReadOnlySessionFieldsOnSessionUpdate(t *testing.T) {
 	t.Parallel()
 

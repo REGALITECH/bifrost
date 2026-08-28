@@ -110,18 +110,18 @@ type BifrostRealtimeEvent struct {
 
 // RealtimeSession describes session configuration for the Realtime connection.
 type RealtimeSession struct {
-	ID               string                     `json:"id,omitempty"`
-	Model            string                     `json:"model,omitempty"`
-	Modalities       []string                   `json:"modalities,omitempty"`
-	Instructions     string                     `json:"instructions,omitempty"`
-	Voice            string                     `json:"voice,omitempty"`
-	Temperature      *float64                   `json:"temperature,omitempty"`
-	MaxOutputTokens  json.RawMessage            `json:"max_output_tokens,omitempty"`
-	TurnDetection    json.RawMessage            `json:"turn_detection,omitempty"`
-	InputAudioFormat string                     `json:"input_audio_format,omitempty"`
-	OutputAudioType  string                     `json:"output_audio_type,omitempty"`
-	Tools            json.RawMessage            `json:"tools,omitempty"`
-	ExtraParams      map[string]json.RawMessage `json:"extra_params,omitempty"`
+	ID                string                     `json:"id,omitempty"`
+	Model             string                     `json:"model,omitempty"`
+	Modalities        []string                   `json:"modalities,omitempty"`
+	Instructions      string                     `json:"instructions,omitempty"`
+	Voice             string                     `json:"voice,omitempty"`
+	Temperature       *float64                   `json:"temperature,omitempty"`
+	MaxOutputTokens   json.RawMessage            `json:"max_output_tokens,omitempty"`
+	TurnDetection     json.RawMessage            `json:"turn_detection,omitempty"`
+	InputAudioFormat  string                     `json:"input_audio_format,omitempty"`
+	OutputAudioFormat string                     `json:"output_audio_format,omitempty"`
+	Tools             json.RawMessage            `json:"tools,omitempty"`
+	ExtraParams       map[string]json.RawMessage `json:"extra_params,omitempty"`
 }
 
 // RealtimeItem represents a conversation item in the Realtime protocol.
@@ -298,7 +298,7 @@ func ParseRealtimeEvent(raw []byte) (*BifrostRealtimeEvent, error) {
 		if len(savedSession) > 0 && Unmarshal(savedSession, &sessionRoot) == nil {
 			for _, key := range []string{
 				"id", "model", "modalities", "instructions", "voice", "temperature",
-				"max_output_tokens", "turn_detection", "input_audio_format", "output_audio_type", "tools",
+				"max_output_tokens", "turn_detection", "input_audio_format", "output_audio_format", "tools",
 			} {
 				delete(sessionRoot, key)
 			}

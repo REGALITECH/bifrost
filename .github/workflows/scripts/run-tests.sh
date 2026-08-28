@@ -24,10 +24,10 @@ report_result() {
   
   if [ "$result" -eq 0 ]; then
     echo -e "${GREEN}✅ $test_name passed${NC}"
-    ((TESTS_PASSED++))
+    ((++TESTS_PASSED))
   else
     echo -e "${RED}❌ $test_name failed${NC}"
-    ((TESTS_FAILED++))
+    ((++TESTS_FAILED))
   fi
 }
 
@@ -91,66 +91,32 @@ cd ..
 echo ""
 echo "🛡️  4/5 - Running Governance Tests..."
 echo "-----------------------------------"
-if [ -d "tests/governance" ]; then
-  cd tests/governance
-  
-  # Check if virtual environment exists, create if not
-  if [ ! -d "venv" ]; then
-    echo "Creating Python virtual environment..."
-    python3 -m venv venv
-  fi
-  
-  # Activate virtual environment
-  source venv/bin/activate
-  
-  # Install dependencies
-  echo "Installing Python dependencies..."
-  pip install -q -r requirements.txt
-  
-  # Run tests
-  if pytest -v; then
+if [ -f "tests/governance/go.mod" ]; then
+  if [ -z "${OPENAI_API_KEY:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] || [ -z "${OPENROUTER_API_KEY:-}" ]; then
+    echo -e "${YELLOW}⚠️  Governance E2E tests require OPENAI_API_KEY, ANTHROPIC_API_KEY, and OPENROUTER_API_KEY; skipping...${NC}"
+  elif ./.github/workflows/scripts/run-governance-e2e-tests.sh; then
     report_result "Governance Tests" 0
   else
     report_result "Governance Tests" 1
   fi
-  
-  deactivate
-  cd ../..
 else
-  echo -e "${YELLOW}⚠️  Governance tests directory not found, skipping...${NC}"
+  echo -e "${YELLOW}⚠️  Governance Go test module not found, skipping...${NC}"
 fi
 
 # 5. Integration Tests
 echo ""
 echo "🔗 5/5 - Running Integration Tests..."
 echo "-----------------------------------"
-if [ -d "tests/integrations" ]; then
-  cd tests/integrations
-  
-  # Check if virtual environment exists, create if not
-  if [ ! -d "venv" ]; then
-    echo "Creating Python virtual environment..."
-    python3 -m venv venv
-  fi
-  
-  # Activate virtual environment
-  source venv/bin/activate
-  
-  # Install dependencies
-  echo "Installing Python dependencies..."
-  pip install -q -r requirements.txt
-  
-  # Run tests
-  if python run_all_tests.py; then
+if [ -f "tests/integrations/python/pyproject.toml" ] && [ -f "tests/integrations/typescript/package.json" ]; then
+  if [ -z "${OPENAI_API_KEY:-}${ANTHROPIC_API_KEY:-}${GEMINI_API_KEY:-}${AZURE_API_KEY:-}${AWS_ACCESS_KEY_ID:-}" ]; then
+    echo -e "${YELLOW}⚠️  Integration tests require at least one provider credential; skipping...${NC}"
+  elif ./.github/workflows/scripts/test-integrations.sh; then
     report_result "Integration Tests" 0
   else
     report_result "Integration Tests" 1
   fi
-  
-  deactivate
-  cd ../..
 else
-  echo -e "${YELLOW}⚠️  Integration tests directory not found, skipping...${NC}"
+  echo -e "${YELLOW}⚠️  Integration test projects not found, skipping...${NC}"
 fi
 
 # Final Summary
@@ -169,4 +135,3 @@ else
   echo -e "${GREEN}✅ All tests passed successfully!${NC}"
   exit 0
 fi
-

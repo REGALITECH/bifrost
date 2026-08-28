@@ -83,6 +83,150 @@ func TestFishRealtime_ToProviderRealtimeEvent(t *testing.T) {
 	})
 }
 
+func TestFishRealtime_SessionUpdateParameters(t *testing.T) {
+	provider := &FishAudioProvider{}
+	raw := []byte(`{
+		"type": "session.update",
+		"session": {
+			"voice": "fishaudio/test-voice-id",
+			"output_audio_format": "pcm",
+			"temperature": 0.7,
+			"sample_rate": 16000,
+			"latency": "balanced",
+			"normalize": false,
+			"top_p": 0.9,
+			"speed": 1.0,
+			"volume": 0.0,
+			"chunk_length": 200,
+			"max_new_tokens": 1024,
+			"repetition_penalty": 1.2,
+			"min_chunk_length": 50,
+			"condition_on_previous_chunks": true,
+			"early_stop_threshold": 1.0
+		}
+	}`)
+
+	event, err := schemas.ParseRealtimeEvent(raw)
+	if err != nil {
+		t.Fatalf("ParseRealtimeEvent() error = %v", err)
+	}
+	frame, err := provider.ToProviderRealtimeEvent(event)
+	if err != nil {
+		t.Fatalf("ToProviderRealtimeEvent() error = %v", err)
+	}
+
+	var start FishAudioStartEvent
+	if err := msgpack.Unmarshal(frame, &start); err != nil {
+		t.Fatalf("failed to msgpack-decode start event: %v", err)
+	}
+	if start.Event != fishEventStart {
+		t.Fatalf("event = %q, want %q", start.Event, fishEventStart)
+	}
+	req := start.Request
+	if req.Format != "pcm" {
+		t.Errorf("format = %q, want pcm", req.Format)
+	}
+	assertPointerValue(t, "reference_id", req.ReferenceID, "test-voice-id")
+	assertPointerValue(t, "sample_rate", req.SampleRate, 16000)
+	if req.Latency != "balanced" {
+		t.Errorf("latency = %q, want balanced", req.Latency)
+	}
+	assertPointerValue(t, "normalize", req.Normalize, false)
+	assertPointerValue(t, "temperature", req.Temperature, 0.7)
+	assertPointerValue(t, "top_p", req.TopP, 0.9)
+	assertPointerValue(t, "chunk_length", req.ChunkLength, 200)
+	assertPointerValue(t, "max_new_tokens", req.MaxNewTokens, 1024)
+	assertPointerValue(t, "repetition_penalty", req.RepetitionPenalty, 1.2)
+	assertPointerValue(t, "min_chunk_length", req.MinChunkLength, 50)
+	assertPointerValue(t, "condition_on_previous_chunks", req.ConditionOnPreviousChunks, true)
+	assertPointerValue(t, "early_stop_threshold", req.EarlyStopThreshold, 1.0)
+	if req.Prosody == nil {
+		t.Fatal("prosody is nil")
+	}
+	assertPointerValue(t, "prosody.speed", req.Prosody.Speed, 1.0)
+	assertPointerValue(t, "prosody.volume", req.Prosody.Volume, 0.0)
+}
+
+func TestFishRealtime_SessionUpdateOutputAudioFormat(t *testing.T) {
+	provider := &FishAudioProvider{}
+
+	for _, tt := range []struct {
+		name        string
+		sessionJSON string
+		wantFormat  string
+	}{
+		{
+			name:        "output_audio_format pcm16 is normalized to pcm",
+			sessionJSON: `{"output_audio_format":"pcm16"}`,
+			wantFormat:  "pcm",
+		},
+		{
+			name:        "unknown format keeps pcm default",
+			sessionJSON: `{"output_audio_format":"flac"}`,
+			wantFormat:  "pcm",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(`{"type":"session.update","session":` + tt.sessionJSON + `}`)
+			event, err := schemas.ParseRealtimeEvent(raw)
+			if err != nil {
+				t.Fatalf("ParseRealtimeEvent() error = %v", err)
+			}
+			frame, err := provider.ToProviderRealtimeEvent(event)
+			if err != nil {
+				t.Fatalf("ToProviderRealtimeEvent() error = %v", err)
+			}
+
+			var start FishAudioStartEvent
+			if err := msgpack.Unmarshal(frame, &start); err != nil {
+				t.Fatalf("failed to msgpack-decode start event: %v", err)
+			}
+			if start.Request.Format != tt.wantFormat {
+				t.Errorf("format = %q, want %q", start.Request.Format, tt.wantFormat)
+			}
+		})
+	}
+}
+
+func TestFishRealtime_SessionUpdateOmitsOptionalParameters(t *testing.T) {
+	provider := &FishAudioProvider{}
+	event, err := schemas.ParseRealtimeEvent([]byte(`{"type":"session.update","session":{}}`))
+	if err != nil {
+		t.Fatalf("ParseRealtimeEvent() error = %v", err)
+	}
+	frame, err := provider.ToProviderRealtimeEvent(event)
+	if err != nil {
+		t.Fatalf("ToProviderRealtimeEvent() error = %v", err)
+	}
+	req, ok := decodeFishFrame(t, frame)["request"].(map[string]any)
+	if !ok {
+		t.Fatal("start event request is missing or invalid")
+	}
+	if req["format"] != "pcm" {
+		t.Errorf("format = %v, want pcm", req["format"])
+	}
+	for _, key := range []string{
+		"reference_id", "sample_rate", "latency", "normalize", "temperature", "top_p",
+		"prosody", "chunk_length", "max_new_tokens", "repetition_penalty", "min_chunk_length",
+		"condition_on_previous_chunks", "early_stop_threshold",
+	} {
+		if _, exists := req[key]; exists {
+			t.Errorf("optional field %q was unexpectedly serialized", key)
+		}
+	}
+}
+
+func assertPointerValue[T comparable](t *testing.T, name string, got *T, want T) {
+	t.Helper()
+	if got == nil {
+		t.Errorf("%s is nil, want %v", name, want)
+		return
+	}
+	if *got != want {
+		t.Errorf("%s = %v, want %v", name, *got, want)
+	}
+}
+
 func TestFishRealtime_ToBifrostRealtimeEvent(t *testing.T) {
 	provider := &FishAudioProvider{}
 
