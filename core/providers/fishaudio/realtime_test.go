@@ -89,7 +89,7 @@ func TestFishRealtime_SessionUpdateParameters(t *testing.T) {
 		"type": "session.update",
 		"session": {
 			"voice": "fishaudio/test-voice-id",
-			"output_audio_type": "pcm",
+			"output_audio_format": "pcm",
 			"temperature": 0.7,
 			"sample_rate": 16000,
 			"latency": "balanced",
@@ -159,16 +159,6 @@ func TestFishRealtime_SessionUpdateOutputAudioFormat(t *testing.T) {
 			name:        "output_audio_format pcm16 is normalized to pcm",
 			sessionJSON: `{"output_audio_format":"pcm16"}`,
 			wantFormat:  "pcm",
-		},
-		{
-			name:        "legacy output_audio_type remains supported",
-			sessionJSON: `{"output_audio_type":"wav"}`,
-			wantFormat:  "wav",
-		},
-		{
-			name:        "output_audio_format takes precedence",
-			sessionJSON: `{"output_audio_format":"opus","output_audio_type":"wav"}`,
-			wantFormat:  "opus",
 		},
 		{
 			name:        "unknown format keeps pcm default",

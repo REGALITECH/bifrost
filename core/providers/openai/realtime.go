@@ -582,7 +582,6 @@ type openAIRealtimeSession struct {
 	TurnDetection     json.RawMessage `json:"turn_detection,omitempty"`
 	InputAudioFormat  string          `json:"input_audio_format,omitempty"`
 	OutputAudioFormat string          `json:"output_audio_format,omitempty"`
-	OutputAudioType   string          `json:"output_audio_type,omitempty"`
 	Tools             json.RawMessage `json:"tools,omitempty"`
 }
 
@@ -646,10 +645,9 @@ func (provider *OpenAIProvider) ToBifrostRealtimeEvent(providerEvent json.RawMes
 				TurnDetection:     sess.TurnDetection,
 				InputAudioFormat:  sess.InputAudioFormat,
 				OutputAudioFormat: sess.OutputAudioFormat,
-				OutputAudioType:   sess.OutputAudioType,
 				Tools:             sess.Tools,
 			}
-			if extra := extractRealtimeNestedParams(raw.Session, "id", "model", "modalities", "instructions", "voice", "temperature", "max_output_tokens", "turn_detection", "input_audio_format", "output_audio_format", "output_audio_type", "tools"); len(extra) > 0 {
+			if extra := extractRealtimeNestedParams(raw.Session, "id", "model", "modalities", "instructions", "voice", "temperature", "max_output_tokens", "turn_detection", "input_audio_format", "output_audio_format", "tools"); len(extra) > 0 {
 				event.Session.ExtraParams = extra
 			}
 		}
@@ -748,9 +746,6 @@ func (provider *OpenAIProvider) ToProviderRealtimeEvent(bifrostEvent *schemas.Bi
 		}
 		if bifrostEvent.Session.OutputAudioFormat != "" {
 			sess["output_audio_format"] = bifrostEvent.Session.OutputAudioFormat
-		}
-		if bifrostEvent.Session.OutputAudioType != "" {
-			sess["output_audio_type"] = bifrostEvent.Session.OutputAudioType
 		}
 		if bifrostEvent.Session.Tools != nil {
 			sess["tools"] = bifrostEvent.Session.Tools

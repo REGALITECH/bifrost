@@ -120,7 +120,6 @@ type RealtimeSession struct {
 	TurnDetection     json.RawMessage            `json:"turn_detection,omitempty"`
 	InputAudioFormat  string                     `json:"input_audio_format,omitempty"`
 	OutputAudioFormat string                     `json:"output_audio_format,omitempty"`
-	OutputAudioType   string                     `json:"output_audio_type,omitempty"`
 	Tools             json.RawMessage            `json:"tools,omitempty"`
 	ExtraParams       map[string]json.RawMessage `json:"extra_params,omitempty"`
 }
@@ -299,7 +298,7 @@ func ParseRealtimeEvent(raw []byte) (*BifrostRealtimeEvent, error) {
 		if len(savedSession) > 0 && Unmarshal(savedSession, &sessionRoot) == nil {
 			for _, key := range []string{
 				"id", "model", "modalities", "instructions", "voice", "temperature",
-				"max_output_tokens", "turn_detection", "input_audio_format", "output_audio_format", "output_audio_type", "tools",
+				"max_output_tokens", "turn_detection", "input_audio_format", "output_audio_format", "tools",
 			} {
 				delete(sessionRoot, key)
 			}
