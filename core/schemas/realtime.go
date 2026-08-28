@@ -335,11 +335,11 @@ func ParseRealtimeEvent(raw []byte) (*BifrostRealtimeEvent, error) {
 // with the unknown top-level fields left over after the known keys are removed,
 // so both spellings reach the provider. An explicit entry wins a key collision:
 // naming the field inside extra_params is the more deliberate of the two.
-func mergeRealtimeExtraParams(explicit, unknown map[string]json.RawMessage) map[string]json.RawMessage {
+func mergeRealtimeExtraParams(explicit, topLevelExtras map[string]json.RawMessage) map[string]json.RawMessage {
 	if len(explicit) == 0 {
-		return unknown
+		return topLevelExtras
 	}
-	for key, value := range unknown {
+	for key, value := range topLevelExtras {
 		if _, exists := explicit[key]; !exists {
 			explicit[key] = value
 		}
