@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"math"
 	"strconv"
 	"strings"
 
@@ -182,9 +181,6 @@ func decodeSTTUsageRequest(body []byte) (*sttUsageRequest, error) {
 func validateSTTUsageRequest(payload *sttUsageRequest) (schemas.ModelProvider, string, error) {
 	if payload.AudioMS == nil || *payload.AudioMS < 0 {
 		return "", "", fmt.Errorf("audio_ms is required and must be non-negative")
-	}
-	if *payload.AudioMS > int64(math.MaxInt) {
-		return "", "", fmt.Errorf("audio_ms is too large")
 	}
 	if payload.Turns == nil || *payload.Turns < 0 {
 		return "", "", fmt.Errorf("turns is required and must be non-negative")
