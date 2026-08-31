@@ -16,7 +16,7 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-const sttUsagePath = "/v1/stt/usage"
+const sttUsagePath = "/v1/audio/transcriptions/usage"
 
 var sttUsageOutcomes = map[string]struct{}{
 	"completed": {},
