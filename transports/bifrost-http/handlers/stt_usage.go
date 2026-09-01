@@ -106,10 +106,17 @@ func (h *STTUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 			Model:    model,
 		},
 	}
-	seconds := float64(*payload.AudioMS) / 1000.0
+	ms := int(*payload.AudioMS)
+	zero := 0
 	response := &schemas.BifrostResponse{
 		TranscriptionResponse: &schemas.BifrostTranscriptionResponse{
-			Usage: &schemas.TranscriptionUsage{Type: "duration", Seconds: &seconds},
+			// External duration is accounted as integer milliseconds; one accounting token equals one millisecond.
+			Usage: &schemas.TranscriptionUsage{
+				Type:         "tokens",
+				InputTokens:  &ms,
+				OutputTokens: &zero,
+				TotalTokens:  &ms,
+			},
 		},
 	}
 	response.PopulateExtraFields(schemas.TranscriptionRequest, provider, model, model)
