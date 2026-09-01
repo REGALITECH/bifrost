@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"strconv"
 	"strings"
 
@@ -20,6 +21,15 @@ const transcriptionUsagePath = "/v1/audio/transcriptions/usage"
 var transcriptionUsageOutcomes = map[string]struct{}{
 	"completed": {},
 	"failed":    {},
+}
+
+// transcriptionUsageModels is the closed set of ASR usage model names this
+// endpoint records. Adding a billable engine means adding it here alongside
+// its pricing entry; "unknown" keeps unconfigured dev engines visible at
+// zero price instead of silently dropping their usage.
+var transcriptionUsageModels = map[string]struct{}{
+	"qwen3-asr": {},
+	"unknown":   {},
 }
 
 // TranscriptionUsageHandler records transcription usage that occurred outside Bifrost. Callers
@@ -189,6 +199,9 @@ func validateTranscriptionUsageRequest(payload *transcriptionUsageRequest) (sche
 	if payload.AudioMS == nil || *payload.AudioMS < 0 {
 		return "", "", fmt.Errorf("audio_ms is required and must be non-negative")
 	}
+	if *payload.AudioMS > int64(math.MaxInt) {
+		return "", "", fmt.Errorf("audio_ms is too large")
+	}
 	if payload.Turns == nil || *payload.Turns < 0 {
 		return "", "", fmt.Errorf("turns is required and must be non-negative")
 	}
@@ -211,6 +224,9 @@ func validateTranscriptionUsageRequest(payload *transcriptionUsageRequest) (sche
 	}
 	if strings.TrimSpace(model) == "" {
 		return "", "", fmt.Errorf("model is required")
+	}
+	if _, ok := transcriptionUsageModels[model]; !ok {
+		return "", "", fmt.Errorf("model must be a known ASR usage model")
 	}
 	return provider, model, nil
 }

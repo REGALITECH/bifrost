@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"encoding/json"
+	"math"
 	"net"
+	"strconv"
 	"testing"
 
 	"github.com/fasthttp/router"
@@ -126,6 +128,16 @@ func TestTranscriptionUsageHandlerRecordsUsage(t *testing.T) {
 	assert.Equal(t, "7", dimensions["seq"])
 	assert.Equal(t, "vk-test", loggingPlugin.preContext.Value(schemas.BifrostContextKeyVirtualKey))
 	assert.Equal(t, true, loggingPlugin.preContext.Value(schemas.BifrostContextKeySkipBudgetAndRateLimits))
+}
+
+func TestTranscriptionUsageHandlerAcceptsUnknownModel(t *testing.T) {
+	events := []string{}
+	handler, _, _ := newTranscriptionUsageTestHandler(&events)
+	ctx := newTranscriptionUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"unknown"}`, "vk-test", "usage-unknown")
+
+	handler.recordUsage(ctx)
+
+	require.Equal(t, fasthttp.StatusAccepted, ctx.Response.StatusCode(), string(ctx.Response.Body()))
 }
 
 func TestTranscriptionUsageHandlerRejectsUnknownField(t *testing.T) {
@@ -253,6 +265,8 @@ func TestTranscriptionUsageValidateRequest(t *testing.T) {
 		{name: "missing model", payload: transcriptionUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero}, errorString: "model is required"},
 		{name: "blank provider model", payload: transcriptionUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "vllm/"}, errorString: "model is required"},
 		{name: "wrong provider", payload: transcriptionUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "openai/whisper-1"}, errorString: "model must use the vllm provider"},
+		{name: "unknown prefix-less model", payload: transcriptionUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "llama-3"}, errorString: "model must be a known ASR usage model"},
+		{name: "unknown vllm model", payload: transcriptionUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "vllm/llama-3"}, errorString: "model must be a known ASR usage model"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -260,4 +274,24 @@ func TestTranscriptionUsageValidateRequest(t *testing.T) {
 			require.EqualError(t, err, test.errorString)
 		})
 	}
+}
+
+func TestTranscriptionUsageValidateRequestRejectsAudioMSOverflow(t *testing.T) {
+	if strconv.IntSize == 64 {
+		t.Skip("int64 audio_ms cannot exceed math.MaxInt on 64-bit platforms")
+	}
+
+	overflow := int64(math.MaxInt32) + 1
+	zero := int64(0)
+	payload := transcriptionUsageRequest{
+		AudioMS:   &overflow,
+		Turns:     &zero,
+		Outcome:   "failed",
+		SessionID: "session",
+		Seq:       &zero,
+		Model:     "qwen3-asr",
+	}
+
+	_, _, err := validateTranscriptionUsageRequest(&payload)
+	require.EqualError(t, err, "audio_ms is too large")
 }
