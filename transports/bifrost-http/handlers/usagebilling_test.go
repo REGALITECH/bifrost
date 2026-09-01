@@ -267,3 +267,61 @@ func TestFishAudioUsageRetryBilling(t *testing.T) {
 		}
 	})
 }
+
+const transcriptionUsageBillingBody = `{"audio_ms":2500,"turns":1,"outcome":"completed","session_id":"session-1","seq":1,"model":"vllm/qwen3-asr"}`
+
+func TestTranscriptionUsageRunsHooksInCoreOrder(t *testing.T) {
+	SetLogger(testLogger{})
+	calls := []string{}
+	loggingPlugin := &usageHookRecorder{name: "logging", calls: &calls}
+	governancePlugin := &usageHookRecorder{name: "governance", calls: &calls}
+	config := &lib.Config{ClientConfig: &configstore.ClientConfig{}}
+	plugins := []schemas.BasePlugin{loggingPlugin, governancePlugin}
+	config.BasePlugins.Store(&plugins)
+	handler := NewTranscriptionUsageHandler(config, "logging", "governance")
+
+	ctx := newTranscriptionUsageTestContext(transcriptionUsageBillingBody, "sk-bf-secret", "report-1")
+	handler.recordUsage(ctx)
+
+	require.Equal(t, fasthttp.StatusAccepted, ctx.Response.StatusCode(), string(ctx.Response.Body()))
+	assert.Equal(t, usageHookCoreOrder, calls)
+	// Nothing resolved the key, so the nonce falls back to the presented one.
+	assert.Equal(t, expectedUsageBillingNonce("sk-bf-secret", "report-1"), governancePlugin.postNonce)
+}
+
+func TestTranscriptionUsageWithRealGovernance(t *testing.T) {
+	SetLogger(testLogger{})
+	gov := newUsageBillingGovernance(t, schemas.VLLM)
+	calls := []string{}
+	loggingPlugin := &usageHookRecorder{name: "logging", calls: &calls}
+	config := &lib.Config{ClientConfig: &configstore.ClientConfig{}}
+	plugins := []schemas.BasePlugin{loggingPlugin, gov}
+	config.BasePlugins.Store(&plugins)
+	handler := NewTranscriptionUsageHandler(config, "logging", governance.PluginName)
+
+	ctx := newTranscriptionUsageTestContext(transcriptionUsageBillingBody, usageBillingVKA.value, "report-1")
+	handler.recordUsage(ctx)
+
+	require.Equal(t, fasthttp.StatusAccepted, ctx.Response.StatusCode(), string(ctx.Response.Body()))
+	// Governance's PreRequestHook ran before logging's PreLLMHook, as in core:
+	// the provider was stamped for access resolution and the key resolved.
+	assert.Equal(t, string(schemas.VLLM), loggingPlugin.preProvider)
+	assert.Equal(t, usageBillingVKA.id, loggingPlugin.preVKID)
+	assert.Equal(t, expectedUsageBillingNonce(usageBillingVKA.id, "report-1"), loggingPlugin.postNonce)
+	assert.Equal(t, map[string]int64{usageBillingVKA.id: 1, usageBillingVKB.id: 0}, billedRequests(t, gov))
+}
+
+func TestTranscriptionUsageRetryBilling(t *testing.T) {
+	SetLogger(testLogger{})
+	runUsageBillingCases(t, schemas.VLLM, func(t *testing.T, gov *governance.GovernancePlugin) func(usageReport) int {
+		events := []string{}
+		handler, loggingPlugin, _ := newTranscriptionUsageTestHandler(&events)
+		plugins := []schemas.BasePlugin{loggingPlugin, gov}
+		handler.config.BasePlugins.Store(&plugins)
+		return func(report usageReport) int {
+			ctx := newTranscriptionUsageTestContext(transcriptionUsageBillingBody, report.vk.value, report.requestID)
+			handler.recordUsage(ctx)
+			return ctx.Response.StatusCode()
+		}
+	})
+}
