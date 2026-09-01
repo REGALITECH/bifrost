@@ -76,7 +76,7 @@ func TestSTTUsageHandlerRegistersRoute(t *testing.T) {
 	r := router.New()
 	handler.RegisterRoutes(r)
 
-	ctx := newSTTUsageTestContext(`{"audio_ms":300,"turns":1,"outcome":"completed","session_id":"session-1","seq":0,"model":"stt-qwen3-asr"}`, "vk-test", "usage-1")
+	ctx := newSTTUsageTestContext(`{"audio_ms":300,"turns":1,"outcome":"completed","session_id":"session-1","seq":0,"model":"qwen3-asr"}`, "vk-test", "usage-1")
 	r.Handler(ctx)
 
 	require.Equal(t, fasthttp.StatusAccepted, ctx.Response.StatusCode(), string(ctx.Response.Body()))
@@ -85,7 +85,7 @@ func TestSTTUsageHandlerRegistersRoute(t *testing.T) {
 func TestSTTUsageHandlerRecordsTranscriptionUsage(t *testing.T) {
 	events := []string{}
 	handler, loggingPlugin, governancePlugin := newSTTUsageTestHandler(&events)
-	ctx := newSTTUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"vllm/stt-qwen3-asr"}`, "vk-test", "usage-request-1")
+	ctx := newSTTUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"vllm/qwen3-asr"}`, "vk-test", "usage-request-1")
 
 	handler.recordUsage(ctx)
 
@@ -99,7 +99,7 @@ func TestSTTUsageHandlerRecordsTranscriptionUsage(t *testing.T) {
 	assert.Equal(t, schemas.TranscriptionRequest, loggingPlugin.preRequest.RequestType)
 	require.NotNil(t, loggingPlugin.preRequest.TranscriptionRequest)
 	assert.Equal(t, schemas.VLLM, loggingPlugin.preRequest.TranscriptionRequest.Provider)
-	assert.Equal(t, "stt-qwen3-asr", loggingPlugin.preRequest.TranscriptionRequest.Model)
+	assert.Equal(t, "qwen3-asr", loggingPlugin.preRequest.TranscriptionRequest.Model)
 	assert.Nil(t, loggingPlugin.preRequest.TranscriptionRequest.Input, "audio must never enter the logging pipeline")
 
 	require.NotNil(t, governancePlugin.postResponse)
@@ -131,7 +131,7 @@ func TestSTTUsageHandlerRecordsTranscriptionUsage(t *testing.T) {
 func TestSTTUsageHandlerRejectsUnknownField(t *testing.T) {
 	events := []string{}
 	handler, _, _ := newSTTUsageTestHandler(&events)
-	ctx := newSTTUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"stt-qwen3-asr","text":"secret"}`, "vk-test", "usage-2")
+	ctx := newSTTUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"qwen3-asr","text":"secret"}`, "vk-test", "usage-2")
 
 	handler.recordUsage(ctx)
 
@@ -143,7 +143,7 @@ func TestSTTUsageHandlerRejectsUnknownField(t *testing.T) {
 func TestSTTUsageHandlerRejectsMultipleJSONValues(t *testing.T) {
 	events := []string{}
 	handler, _, _ := newSTTUsageTestHandler(&events)
-	ctx := newSTTUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"stt-qwen3-asr"} {}`, "vk-test", "usage-3")
+	ctx := newSTTUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"qwen3-asr"} {}`, "vk-test", "usage-3")
 
 	handler.recordUsage(ctx)
 
@@ -155,7 +155,7 @@ func TestSTTUsageHandlerRejectsMultipleJSONValues(t *testing.T) {
 func TestSTTUsageHandlerRequiresVirtualKey(t *testing.T) {
 	events := []string{}
 	handler, _, _ := newSTTUsageTestHandler(&events)
-	ctx := newSTTUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"stt-qwen3-asr"}`, "", "usage-4")
+	ctx := newSTTUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"qwen3-asr"}`, "", "usage-4")
 
 	handler.recordUsage(ctx)
 
@@ -172,7 +172,7 @@ func TestSTTUsageHandlerReturnsGovernanceRejection(t *testing.T) {
 		StatusCode: &status,
 		Error:      &schemas.ErrorField{Message: "virtual key is inactive"},
 	}}
-	ctx := newSTTUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"stt-qwen3-asr"}`, "vk-test", "usage-5")
+	ctx := newSTTUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"qwen3-asr"}`, "vk-test", "usage-5")
 
 	handler.recordUsage(ctx)
 
@@ -190,7 +190,7 @@ func TestSTTUsageHandlerUsesReloadedGovernancePlugin(t *testing.T) {
 	config.BasePlugins.Store(&plugins)
 	handler := NewSTTUsageHandler(config, "logging", "governance")
 
-	firstCtx := newSTTUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"stt-qwen3-asr"}`, "vk-test", "usage-6")
+	firstCtx := newSTTUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"qwen3-asr"}`, "vk-test", "usage-6")
 	handler.recordUsage(firstCtx)
 	require.Equal(t, fasthttp.StatusAccepted, firstCtx.Response.StatusCode(), string(firstCtx.Response.Body()))
 	assert.Equal(t, []string{"logging.pre", "governance.pre", "governance.post", "logging.post"}, events)
@@ -201,7 +201,7 @@ func TestSTTUsageHandlerUsesReloadedGovernancePlugin(t *testing.T) {
 	require.NoError(t, config.ReloadPlugin(newGovernancePlugin))
 	events = nil
 
-	secondCtx := newSTTUsageTestContext(`{"audio_ms":2500,"turns":1,"outcome":"failed","session_id":"session-2","seq":8,"model":"stt-qwen3-asr"}`, "vk-test", "usage-7")
+	secondCtx := newSTTUsageTestContext(`{"audio_ms":2500,"turns":1,"outcome":"failed","session_id":"session-2","seq":8,"model":"qwen3-asr"}`, "vk-test", "usage-7")
 	handler.recordUsage(secondCtx)
 
 	require.Equal(t, fasthttp.StatusAccepted, secondCtx.Response.StatusCode(), string(secondCtx.Response.Body()))
@@ -223,7 +223,7 @@ func TestSTTUsageHandlerRequiresBothPlugins(t *testing.T) {
 	plugins := []schemas.BasePlugin{loggingPlugin}
 	config.BasePlugins.Store(&plugins)
 	handler := NewSTTUsageHandler(config, "logging", "governance")
-	ctx := newSTTUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"stt-qwen3-asr"}`, "vk-test", "usage-8")
+	ctx := newSTTUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"qwen3-asr"}`, "vk-test", "usage-8")
 
 	handler.recordUsage(ctx)
 
@@ -240,16 +240,16 @@ func TestSTTUsageValidateRequest(t *testing.T) {
 		payload     sttUsageRequest
 		errorString string
 	}{
-		{name: "missing audio duration", payload: sttUsageRequest{Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "stt-qwen3-asr"}, errorString: "audio_ms is required and must be non-negative"},
-		{name: "negative audio duration", payload: sttUsageRequest{AudioMS: &negative, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "stt-qwen3-asr"}, errorString: "audio_ms is required and must be non-negative"},
-		{name: "missing turns", payload: sttUsageRequest{AudioMS: &zero, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "stt-qwen3-asr"}, errorString: "turns is required and must be non-negative"},
-		{name: "negative turns", payload: sttUsageRequest{AudioMS: &zero, Turns: &negative, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "stt-qwen3-asr"}, errorString: "turns is required and must be non-negative"},
-		{name: "missing outcome", payload: sttUsageRequest{AudioMS: &zero, Turns: &zero, SessionID: "session", Seq: &zero, Model: "stt-qwen3-asr"}, errorString: "outcome must be one of completed or failed"},
-		{name: "invalid outcome", payload: sttUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "other", SessionID: "session", Seq: &zero, Model: "stt-qwen3-asr"}, errorString: "outcome must be one of completed or failed"},
-		{name: "missing session ID", payload: sttUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", Seq: &zero, Model: "stt-qwen3-asr"}, errorString: "session_id is required"},
-		{name: "blank session ID", payload: sttUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "  ", Seq: &zero, Model: "stt-qwen3-asr"}, errorString: "session_id is required"},
-		{name: "missing sequence", payload: sttUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Model: "stt-qwen3-asr"}, errorString: "seq is required and must be non-negative"},
-		{name: "negative sequence", payload: sttUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &negative, Model: "stt-qwen3-asr"}, errorString: "seq is required and must be non-negative"},
+		{name: "missing audio duration", payload: sttUsageRequest{Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "qwen3-asr"}, errorString: "audio_ms is required and must be non-negative"},
+		{name: "negative audio duration", payload: sttUsageRequest{AudioMS: &negative, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "qwen3-asr"}, errorString: "audio_ms is required and must be non-negative"},
+		{name: "missing turns", payload: sttUsageRequest{AudioMS: &zero, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "qwen3-asr"}, errorString: "turns is required and must be non-negative"},
+		{name: "negative turns", payload: sttUsageRequest{AudioMS: &zero, Turns: &negative, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "qwen3-asr"}, errorString: "turns is required and must be non-negative"},
+		{name: "missing outcome", payload: sttUsageRequest{AudioMS: &zero, Turns: &zero, SessionID: "session", Seq: &zero, Model: "qwen3-asr"}, errorString: "outcome must be one of completed or failed"},
+		{name: "invalid outcome", payload: sttUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "other", SessionID: "session", Seq: &zero, Model: "qwen3-asr"}, errorString: "outcome must be one of completed or failed"},
+		{name: "missing session ID", payload: sttUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", Seq: &zero, Model: "qwen3-asr"}, errorString: "session_id is required"},
+		{name: "blank session ID", payload: sttUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "  ", Seq: &zero, Model: "qwen3-asr"}, errorString: "session_id is required"},
+		{name: "missing sequence", payload: sttUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Model: "qwen3-asr"}, errorString: "seq is required and must be non-negative"},
+		{name: "negative sequence", payload: sttUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &negative, Model: "qwen3-asr"}, errorString: "seq is required and must be non-negative"},
 		{name: "missing model", payload: sttUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero}, errorString: "model is required"},
 		{name: "blank provider model", payload: sttUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "vllm/"}, errorString: "model is required"},
 		{name: "wrong provider", payload: sttUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "openai/whisper-1"}, errorString: "model must use the vllm provider"},
