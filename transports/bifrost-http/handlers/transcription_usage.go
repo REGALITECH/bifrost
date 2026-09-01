@@ -15,23 +15,23 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-const sttUsagePath = "/v1/audio/transcriptions/usage"
+const transcriptionUsagePath = "/v1/audio/transcriptions/usage"
 
-var sttUsageOutcomes = map[string]struct{}{
+var transcriptionUsageOutcomes = map[string]struct{}{
 	"completed": {},
 	"failed":    {},
 }
 
-// STTUsageHandler records STT usage that occurred outside Bifrost. Callers
+// TranscriptionUsageHandler records transcription usage that occurred outside Bifrost. Callers
 // must reuse x-request-id when retrying; the existing logging and governance
 // hooks use it for deduplication.
-type STTUsageHandler struct {
+type TranscriptionUsageHandler struct {
 	config               *lib.Config
 	loggingPluginName    string
 	governancePluginName string
 }
 
-type sttUsageRequest struct {
+type transcriptionUsageRequest struct {
 	AudioMS   *int64 `json:"audio_ms"`
 	Turns     *int64 `json:"turns"`
 	Outcome   string `json:"outcome"`
@@ -40,37 +40,37 @@ type sttUsageRequest struct {
 	Model     string `json:"model"`
 }
 
-type sttUsageResponse struct {
+type transcriptionUsageResponse struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
 }
 
-func NewSTTUsageHandler(config *lib.Config, loggingPluginName, governancePluginName string) *STTUsageHandler {
-	return &STTUsageHandler{
+func NewTranscriptionUsageHandler(config *lib.Config, loggingPluginName, governancePluginName string) *TranscriptionUsageHandler {
+	return &TranscriptionUsageHandler{
 		config:               config,
 		loggingPluginName:    loggingPluginName,
 		governancePluginName: governancePluginName,
 	}
 }
 
-func (h *STTUsageHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.BifrostHTTPMiddleware) {
-	r.POST(sttUsagePath, lib.ChainMiddlewares(h.recordUsage, middlewares...))
+func (h *TranscriptionUsageHandler) RegisterRoutes(r *router.Router, middlewares ...schemas.BifrostHTTPMiddleware) {
+	r.POST(transcriptionUsagePath, lib.ChainMiddlewares(h.recordUsage, middlewares...))
 }
 
-func (h *STTUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
+func (h *TranscriptionUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 	loggingPlugin, _ := lib.FindPluginAs[schemas.LLMPlugin](h.config, h.loggingPluginName)
 	governancePlugin, _ := lib.FindPluginAs[schemas.LLMPlugin](h.config, h.governancePluginName)
 	if loggingPlugin == nil || governancePlugin == nil {
-		SendError(ctx, fasthttp.StatusServiceUnavailable, "STT usage recording requires the logging and governance plugins")
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "transcription usage recording requires the logging and governance plugins")
 		return
 	}
 
-	payload, err := decodeSTTUsageRequest(ctx.PostBody())
+	payload, err := decodeTranscriptionUsageRequest(ctx.PostBody())
 	if err != nil {
 		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
 		return
 	}
-	provider, model, err := validateSTTUsageRequest(payload)
+	provider, model, err := validateTranscriptionUsageRequest(payload)
 	if err != nil {
 		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
 		return
@@ -123,11 +123,11 @@ func (h *STTUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 
 	request, _, hookErr := loggingPlugin.PreLLMHook(bifrostCtx, request)
 	if hookErr != nil {
-		logger.Warn("STT usage logging pre-hook failed: %v", hookErr)
+		logger.Warn("transcription usage logging pre-hook failed: %v", hookErr)
 	}
 	request, shortCircuit, hookErr := governancePlugin.PreLLMHook(bifrostCtx, request)
 	if hookErr != nil {
-		logger.Warn("STT usage governance pre-hook failed: %v", hookErr)
+		logger.Warn("transcription usage governance pre-hook failed: %v", hookErr)
 	}
 	if shortCircuit != nil {
 		response, bifrostErr := shortCircuit.Response, shortCircuit.Error
@@ -140,10 +140,10 @@ func (h *STTUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 			return
 		}
 		if response == nil {
-			SendError(ctx, fasthttp.StatusForbidden, "STT usage recording was rejected")
+			SendError(ctx, fasthttp.StatusForbidden, "transcription usage recording was rejected")
 			return
 		}
-		SendJSONWithStatus(ctx, sttUsageResponse{ID: requestID, Status: "accepted"}, fasthttp.StatusAccepted)
+		SendJSONWithStatus(ctx, transcriptionUsageResponse{ID: requestID, Status: "accepted"}, fasthttp.StatusAccepted)
 		return
 	}
 
@@ -153,27 +153,27 @@ func (h *STTUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	if response == nil {
-		SendError(ctx, fasthttp.StatusInternalServerError, "STT usage recording failed")
+		SendError(ctx, fasthttp.StatusInternalServerError, "transcription usage recording failed")
 		return
 	}
-	SendJSONWithStatus(ctx, sttUsageResponse{ID: requestID, Status: "accepted"}, fasthttp.StatusAccepted)
+	SendJSONWithStatus(ctx, transcriptionUsageResponse{ID: requestID, Status: "accepted"}, fasthttp.StatusAccepted)
 }
 
-func (h *STTUsageHandler) runPostHooks(ctx *schemas.BifrostContext, loggingPlugin, governancePlugin schemas.LLMPlugin, response *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError) {
+func (h *TranscriptionUsageHandler) runPostHooks(ctx *schemas.BifrostContext, loggingPlugin, governancePlugin schemas.LLMPlugin, response *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError) {
 	var err error
 	response, bifrostErr, err = governancePlugin.PostLLMHook(ctx, response, bifrostErr)
 	if err != nil {
-		logger.Warn("STT usage governance post-hook failed: %v", err)
+		logger.Warn("transcription usage governance post-hook failed: %v", err)
 	}
 	response, bifrostErr, err = loggingPlugin.PostLLMHook(ctx, response, bifrostErr)
 	if err != nil {
-		logger.Warn("STT usage logging post-hook failed: %v", err)
+		logger.Warn("transcription usage logging post-hook failed: %v", err)
 	}
 	return response, bifrostErr
 }
 
-func decodeSTTUsageRequest(body []byte) (*sttUsageRequest, error) {
-	var payload sttUsageRequest
+func decodeTranscriptionUsageRequest(body []byte) (*transcriptionUsageRequest, error) {
+	var payload transcriptionUsageRequest
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&payload); err != nil {
@@ -185,14 +185,14 @@ func decodeSTTUsageRequest(body []byte) (*sttUsageRequest, error) {
 	return &payload, nil
 }
 
-func validateSTTUsageRequest(payload *sttUsageRequest) (schemas.ModelProvider, string, error) {
+func validateTranscriptionUsageRequest(payload *transcriptionUsageRequest) (schemas.ModelProvider, string, error) {
 	if payload.AudioMS == nil || *payload.AudioMS < 0 {
 		return "", "", fmt.Errorf("audio_ms is required and must be non-negative")
 	}
 	if payload.Turns == nil || *payload.Turns < 0 {
 		return "", "", fmt.Errorf("turns is required and must be non-negative")
 	}
-	if _, ok := sttUsageOutcomes[payload.Outcome]; !ok {
+	if _, ok := transcriptionUsageOutcomes[payload.Outcome]; !ok {
 		return "", "", fmt.Errorf("outcome must be one of completed or failed")
 	}
 	if strings.TrimSpace(payload.SessionID) == "" {
