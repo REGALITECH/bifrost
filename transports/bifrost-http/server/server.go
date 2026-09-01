@@ -1878,6 +1878,7 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	}
 	governancePlugin, _ := lib.FindPluginAs[schemas.LLMPlugin](s.Config, governancePluginName)
 	fishAudioUsageHandler := handlers.NewFishAudioUsageHandler(s.Config, logging.PluginName, governancePluginName)
+	transcriptionUsageHandler := handlers.NewTranscriptionUsageHandler(s.Config, logging.PluginName, governancePluginName)
 	if governancePlugin != nil {
 		governanceHandler, err = handlers.NewGovernanceHandler(callbacks, s.Config.ConfigStore, govLogManager, s.ExternalQuotaBudgetResolver)
 		if err != nil {
@@ -1922,6 +1923,7 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	promptsHandler := handlers.NewPromptsHandler(s.Config.ConfigStore, promptsReloader)
 	featureFlagsHandler := handlers.NewFeatureFlagsHandler(s.Config.FeatureFlags, s.Config.ConfigStore)
 	fishAudioUsageHandler.RegisterRoutes(s.Router, middlewares...)
+	transcriptionUsageHandler.RegisterRoutes(s.Router, middlewares...)
 	// Going ahead with API handlers
 	oauth2DiscoveryHandler := handlers.NewOAuth2DiscoveryHandler(s.Config)
 	oauth2IssuanceHandler := handlers.NewOAuth2IssuanceHandler(s.Config, s.TempTokens, s.OAuth2IdentityResolver)
