@@ -216,7 +216,7 @@ func validateTranscriptionUsageRequest(payload *transcriptionUsageRequest) (sche
 	if strings.TrimSpace(model) == "" {
 		return "", "", fmt.Errorf("model is required")
 	}
-	if _, ok := transcriptionUsageModels[model]; !ok {
+	if _, ok := allowedTranscriptionUsageModels[model]; !ok {
 		return "", "", fmt.Errorf("model must be a known ASR usage model")
 	}
 	return provider, model, nil
