@@ -28,8 +28,13 @@ var transcriptionUsageOutcomes = map[string]struct{}{
 // its pricing entry; "unknown" keeps unconfigured dev engines visible at
 // zero price instead of silently dropping their usage.
 var transcriptionUsageModels = map[string]struct{}{
-	"qwen3-asr": {},
-	"unknown":   {},
+	"qwen3-asr":          {},
+	"reazonspeech-nemo":  {},
+	"kotoba-whisper":     {},
+	"sherpa-onnx-ja":     {},
+	"sherpa-parakeet-ja": {},
+	"hiragana-wav2vec2":  {},
+	"unknown":            {},
 }
 
 // TranscriptionUsageHandler records transcription usage that occurred outside Bifrost. Callers

@@ -130,14 +130,57 @@ func TestTranscriptionUsageHandlerRecordsUsage(t *testing.T) {
 	assert.Equal(t, true, loggingPlugin.preContext.Value(schemas.BifrostContextKeySkipBudgetAndRateLimits))
 }
 
-func TestTranscriptionUsageHandlerAcceptsUnknownModel(t *testing.T) {
-	events := []string{}
-	handler, _, _ := newTranscriptionUsageTestHandler(&events)
-	ctx := newTranscriptionUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"unknown"}`, "vk-test", "usage-unknown")
+func TestTranscriptionUsageHandlerAcceptsKnownModels(t *testing.T) {
+	models := []string{
+		"qwen3-asr",
+		"reazonspeech-nemo",
+		"kotoba-whisper",
+		"sherpa-onnx-ja",
+		"sherpa-parakeet-ja",
+		"hiragana-wav2vec2",
+		"unknown",
+	}
+	for _, model := range models {
+		for _, submittedModel := range []string{model, "vllm/" + model} {
+			t.Run(submittedModel, func(t *testing.T) {
+				events := []string{}
+				handler, loggingPlugin, governancePlugin := newTranscriptionUsageTestHandler(&events)
+				audioMS, turns, seq := int64(5010), int64(3), int64(7)
+				payload, err := json.Marshal(transcriptionUsageRequest{
+					AudioMS:   &audioMS,
+					Turns:     &turns,
+					Outcome:   "completed",
+					SessionID: "session-1",
+					Seq:       &seq,
+					Model:     submittedModel,
+				})
+				require.NoError(t, err)
+				ctx := newTranscriptionUsageTestContext(string(payload), "vk-test", "usage-known-model")
 
-	handler.recordUsage(ctx)
+				handler.recordUsage(ctx)
 
-	require.Equal(t, fasthttp.StatusAccepted, ctx.Response.StatusCode(), string(ctx.Response.Body()))
+				require.Equal(t, fasthttp.StatusAccepted, ctx.Response.StatusCode(), string(ctx.Response.Body()))
+				require.NotNil(t, loggingPlugin.preRequest)
+				require.NotNil(t, loggingPlugin.preRequest.TranscriptionRequest)
+				assert.Equal(t, schemas.VLLM, loggingPlugin.preRequest.TranscriptionRequest.Provider)
+				assert.Equal(t, model, loggingPlugin.preRequest.TranscriptionRequest.Model)
+				require.NotNil(t, governancePlugin.preRequest)
+				require.NotNil(t, governancePlugin.preRequest.TranscriptionRequest)
+				assert.Equal(t, schemas.VLLM, governancePlugin.preRequest.TranscriptionRequest.Provider)
+				assert.Equal(t, model, governancePlugin.preRequest.TranscriptionRequest.Model)
+				require.NotNil(t, governancePlugin.postResponse)
+				require.NotNil(t, governancePlugin.postResponse.TranscriptionResponse)
+				assert.Equal(t, schemas.VLLM, governancePlugin.postResponse.TranscriptionResponse.ExtraFields.Provider)
+				assert.Equal(t, model, governancePlugin.postResponse.TranscriptionResponse.ExtraFields.OriginalModelRequested)
+				assert.Equal(t, model, governancePlugin.postResponse.TranscriptionResponse.ExtraFields.ResolvedModelUsed)
+				require.NotNil(t, loggingPlugin.postResponse)
+				require.NotNil(t, loggingPlugin.postResponse.TranscriptionResponse)
+				assert.Equal(t, schemas.VLLM, loggingPlugin.postResponse.TranscriptionResponse.ExtraFields.Provider)
+				assert.Equal(t, model, loggingPlugin.postResponse.TranscriptionResponse.ExtraFields.OriginalModelRequested)
+				assert.Equal(t, model, loggingPlugin.postResponse.TranscriptionResponse.ExtraFields.ResolvedModelUsed)
+			})
+		}
+	}
 }
 
 func TestTranscriptionUsageHandlerRejectsUnknownField(t *testing.T) {
