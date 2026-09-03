@@ -23,20 +23,6 @@ var transcriptionUsageOutcomes = map[string]struct{}{
 	"failed":    {},
 }
 
-// transcriptionUsageModels is the closed set of ASR usage model names this
-// endpoint records. Adding a billable engine means adding it here alongside
-// its pricing entry; "unknown" keeps unconfigured dev engines visible at
-// zero price instead of silently dropping their usage.
-var transcriptionUsageModels = map[string]struct{}{
-	"qwen3-asr":          {},
-	"reazonspeech-nemo":  {},
-	"kotoba-whisper":     {},
-	"sherpa-onnx-ja":     {},
-	"sherpa-parakeet-ja": {},
-	"hiragana-wav2vec2":  {},
-	"unknown":            {},
-}
-
 // TranscriptionUsageHandler records transcription usage that occurred outside Bifrost. Callers
 // must reuse x-request-id when retrying; the existing logging and governance
 // hooks use it for deduplication.
