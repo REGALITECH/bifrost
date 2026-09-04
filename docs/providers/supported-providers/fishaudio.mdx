@@ -101,6 +101,15 @@ For text-to-speech calls, the Bifrost `model` is the Fish Audio model variant (`
 
 ---
 
+## Pricing
+
+Fish Audio speech cost is `input_cost_per_character` × billable UTF-8 bytes, reported as `input_chars`.
+At every datasheet sync, Bifrost derives each `fishaudio/<model>` catalog row from the corresponding `openrouter/fish-audio/<model>` row.
+The derived models are `s1`, `s2-pro`, and `s2.1-pro`.
+As of 2026-09, the price is USD 15 per 1M UTF-8 bytes, tracking OpenRouter's resale price, which matches Fish Audio's list price.
+A governance pricing override still takes precedence when configured.
+If upstream adds a native `fishaudio/<model>` row, it takes precedence over the derived row.
+
 # 1. Speech (Text-to-Speech)
 
 ## Request Parameters

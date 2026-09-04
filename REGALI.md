@@ -26,6 +26,7 @@ As of 2026-08-20, relative to upstream commit `0a8a38c9` (2026-08-15):
 | Change | Paths |
 | --- | --- |
 | Fish Audio provider (speech + realtime WS) | `core/providers/fishaudio/`, `core/schemas/`, `core/internal/llmtests/`, `framework/streaming/audio.go`, `plugins/logging/operations.go`, `transports/bifrost-http/`, `transports/config.schema.json`, `ui/lib/constants/`, `docs/providers/supported-providers/fishaudio.mdx` |
+| Fish Audio catalog pricing derived from the datasheet's OpenRouter rows | `framework/modelcatalog/datasheet/derive.go`, `framework/modelcatalog/datasheet/derive_test.go`, `framework/modelcatalog/datasheet/testdata/pricing-openrouter-fishaudio.json`, `framework/modelcatalog/datasheet/sync.go` (one call site) |
 | GHCR release workflow (new file) | `.github/workflows/regali-docker-release.yml` |
 | `FISH_AUDIO_API_KEY` plumbed into upstream test jobs | `.github/workflows/pr-tests.yml`, `.github/workflows/release-pipeline.yml` |
 | Snyk workflow deleted (not usable in a fork) | `.github/workflows/snyk.yml` |
@@ -78,8 +79,12 @@ upstream dev API") is an instance of upstream changing an API out from under it,
 break shows up at compile time or in the transformation tests.
 
 ```
-cd core && go build ./... && go test ./providers/fishaudio/
+(cd core && go build ./... && go test ./providers/fishaudio/)
+(cd framework && go test ./modelcatalog/datasheet/)
 ```
+
+Upstream reshapes the datasheet loader often; the derivation call site and tests catch a break at
+compile or test time.
 
 Provider tests that call a live API skip themselves when their key is absent, so this passes with no
 API key set: the four `realtime_test.go` unit tests run, `TestFishAudio` and `TestFishAudioIntegration`
