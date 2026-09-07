@@ -268,14 +268,14 @@ func TestFishAudioUsageRetryBilling(t *testing.T) {
 	})
 }
 
-const transcriptionUsageBillingBody = `{"audio_ms":2500,"turns":1,"outcome":"completed","session_id":"session-1","seq":1,"model":"vllm/qwen3-asr"}`
+const transcriptionUsageBillingBody = `{"audio_ms":2500,"turns":1,"outcome":"completed","session_id":"session-1","seq":1,"model":"transcription/qwen3-asr"}`
 
 func TestTranscriptionUsageRunsHooksInCoreOrder(t *testing.T) {
 	SetLogger(testLogger{})
 	calls := []string{}
 	loggingPlugin := &usageHookRecorder{name: "logging", calls: &calls}
 	governancePlugin := &usageHookRecorder{name: "governance", calls: &calls}
-	config := &lib.Config{ClientConfig: &configstore.ClientConfig{}}
+	config := transcriptionUsageTestConfig(t)
 	plugins := []schemas.BasePlugin{loggingPlugin, governancePlugin}
 	config.BasePlugins.Store(&plugins)
 	handler := NewTranscriptionUsageHandler(config, "logging", "governance")
@@ -289,12 +289,12 @@ func TestTranscriptionUsageRunsHooksInCoreOrder(t *testing.T) {
 	assert.Equal(t, expectedUsageBillingNonce("sk-bf-secret", "report-1"), governancePlugin.postNonce)
 }
 
-func TestTranscriptionUsageWithRealGovernance(t *testing.T) {
+func TestTranscriptionUsageBillingWithRealGovernance(t *testing.T) {
 	SetLogger(testLogger{})
-	gov := newUsageBillingGovernance(t, schemas.VLLM)
+	gov := newUsageBillingGovernance(t, configstore.TranscriptionUsageProvider)
 	calls := []string{}
 	loggingPlugin := &usageHookRecorder{name: "logging", calls: &calls}
-	config := &lib.Config{ClientConfig: &configstore.ClientConfig{}}
+	config := transcriptionUsageTestConfig(t)
 	plugins := []schemas.BasePlugin{loggingPlugin, gov}
 	config.BasePlugins.Store(&plugins)
 	handler := NewTranscriptionUsageHandler(config, "logging", governance.PluginName)
@@ -305,7 +305,7 @@ func TestTranscriptionUsageWithRealGovernance(t *testing.T) {
 	require.Equal(t, fasthttp.StatusAccepted, ctx.Response.StatusCode(), string(ctx.Response.Body()))
 	// Governance's PreRequestHook ran before logging's PreLLMHook, as in core:
 	// the provider was stamped for access resolution and the key resolved.
-	assert.Equal(t, string(schemas.VLLM), loggingPlugin.preProvider)
+	assert.Equal(t, string(configstore.TranscriptionUsageProvider), loggingPlugin.preProvider)
 	assert.Equal(t, usageBillingVKA.id, loggingPlugin.preVKID)
 	assert.Equal(t, expectedUsageBillingNonce(usageBillingVKA.id, "report-1"), loggingPlugin.postNonce)
 	assert.Equal(t, map[string]int64{usageBillingVKA.id: 1, usageBillingVKB.id: 0}, billedRequests(t, gov))
@@ -313,9 +313,9 @@ func TestTranscriptionUsageWithRealGovernance(t *testing.T) {
 
 func TestTranscriptionUsageRetryBilling(t *testing.T) {
 	SetLogger(testLogger{})
-	runUsageBillingCases(t, schemas.VLLM, func(t *testing.T, gov *governance.GovernancePlugin) func(usageReport) int {
+	runUsageBillingCases(t, configstore.TranscriptionUsageProvider, func(t *testing.T, gov *governance.GovernancePlugin) func(usageReport) int {
 		events := []string{}
-		handler, loggingPlugin, _ := newTranscriptionUsageTestHandler(&events)
+		handler, loggingPlugin, _ := newTranscriptionUsageTestHandler(t, &events)
 		plugins := []schemas.BasePlugin{loggingPlugin, gov}
 		handler.config.BasePlugins.Store(&plugins)
 		return func(report usageReport) int {

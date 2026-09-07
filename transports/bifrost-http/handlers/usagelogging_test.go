@@ -90,3 +90,48 @@ func TestFishAudioUsageWithRealLoggingAndGovernance(t *testing.T) {
 	assert.InDelta(t, 54*0.000015, *entry.Cost, 1e-12)
 	assert.Equal(t, map[string]int64{usageBillingVKA.id: 1, usageBillingVKB.id: 0}, billedRequests(t, gov))
 }
+
+// TestTranscriptionUsageWithRealLoggingAndGovernance sends one STT usage report
+// twice with the same x-request-id through the real logging and governance
+// plugins: it is logged once, with the audio milliseconds as prompt tokens and
+// priced by the registered model's per-token rate, and billed once.
+func TestTranscriptionUsageWithRealLoggingAndGovernance(t *testing.T) {
+	SetLogger(testLogger{})
+	config := transcriptionUsageTestConfig(t)
+	provider := string(configstore.TranscriptionUsageProvider)
+	require.NoError(t, config.ModelCatalog.SetPricingOverrides([]configstoreTables.TablePricingOverride{{
+		ID:               "stt-qwen3-asr",
+		ScopeKind:        "provider",
+		ProviderID:       &provider,
+		MatchType:        "exact",
+		Pattern:          "qwen3-asr",
+		RequestTypes:     []schemas.RequestType{schemas.TranscriptionRequest},
+		PricingPatchJSON: `{"input_cost_per_token":0.000002}`,
+	}}))
+	loggingPlugin, store := newUsageLoggingPlugin(t, config.ModelCatalog)
+	gov := newUsageBillingGovernance(t, configstore.TranscriptionUsageProvider)
+	plugins := []schemas.BasePlugin{loggingPlugin, gov}
+	config.BasePlugins.Store(&plugins)
+	handler := NewTranscriptionUsageHandler(config, logging.PluginName, governance.PluginName)
+
+	const body = `{"audio_ms":2500,"turns":1,"outcome":"completed","session_id":"session-1","seq":0,"model":"transcription/qwen3-asr"}`
+	for range 2 {
+		ctx := newTranscriptionUsageTestContext(body, usageBillingVKA.value, "stt-report-1")
+		handler.recordUsage(ctx)
+		require.Equal(t, fasthttp.StatusAccepted, ctx.Response.StatusCode(), string(ctx.Response.Body()))
+	}
+
+	entry := requireSingleUsageLog(t, loggingPlugin, store, "stt-report-1")
+	assert.Equal(t, provider, entry.Provider)
+	assert.Equal(t, "qwen3-asr", entry.Model)
+	assert.Equal(t, "success", entry.Status)
+	assert.Equal(t, 2500, entry.PromptTokens)
+	require.NotNil(t, entry.VirtualKeyID)
+	assert.Equal(t, usageBillingVKA.id, *entry.VirtualKeyID)
+	require.NotNil(t, entry.Cost, "the report must be priced")
+	assert.InDelta(t, 2500*0.000002, *entry.Cost, 1e-12)
+	assert.Equal(t, map[string]int64{usageBillingVKA.id: 1, usageBillingVKB.id: 0}, billedRequests(t, gov))
+	rateLimit := gov.GetGovernanceStore().GetGovernanceData(context.Background()).RateLimits[usageBillingVKA.rateLimitID]
+	require.NotNil(t, rateLimit)
+	assert.Equal(t, int64(2500), rateLimit.TokenCurrentUsage, "governance must count the audio milliseconds once")
+}
