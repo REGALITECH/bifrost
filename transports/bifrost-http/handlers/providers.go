@@ -263,10 +263,6 @@ func (h *ProviderHandler) addProvider(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusBadRequest, "Invalid request payload")
 		return
 	}
-	if payload.Provider == schemas.Transcription && (payload.CustomProviderConfig != nil || (payload.NetworkConfig != nil && payload.NetworkConfig.BaseURL != "")) {
-		SendError(ctx, 400, "transcription does not accept inference configuration")
-		return
-	}
 	// Validate provider
 	if payload.Provider == "" {
 		SendError(ctx, fasthttp.StatusBadRequest, "Missing provider")
@@ -798,7 +794,7 @@ func (h *ProviderHandler) listModelDetails(ctx *fasthttp.RequestCtx) {
 			details.IsDeprecated = capabilities.IsDeprecated
 			details.AdditionalAttributes = capabilities.AdditionalAttributes
 		}
-		if model.Provider == schemas.Transcription {
+		if model.Provider == configstore.TranscriptionUsageProvider {
 			state, err := configstore.GetTranscriptionModel(ctx, h.dbStore, model.Name)
 			if err != nil {
 				SendError(ctx, 503, "model state unavailable")
@@ -1342,7 +1338,7 @@ func (h *ProviderHandler) upsertModelCatalogEntries(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	for i := range payload {
-		if payload[i].Provider == string(schemas.Transcription) {
+		if payload[i].Provider == string(configstore.TranscriptionUsageProvider) {
 			if err := configstore.ValidateTranscriptionModelName(payload[i].Model); err != nil {
 				SendError(ctx, 400, err.Error())
 				return
@@ -1362,6 +1358,10 @@ func (h *ProviderHandler) upsertModelCatalogEntries(ctx *fasthttp.RequestCtx) {
 	}
 
 	if err := h.modelsManager.UpsertModelPricingAttributes(ctx, payload); err != nil {
+		if errors.Is(err, configstore.ErrTranscriptionProviderConfig) {
+			SendError(ctx, fasthttp.StatusBadRequest, err.Error())
+			return
+		}
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to upsert catalog entries: %v", err))
 		return
 	}

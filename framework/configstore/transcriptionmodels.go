@@ -13,6 +13,25 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+// TranscriptionUsageProvider is an application-level custom provider name,
+// not a built-in inference provider.
+const TranscriptionUsageProvider schemas.ModelProvider = "transcription"
+
+// ErrTranscriptionProviderConfig marks a conflicting provider configuration.
+var ErrTranscriptionProviderConfig = errors.New("transcription requires an OpenAI-based keyless custom provider with all operations disabled and no inference URL")
+
+func transcriptionProvider(ctx context.Context, db *gorm.DB) (*tables.TableProvider, error) {
+	var provider tables.TableProvider
+	if err := db.WithContext(ctx).Where("name = ?", TranscriptionUsageProvider).First(&provider).Error; err != nil {
+		return nil, err
+	}
+	c := provider.CustomProviderConfig
+	if c == nil || c.BaseProviderType != schemas.OpenAI || !c.IsKeyLess || c.AllowedRequests == nil || *c.AllowedRequests != (schemas.AllowedRequests{}) || (provider.NetworkConfig != nil && provider.NetworkConfig.BaseURL != "") {
+		return nil, ErrTranscriptionProviderConfig
+	}
+	return &provider, nil
+}
+
 var transcriptionModelName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 func ValidateTranscriptionModelName(model string) error {
@@ -43,8 +62,8 @@ func EnsureTranscriptionModel(ctx context.Context, store ConfigStore, model stri
 		return fmt.Errorf("config store is required")
 	}
 	write := func(tx *gorm.DB) error {
-		var provider tables.TableProvider
-		if err := tx.Where("name = ?", schemas.Transcription).First(&provider).Error; err != nil {
+		provider, err := transcriptionProvider(ctx, tx)
+		if err != nil {
 			return err
 		}
 		row := tables.TableModel{ID: uuid.NewString(), ProviderID: provider.ID, Name: model}
@@ -52,7 +71,7 @@ func EnsureTranscriptionModel(ctx context.Context, store ConfigStore, model stri
 			return err
 		}
 		zero := 0.0
-		price := tables.TableModelPricing{Model: model, Provider: string(schemas.Transcription), Mode: "audio_transcription", InputCostPerToken: &zero, OutputCostPerToken: &zero}
+		price := tables.TableModelPricing{Model: model, Provider: string(TranscriptionUsageProvider), Mode: "audio_transcription", InputCostPerToken: &zero, OutputCostPerToken: &zero}
 		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&price).Error
 	}
 	if len(txs) > 0 {
@@ -65,11 +84,15 @@ func GetTranscriptionModel(ctx context.Context, store ConfigStore, model string)
 	if store == nil {
 		return nil, fmt.Errorf("config store is required")
 	}
-	var row tables.TableModel
-	if err := store.DB().WithContext(ctx).Where("name = ? AND provider_id IN (?)", model, store.DB().Model(&tables.TableProvider{}).Select("id").Where("name = ?", schemas.Transcription)).First(&row).Error; err != nil {
+	provider, err := transcriptionProvider(ctx, store.DB())
+	if err != nil {
 		return nil, err
 	}
-	state := &TranscriptionModelState{Model: row.Name, Provider: schemas.Transcription, UsageKind: "stt"}
+	var row tables.TableModel
+	if err := store.DB().WithContext(ctx).Where("name = ? AND provider_id = ?", model, provider.ID).First(&row).Error; err != nil {
+		return nil, err
+	}
+	state := &TranscriptionModelState{Model: row.Name, Provider: TranscriptionUsageProvider, UsageKind: "stt"}
 	price, err := GetTranscriptionModelPrice(ctx, store, model)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return state, nil
@@ -87,7 +110,7 @@ func GetTranscriptionModelPrice(ctx context.Context, store ConfigStore, model st
 		return nil, fmt.Errorf("config store is required")
 	}
 	var price tables.TableModelPricing
-	err := store.DB().WithContext(ctx).Where("model = ? AND provider = ? AND mode = ?", model, schemas.Transcription, "audio_transcription").First(&price).Error
+	err := store.DB().WithContext(ctx).Where("model = ? AND provider = ? AND mode = ?", model, TranscriptionUsageProvider, "audio_transcription").First(&price).Error
 	return &price, err
 }
 
@@ -95,8 +118,12 @@ func ListTranscriptionModels(ctx context.Context, store ConfigStore) ([]Transcri
 	if store == nil {
 		return nil, fmt.Errorf("config store is required")
 	}
+	provider, err := transcriptionProvider(ctx, store.DB())
+	if err != nil {
+		return nil, err
+	}
 	var rows []tables.TableModel
-	if err := store.DB().WithContext(ctx).Where("provider_id IN (?)", store.DB().Model(&tables.TableProvider{}).Select("id").Where("name = ?", schemas.Transcription)).Order("name").Find(&rows).Error; err != nil {
+	if err := store.DB().WithContext(ctx).Where("provider_id = ?", provider.ID).Order("name").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	states := make([]TranscriptionModelState, 0, len(rows))

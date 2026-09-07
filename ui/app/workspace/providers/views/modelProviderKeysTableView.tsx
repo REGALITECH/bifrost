@@ -1,4 +1,3 @@
-import RegisteredModelsTable from "./registeredModelsTable";
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -89,12 +88,7 @@ function ProviderKeyActionsMenu({
 	);
 }
 
-export default function ModelProviderKeysTableView(props: Props) {
-	if (props.provider.name === "transcription") return <RegisteredModelsTable provider={props.provider} />;
-	return <ProviderKeysTable {...props} />;
-}
-
-function ProviderKeysTable({ provider, className, headerActions, isKeyless }: Props) {
+export default function ModelProviderKeysTableView({ provider, className, headerActions, isKeyless }: Props) {
 	const providerName = provider.name?.toLowerCase() ?? "";
 	const isVLLM = providerName === "vllm";
 	const isOllamaOrSGL = providerName === "ollama" || providerName === "sgl";

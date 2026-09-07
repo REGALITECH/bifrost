@@ -1,6 +1,5 @@
 // Known provider names array - centralized definition
 export const KnownProvidersNames = [
-	"transcription",
 	"anthropic",
 	"azure",
 	"bedrock",
@@ -139,7 +138,6 @@ export const ProviderLabels: Record<ProviderName, string> = {
 	xai: "xAI",
 	replicate: "Replicate",
 	vllm: "vLLM",
-	transcription: "Transcription",
 	runway: "Runway",
 	runware: "Runware",
 	fireworks: "Fireworks AI",

@@ -12,7 +12,7 @@ import (
 
 	bifrost "github.com/maximhq/bifrost/core"
 	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
-	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 )
 
@@ -59,7 +59,7 @@ func (s *Store) SyncFromURL(ctx context.Context) error {
 		for modelKey, entry := range pricingData {
 			pricing := convertEntryToTablePricing(modelKey, entry)
 			// This reserved namespace is owned by the STT registration API.
-			if pricing.Provider == string(schemas.Transcription) {
+			if pricing.Provider == string(configstore.TranscriptionUsageProvider) {
 				continue
 			}
 			key := makeKey(pricing.Model, pricing.Provider, pricing.Mode)

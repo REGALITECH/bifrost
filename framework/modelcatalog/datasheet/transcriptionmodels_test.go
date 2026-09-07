@@ -19,7 +19,7 @@ func TestTranscriptionPricingIgnoresExternalDatasheet(t *testing.T) {
 	store, err := configstore.NewConfigStore(ctx, &configstore.Config{Enabled: true, Type: configstore.ConfigStoreTypeSQLite, Config: &configstore.SQLiteConfig{Path: filepath.Join(dir, "config.db")}}, logger)
 	require.NoError(t, err)
 	t.Cleanup(func() { store.Close(ctx) })
-	require.NoError(t, store.DB().Create(&tables.TableProvider{Name: "transcription"}).Error)
+	require.NoError(t, store.DB().Create(&tables.TableProvider{Name: "transcription", CustomProviderConfigJSON: `{"base_provider_type":"openai","is_key_less":true,"allowed_requests":{}}`}).Error)
 	require.NoError(t, configstore.EnsureTranscriptionModel(ctx, store, "asr"))
 	require.NoError(t, store.DB().Model(&tables.TableModelPricing{}).Where("provider = ? AND model = ?", "transcription", "asr").Update("input_cost_per_token", 0.002).Error)
 	path := filepath.Join(dir, "pricing.json")

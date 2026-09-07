@@ -1284,7 +1284,7 @@ func (s *Store) resolvePricing(routingInfo schemas.RoutingInfo, requestType sche
 func (s *Store) getBasePricing(model, provider string, requestType schemas.RequestType) (*configstoreTables.TableModelPricing, bool) {
 	// Usage registrations are shared across replicas and must be visible without
 	// waiting for the external datasheet refresh. Keep scoped overrides above.
-	if provider == string(schemas.Transcription) {
+	if provider == string(configstore.TranscriptionUsageProvider) {
 		if requestType != schemas.TranscriptionRequest {
 			return nil, false
 		}

@@ -94,7 +94,7 @@ func (h *TranscriptionUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	if err != nil || !state.PricingConfigured || h.config.ModelCatalog == nil {
-		SendError(ctx, fasthttp.StatusServiceUnavailable, "transcription usage model pricing is unavailable")
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "transcription usage model configuration or pricing is unavailable")
 		return
 	}
 
@@ -218,12 +218,12 @@ func validateTranscriptionUsageRequest(payload *transcriptionUsageRequest) (sche
 	if payload.Seq == nil || *payload.Seq < 0 {
 		return "", "", fmt.Errorf("seq is required and must be non-negative")
 	}
-	if !strings.HasPrefix(payload.Model, string(schemas.Transcription)+"/") {
+	if !strings.HasPrefix(payload.Model, string(configstore.TranscriptionUsageProvider)+"/") {
 		return "", "", fmt.Errorf("model must use the transcription provider")
 	}
-	model := strings.TrimPrefix(payload.Model, string(schemas.Transcription)+"/")
+	model := strings.TrimPrefix(payload.Model, string(configstore.TranscriptionUsageProvider)+"/")
 	if err := configstore.ValidateTranscriptionModelName(model); err != nil {
 		return "", "", err
 	}
-	return schemas.Transcription, model, nil
+	return configstore.TranscriptionUsageProvider, model, nil
 }

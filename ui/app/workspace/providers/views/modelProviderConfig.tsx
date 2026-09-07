@@ -19,7 +19,6 @@ export default function ModelProviderConfig({ provider, onRequestDelete }: Props
 	const hasUpdateProviderAccess = useRbac(RbacResource.ModelProvider, RbacOperation.Update);
 
 	const showApiKeys = useMemo(() => {
-		if (provider.name === "transcription") return false;
 		if (provider.custom_provider_config) {
 			return !(provider.custom_provider_config?.is_key_less ?? false);
 		}
@@ -48,14 +47,8 @@ export default function ModelProviderConfig({ provider, onRequestDelete }: Props
 
 	return (
 		<div className="flex w-full flex-col gap-2">
-			{provider.name !== "transcription" && (
-				<ProviderConfigSheet show={showConfigSheet} onCancel={() => setShowConfigSheet(false)} provider={provider} />
-			)}
-			<ModelProviderKeysTableView
-				provider={provider}
-				headerActions={provider.name === "transcription" ? undefined : editConfigButton}
-				isKeyless={!showApiKeys}
-			/>
+			<ProviderConfigSheet show={showConfigSheet} onCancel={() => setShowConfigSheet(false)} provider={provider} />
+			<ModelProviderKeysTableView provider={provider} headerActions={editConfigButton} isKeyless={!showApiKeys} />
 			{hasGovernanceAccess ? <ProviderGovernanceTable className="mt-4" provider={provider} /> : null}
 		</div>
 	);

@@ -30,7 +30,7 @@ func TestTranscriptionModelPersistenceAndRepair(t *testing.T) {
 	store := open()
 	require.NoError(t, store.DB().AutoMigrate(&tables.TableModelPricing{}, &tables.TableProvider{}))
 	require.NoError(t, store.DB().Exec("CREATE TABLE config_models (id TEXT PRIMARY KEY, provider_id INTEGER NOT NULL, name TEXT, created_at DATETIME, updated_at DATETIME, UNIQUE(provider_id, name))").Error)
-	require.NoError(t, store.DB().Create(&tables.TableProvider{Name: "transcription"}).Error)
+	require.NoError(t, store.DB().Create(&tables.TableProvider{Name: "transcription", CustomProviderConfigJSON: `{"base_provider_type":"openai","is_key_less":true,"allowed_requests":{}}`}).Error)
 	require.NoError(t, store.DB().Exec("INSERT INTO config_models (id,provider_id,name) VALUES ('existing',999,'legacy')").Error)
 	// Existing vLLM prices survive registration against the unchanged schema.
 	old := tables.TableModelPricing{Model: "asr-new", Provider: "vllm", Mode: "audio_transcription"}
@@ -83,7 +83,7 @@ func TestTranscriptionModelPersistenceAndRepair(t *testing.T) {
 func TestTranscriptionModelAtomicFailure(t *testing.T) {
 	store := setupRDBTestStore(t)
 	require.NoError(t, store.DB().AutoMigrate(&tables.TableModel{}))
-	require.NoError(t, store.DB().Create(&tables.TableProvider{Name: "transcription"}).Error)
+	require.NoError(t, store.DB().Create(&tables.TableProvider{Name: "transcription", CustomProviderConfigJSON: `{"base_provider_type":"openai","is_key_less":true,"allowed_requests":{}}`}).Error)
 	// No pricing table: the second insert fails and the registration must roll back.
 	require.Error(t, EnsureTranscriptionModel(context.Background(), store, "atomic"))
 	var count int64
@@ -99,5 +99,29 @@ func TestTranscriptionModelNames(t *testing.T) {
 	}
 	for _, name := range []string{"", " a", "a ", "a/b", "*", "日本語", "-a", strings.Repeat("a", 129), "a\n"} {
 		require.Error(t, ValidateTranscriptionModelName(name), name)
+	}
+}
+
+func TestTranscriptionRegistrationRejectsConflictingProvider(t *testing.T) {
+	for _, cfg := range []string{
+		`null`,
+		`{"base_provider_type":"anthropic","is_key_less":true,"allowed_requests":{}}`,
+		`{"base_provider_type":"openai","is_key_less":false,"allowed_requests":{}}`,
+		`{"base_provider_type":"openai","is_key_less":true}`,
+		`{"base_provider_type":"openai","is_key_less":true,"allowed_requests":null}`,
+		`{"base_provider_type":"openai","is_key_less":true,"allowed_requests":{"list_models":true}}`,
+		`{"base_provider_type":"openai","is_key_less":true,"allowed_requests":{"transcription":true}}`,
+	} {
+		t.Run(cfg, func(t *testing.T) {
+			store := setupRDBTestStore(t)
+			require.NoError(t, store.DB().AutoMigrate(&tables.TableModel{}, &tables.TableModelPricing{}))
+			require.NoError(t, store.DB().Create(&tables.TableProvider{Name: "transcription", CustomProviderConfigJSON: cfg}).Error)
+			require.ErrorIs(t, EnsureTranscriptionModel(context.Background(), store, "asr"), ErrTranscriptionProviderConfig)
+			var count int64
+			require.NoError(t, store.DB().Model(&tables.TableModel{}).Count(&count).Error)
+			require.Zero(t, count)
+			require.NoError(t, store.DB().Model(&tables.TableModelPricing{}).Count(&count).Error)
+			require.Zero(t, count)
+		})
 	}
 }

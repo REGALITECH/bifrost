@@ -67660,7 +67660,6 @@
         "type": "string",
         "description": "AI model provider identifier",
         "enum": [
-          "transcription",
           "openai",
           "azure",
           "anthropic",

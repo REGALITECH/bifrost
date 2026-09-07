@@ -27,7 +27,7 @@ var providersWithPartialListModels = map[schemas.ModelProvider]bool{
 // pre-gated by ListModelsPipeline against the key's allow/block/aliases);
 // otherwise the datasheet view is filtered by the keyconfig aggregates.
 func (mc *ModelCatalog) GetModelsForProvider(provider schemas.ModelProvider) []string {
-	if provider == schemas.Transcription {
+	if provider == configstore.TranscriptionUsageProvider {
 		return mc.registeredModels()
 	}
 	blacklisted := mc.keyconf.BlacklistedFor(provider)
@@ -123,7 +123,7 @@ func (mc *ModelCatalog) appendAllowedDatasheetModels(out []string, models []stri
 // GetUnfilteredModelsForProvider returns the raw catalog view (no gate
 // applied): union of live unfiltered entries and the datasheet view.
 func (mc *ModelCatalog) GetUnfilteredModelsForProvider(provider schemas.ModelProvider) []string {
-	if provider == schemas.Transcription {
+	if provider == configstore.TranscriptionUsageProvider {
 		return mc.registeredModels()
 	}
 	liveModels := mc.live.UnfilteredModelsForProvider(provider)
@@ -256,7 +256,7 @@ func (mc *ModelCatalog) GetProvidersForModel(model string) []schemas.ModelProvid
 //   - explicit allowedModels: direct or provider-prefixed match against the
 //     provider's catalog.
 func (mc *ModelCatalog) IsModelAllowedForProvider(provider schemas.ModelProvider, model string, providerConfig *configstore.ProviderConfig, allowedModels schemas.WhiteList) bool {
-	if provider == schemas.Transcription {
+	if provider == configstore.TranscriptionUsageProvider {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		state, err := configstore.GetTranscriptionModel(ctx, mc.configStore, model)

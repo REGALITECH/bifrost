@@ -378,12 +378,6 @@ func (r *BudgetResolver) isModelAllowed(vk *configstoreTables.TableVirtualKey, p
 	// Pass 2: allowlist check — model is allowed if any matching config permits it.
 	for _, pc := range vk.ProviderConfigs {
 		if pc.Provider == string(provider) {
-			if provider == schemas.Transcription {
-				if r.modelCatalog != nil && r.modelCatalog.IsModelAllowedForProvider(provider, model, nil, pc.AllowedModels) {
-					return true
-				}
-				continue
-			}
 			if r.modelCatalog != nil && r.governanceInMemoryStore != nil {
 				providerConfig, ok := r.governanceInMemoryStore.GetConfiguredProviders()[provider]
 				providerConfigPtr := &providerConfig

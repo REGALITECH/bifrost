@@ -25,7 +25,7 @@ func (m transcriptionVKManager) ReloadVirtualKey(ctx context.Context, id string)
 func TestTranscriptionVirtualKeyWithoutExternalKeys(t *testing.T) {
 	SetLogger(testLogger{})
 	store := newTestConfigStore(t)
-	require.NoError(t, store.DB().Create(&tables.TableProvider{Name: "transcription"}).Error)
+	require.NoError(t, store.DB().Create(&tables.TableProvider{Name: "transcription", CustomProviderConfigJSON: `{"base_provider_type":"openai","is_key_less":true,"allowed_requests":{}}`}).Error)
 	h := &GovernanceHandler{configStore: store, governanceManager: transcriptionVKManager{store: store}}
 	for _, body := range []string{
 		`{"name":"tenant-one","provider_configs":[{"provider":"transcription","allowed_models":["*"]}]}`,
@@ -76,18 +76,11 @@ func TestTranscriptionUsageWithRealGovernance(t *testing.T) {
 		h.recordUsage(ctx)
 		require.Equal(t, 202, ctx.Response.StatusCode(), string(ctx.Response.Body()))
 		require.NotNil(t, loggingPlugin.postResponse)
-		require.Equal(t, schemas.Transcription, loggingPlugin.postResponse.TranscriptionResponse.ExtraFields.Provider)
+		require.Equal(t, configstore.TranscriptionUsageProvider, loggingPlugin.postResponse.TranscriptionResponse.ExtraFields.Provider)
 	}
 	ctx := newTranscriptionUsageTestContext(`{"audio_ms":1,"turns":1,"outcome":"completed","session_id":"s","seq":1,"model":"transcription/later-asr"}`, "sk-bf-invalid", "bad-vk")
 	h.recordUsage(ctx)
 	require.Equal(t, 401, ctx.Response.StatusCode(), string(ctx.Response.Body()))
-}
-
-func TestTranscriptionProviderManagementRejectsInference(t *testing.T) {
-	h := &ProviderHandler{}
-	ctx := newTestRequestCtx(`{"provider":"transcription","custom_provider_config":{"base_provider_type":"vllm"}}`)
-	h.addProvider(ctx)
-	require.Equal(t, 400, ctx.Response.StatusCode())
 }
 
 func TestTranscriptionModelDetailsExactBeforePagination(t *testing.T) {
@@ -96,7 +89,7 @@ func TestTranscriptionModelDetailsExactBeforePagination(t *testing.T) {
 	for _, name := range []string{"asr", "asr-extra", "Asr"} {
 		require.NoError(t, configstore.EnsureTranscriptionModel(context.Background(), config.ConfigStore, name))
 	}
-	h := providerHandlerForTest(schemas.Transcription, nil, []string{"asr-extra", "Asr", "asr"}, []string{"asr-extra", "Asr", "asr"})
+	h := providerHandlerForTest(configstore.TranscriptionUsageProvider, nil, []string{"asr-extra", "Asr", "asr"}, []string{"asr-extra", "Asr", "asr"})
 	h.inMemoryStore.ModelCatalog = config.ModelCatalog
 	h.dbStore = config.ConfigStore
 	ctx := newTestRequestCtx("")
@@ -110,4 +103,39 @@ func TestTranscriptionModelDetailsExactBeforePagination(t *testing.T) {
 	require.Equal(t, "asr", response.Models[0].Name)
 	require.True(t, *response.Models[0].PricingConfigured)
 	require.Equal(t, "stt", response.Models[0].UsageKind)
+}
+
+func TestTranscriptionUsageRejectsMissingOrChangedRegistration(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		mutate func(configstore.ConfigStore) error
+	}{
+		{"unknown model", 400, func(s configstore.ConfigStore) error {
+			return s.DB().Where("name = ?", "qwen3-asr").Delete(&tables.TableModel{}).Error
+		}},
+		{"provider deleted", 400, func(s configstore.ConfigStore) error {
+			return s.DeleteProvider(context.Background(), configstore.TranscriptionUsageProvider)
+		}},
+		{"provider changed to inference", 503, func(s configstore.ConfigStore) error {
+			return s.DB().Model(&tables.TableProvider{}).Where("name = ?", "transcription").Update("custom_provider_config_json", `{"base_provider_type":"openai","is_key_less":true,"allowed_requests":{"transcription":true}}`).Error
+		}},
+		{"inference URL configured", 503, func(s configstore.ConfigStore) error {
+			return s.DB().Model(&tables.TableProvider{}).Where("name = ?", "transcription").Update("network_config_json", `{"base_url":"https://example.invalid"}`).Error
+		}},
+		{"pricing missing", 503, func(s configstore.ConfigStore) error {
+			return s.DB().Where("provider = ?", "transcription").Delete(&tables.TableModelPricing{}).Error
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			events := []string{}
+			h, logPlugin, governancePlugin := newTranscriptionUsageTestHandler(t, &events)
+			require.NoError(t, tc.mutate(h.config.ConfigStore))
+			ctx := newTranscriptionUsageTestContext(`{"audio_ms":1,"turns":1,"outcome":"completed","session_id":"s","seq":0,"model":"transcription/qwen3-asr"}`, "vk", "rejected")
+			h.recordUsage(ctx)
+			require.Equal(t, tc.status, ctx.Response.StatusCode(), string(ctx.Response.Body()))
+			require.Zero(t, logPlugin.preCalls)
+			require.Zero(t, governancePlugin.preCalls)
+		})
+	}
 }

@@ -1,28 +1,25 @@
 package bifrost
 
 import (
-	"testing"
-
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/stretchr/testify/require"
+	"testing"
 )
 
-func TestTranscriptionProviderIsKeylessAndRejectsInference(t *testing.T) {
+func TestTranscriptionCustomProviderIsKeylessAndRejectsInference(t *testing.T) {
+	const name schemas.ModelProvider = "transcription"
+	require.False(t, IsStandardProvider(name))
 	b := &Bifrost{}
-	for _, config := range []*schemas.ProviderConfig{{CustomProviderConfig: &schemas.CustomProviderConfig{BaseProviderType: schemas.VLLM}}, {NetworkConfig: schemas.NetworkConfig{BaseURL: "http://example.invalid"}}} {
-		_, err := b.createBaseProvider(schemas.Transcription, config)
-		require.ErrorContains(t, err, "does not accept inference configuration")
-	}
-	provider, err := b.createBaseProvider(schemas.Transcription, &schemas.ProviderConfig{})
+	provider, err := b.createBaseProvider(name, &schemas.ProviderConfig{CustomProviderConfig: &schemas.CustomProviderConfig{
+		BaseProviderType: schemas.OpenAI, IsKeyLess: true, AllowedRequests: &schemas.AllowedRequests{},
+	}})
 	require.NoError(t, err)
-	require.Equal(t, schemas.Transcription, provider.GetProviderKey())
+	require.Equal(t, name, provider.GetProviderKey())
 	models, bErr := provider.ListModels(nil, nil, nil)
-	require.Nil(t, bErr)
-	require.Empty(t, models.Data)
+	require.Nil(t, models)
+	require.NotNil(t, bErr)
 	response, bErr := provider.Transcription(nil, schemas.Key{}, nil)
 	require.Nil(t, response)
-	require.Equal(t, 400, *bErr.StatusCode)
-	parsed, model := schemas.ParseModelString("transcription/Asr-1", "")
-	require.Equal(t, schemas.Transcription, parsed)
-	require.Equal(t, "Asr-1", model)
+	require.NotNil(t, bErr)
+	require.Contains(t, bErr.Error.Message, "not supported")
 }
