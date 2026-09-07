@@ -28,7 +28,7 @@ var providersWithPartialListModels = map[schemas.ModelProvider]bool{
 // otherwise the datasheet view is filtered by the keyconfig aggregates.
 func (mc *ModelCatalog) GetModelsForProvider(provider schemas.ModelProvider) []string {
 	if provider == configstore.TranscriptionUsageProvider {
-		return mc.registeredModels()
+		return mc.getTranscriptionModels()
 	}
 	blacklisted := mc.keyconf.BlacklistedFor(provider)
 	allowed := mc.keyconf.AllowedFor(provider)
@@ -124,7 +124,7 @@ func (mc *ModelCatalog) appendAllowedDatasheetModels(out []string, models []stri
 // applied): union of live unfiltered entries and the datasheet view.
 func (mc *ModelCatalog) GetUnfilteredModelsForProvider(provider schemas.ModelProvider) []string {
 	if provider == configstore.TranscriptionUsageProvider {
-		return mc.registeredModels()
+		return mc.getTranscriptionModels()
 	}
 	liveModels := mc.live.UnfilteredModelsForProvider(provider)
 	datasheetModels := mc.datasheet.DatasheetModelsForProvider(provider)
@@ -369,7 +369,7 @@ func (mc *ModelCatalog) refineNestedProviderModel(provider schemas.ModelProvider
 	}
 }
 
-func (mc *ModelCatalog) registeredModels() []string {
+func (mc *ModelCatalog) getTranscriptionModels() []string {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	states, err := configstore.ListTranscriptionModels(ctx, mc.configStore)
