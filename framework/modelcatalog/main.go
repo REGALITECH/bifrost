@@ -619,11 +619,16 @@ func NewTestCatalog(baseModelIndex map[string]string) *ModelCatalog {
 // loaded from a local testdata pricing file via datasheet.New(...) +
 // LoadFromURLIntoMemory) in a ModelCatalog, so tests in other packages can
 // exercise real pricing/cost computation without reaching the network.
-func NewTestCatalogWithDatasheet(ds *datasheet.Store) *ModelCatalog {
+func NewTestCatalogWithDatasheet(ds *datasheet.Store, stores ...configstore.ConfigStore) *ModelCatalog {
+	var store configstore.ConfigStore
+	if len(stores) > 0 {
+		store = stores[0]
+	}
 	return &ModelCatalog{
-		datasheet: ds,
-		live:      live.New(nil),
-		keyconf:   keyconfig.New(nil),
-		done:      make(chan struct{}),
+		configStore: store,
+		datasheet:   ds,
+		live:        live.New(nil),
+		keyconf:     keyconfig.New(nil),
+		done:        make(chan struct{}),
 	}
 }

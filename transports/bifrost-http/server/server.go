@@ -1592,6 +1592,16 @@ func (s *BifrostHTTPServer) UpsertModelPricingAttributes(ctx context.Context, en
 	var missing []string
 	err := s.Config.ConfigStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
 		for _, e := range entries {
+			if e.Provider == string(configstore.TranscriptionUsageProvider) {
+				if e.CreateIfMissing {
+					if err := configstore.EnsureTranscriptionModel(ctx, s.Config.ConfigStore, e.Model, tx); err != nil {
+						return err
+					}
+				}
+				if e.CreateIfMissing && e.AdditionalAttributes == nil {
+					continue
+				}
+			}
 			rows, err := s.Config.ConfigStore.UpsertModelPricingAttributes(ctx, e.Model, e.Provider, e.AdditionalAttributes, tx)
 			if err != nil {
 				return err

@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -12,8 +13,10 @@ import (
 
 	"github.com/fasthttp/router"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
+	"gorm.io/gorm"
 )
 
 const transcriptionUsagePath = "/v1/audio/transcriptions/usage"
@@ -82,6 +85,16 @@ func (h *TranscriptionUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 	virtualKey, _ := bifrostCtx.Value(schemas.BifrostContextKeyVirtualKey).(string)
 	if strings.TrimSpace(virtualKey) == "" {
 		SendError(ctx, fasthttp.StatusUnauthorized, "virtual key is required. Provide a virtual key via the x-bf-vk header.")
+		return
+	}
+
+	_, err = configstore.GetTranscriptionModel(bifrostCtx, h.config.ConfigStore, model)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		SendError(ctx, fasthttp.StatusBadRequest, "model must be a registered STT usage model")
+		return
+	}
+	if err != nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "transcription usage model configuration is unavailable")
 		return
 	}
 
@@ -205,19 +218,12 @@ func validateTranscriptionUsageRequest(payload *transcriptionUsageRequest) (sche
 	if payload.Seq == nil || *payload.Seq < 0 {
 		return "", "", fmt.Errorf("seq is required and must be non-negative")
 	}
-	payload.Model = strings.TrimSpace(payload.Model)
-	if payload.Model == "" {
-		return "", "", fmt.Errorf("model is required")
+	if !strings.HasPrefix(payload.Model, string(configstore.TranscriptionUsageProvider)+"/") {
+		return "", "", fmt.Errorf("model must use the transcription provider")
 	}
-	provider, model := schemas.ParseModelString(payload.Model, schemas.VLLM)
-	if provider != schemas.VLLM {
-		return "", "", fmt.Errorf("model must use the vllm provider")
+	model := strings.TrimPrefix(payload.Model, string(configstore.TranscriptionUsageProvider)+"/")
+	if err := configstore.ValidateTranscriptionModelName(model); err != nil {
+		return "", "", err
 	}
-	if strings.TrimSpace(model) == "" {
-		return "", "", fmt.Errorf("model is required")
-	}
-	if _, ok := allowedTranscriptionUsageModels[model]; !ok {
-		return "", "", fmt.Errorf("model must be a known ASR usage model")
-	}
-	return provider, model, nil
+	return configstore.TranscriptionUsageProvider, model, nil
 }
