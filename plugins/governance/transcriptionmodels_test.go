@@ -44,8 +44,6 @@ func TestTranscriptionWildcardAndPricing(t *testing.T) {
 		vk.ProviderConfigs[0].AllowedModels = nil
 		require.False(t, resolver.isModelAllowed(vk, schemas.Transcription, "brand-new-1"))
 	}
-	require.NoError(t, configstore.SetTranscriptionModelEnabled(ctx, store, "brand-new-1", false))
-	require.False(t, catalog.IsModelAllowedForProvider(schemas.Transcription, "brand-new-1", nil, schemas.WhiteList{"*"}))
 	usage := &schemas.BifrostLLMUsage{PromptTokens: 2500, TotalTokens: 2500}
 	require.Zero(t, catalog.CalculateCostForUsage(usage, schemas.Transcription, "brand-new-2", schemas.TranscriptionRequest, nil))
 	require.NoError(t, store.DB().Model(&tables.TableModelPricing{}).Where("provider = ? AND model = ?", "transcription", "brand-new-2").Update("input_cost_per_token", 0.002).Error)

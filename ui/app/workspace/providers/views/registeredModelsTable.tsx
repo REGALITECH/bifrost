@@ -1,6 +1,5 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { getErrorMessage, useGetModelDetailsQuery, useUpsertModelCatalogEntriesMutation } from "@/lib/store";
 import { ModelProvider } from "@/lib/types/config";
@@ -30,14 +29,6 @@ export default function RegisteredModelsTable({ provider }: { provider: ModelPro
 			toast.success("Model registered");
 		} catch (e) {
 			setError("model", { message: getErrorMessage(e) });
-		}
-	}
-	async function toggle(model: string, enabled: boolean) {
-		try {
-			await update([{ provider: provider.name, model, enabled }]).unwrap();
-			toast.success("Model updated");
-		} catch (e) {
-			toast.error(getErrorMessage(e));
 		}
 	}
 	return (
@@ -71,7 +62,6 @@ export default function RegisteredModelsTable({ provider }: { provider: ModelPro
 				<TableHeader>
 					<TableRow>
 						<TableHead>Model</TableHead>
-						<TableHead>Enabled</TableHead>
 						<TableHead>Input USD / ms</TableHead>
 						<TableHead>Output USD / ms</TableHead>
 					</TableRow>
@@ -80,22 +70,13 @@ export default function RegisteredModelsTable({ provider }: { provider: ModelPro
 					{data?.models.map((model) => (
 						<TableRow key={model.name} data-testid={`provider-model-${model.name}`}>
 							<TableCell>{model.name}</TableCell>
-							<TableCell>
-								<Switch
-									checked={model.enabled ?? false}
-									disabled={!canUpdate || saving}
-									onCheckedChange={(enabled) => toggle(model.name, enabled)}
-									aria-label={`Enable ${model.name}`}
-									data-testid={`provider-model-enabled-${model.name}`}
-								/>
-							</TableCell>
 							<TableCell>{model.input_cost_per_token ?? "Not configured"}</TableCell>
 							<TableCell>{model.output_cost_per_token ?? "Not configured"}</TableCell>
 						</TableRow>
 					))}
 					{!isLoading && !data?.models.length && (
 						<TableRow>
-							<TableCell colSpan={4}>No models registered</TableCell>
+							<TableCell colSpan={3}>No models registered</TableCell>
 						</TableRow>
 					)}
 				</TableBody>

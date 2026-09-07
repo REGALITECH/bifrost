@@ -28,7 +28,7 @@ var providersWithPartialListModels = map[schemas.ModelProvider]bool{
 // otherwise the datasheet view is filtered by the keyconfig aggregates.
 func (mc *ModelCatalog) GetModelsForProvider(provider schemas.ModelProvider) []string {
 	if provider == schemas.Transcription {
-		return mc.registeredModels(false)
+		return mc.registeredModels()
 	}
 	blacklisted := mc.keyconf.BlacklistedFor(provider)
 	allowed := mc.keyconf.AllowedFor(provider)
@@ -124,7 +124,7 @@ func (mc *ModelCatalog) appendAllowedDatasheetModels(out []string, models []stri
 // applied): union of live unfiltered entries and the datasheet view.
 func (mc *ModelCatalog) GetUnfilteredModelsForProvider(provider schemas.ModelProvider) []string {
 	if provider == schemas.Transcription {
-		return mc.registeredModels(true)
+		return mc.registeredModels()
 	}
 	liveModels := mc.live.UnfilteredModelsForProvider(provider)
 	datasheetModels := mc.datasheet.DatasheetModelsForProvider(provider)
@@ -260,7 +260,7 @@ func (mc *ModelCatalog) IsModelAllowedForProvider(provider schemas.ModelProvider
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		state, err := configstore.GetTranscriptionModel(ctx, mc.configStore, model)
-		return err == nil && state.Enabled && state.PricingConfigured && (allowedModels.IsAllowed(model) || allowedModels.IsAllowed(string(provider)+"/"+model))
+		return err == nil && state.PricingConfigured && (allowedModels.IsAllowed(model) || allowedModels.IsAllowed(string(provider)+"/"+model))
 	}
 	isCustomProvider := false
 	hasListModelsEndpointDisabled := false
@@ -369,7 +369,7 @@ func (mc *ModelCatalog) refineNestedProviderModel(provider schemas.ModelProvider
 	}
 }
 
-func (mc *ModelCatalog) registeredModels(includeDisabled bool) []string {
+func (mc *ModelCatalog) registeredModels() []string {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	states, err := configstore.ListTranscriptionModels(ctx, mc.configStore)
@@ -378,9 +378,7 @@ func (mc *ModelCatalog) registeredModels(includeDisabled bool) []string {
 	}
 	names := make([]string, 0, len(states))
 	for _, state := range states {
-		if includeDisabled || state.Enabled {
-			names = append(names, state.Model)
-		}
+		names = append(names, state.Model)
 	}
 	return names
 }

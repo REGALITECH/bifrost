@@ -89,8 +89,8 @@ func (h *TranscriptionUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 	}
 
 	state, err := configstore.GetTranscriptionModel(bifrostCtx, h.config.ConfigStore, model)
-	if errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && !state.Enabled) {
-		SendError(ctx, fasthttp.StatusBadRequest, "model must be a registered enabled STT usage model")
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		SendError(ctx, fasthttp.StatusBadRequest, "model must be a registered STT usage model")
 		return
 	}
 	if err != nil || !state.PricingConfigured || h.config.ModelCatalog == nil {

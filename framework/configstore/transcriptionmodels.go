@@ -27,7 +27,6 @@ type TranscriptionModelState struct {
 	Model              string                `json:"model"`
 	Provider           schemas.ModelProvider `json:"provider"`
 	UsageKind          string                `json:"usage_kind"`
-	Enabled            bool                  `json:"enabled"`
 	PricingConfigured  bool                  `json:"pricing_configured"`
 	InputCostPerToken  *float64              `json:"input_cost_per_token"`
 	OutputCostPerToken *float64              `json:"output_cost_per_token"`
@@ -48,7 +47,7 @@ func EnsureTranscriptionModel(ctx context.Context, store ConfigStore, model stri
 		if err := tx.Where("name = ?", schemas.Transcription).First(&provider).Error; err != nil {
 			return err
 		}
-		row := tables.TableModel{ID: uuid.NewString(), ProviderID: provider.ID, Name: model, Enabled: true}
+		row := tables.TableModel{ID: uuid.NewString(), ProviderID: provider.ID, Name: model}
 		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error; err != nil {
 			return err
 		}
@@ -70,7 +69,7 @@ func GetTranscriptionModel(ctx context.Context, store ConfigStore, model string)
 	if err := store.DB().WithContext(ctx).Where("name = ? AND provider_id IN (?)", model, store.DB().Model(&tables.TableProvider{}).Select("id").Where("name = ?", schemas.Transcription)).First(&row).Error; err != nil {
 		return nil, err
 	}
-	state := &TranscriptionModelState{Model: row.Name, Provider: schemas.Transcription, UsageKind: "stt", Enabled: row.Enabled}
+	state := &TranscriptionModelState{Model: row.Name, Provider: schemas.Transcription, UsageKind: "stt"}
 	price, err := GetTranscriptionModelPrice(ctx, store, model)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return state, nil
@@ -90,24 +89,6 @@ func GetTranscriptionModelPrice(ctx context.Context, store ConfigStore, model st
 	var price tables.TableModelPricing
 	err := store.DB().WithContext(ctx).Where("model = ? AND provider = ? AND mode = ?", model, schemas.Transcription, "audio_transcription").First(&price).Error
 	return &price, err
-}
-
-func SetTranscriptionModelEnabled(ctx context.Context, store ConfigStore, model string, enabled bool, txs ...*gorm.DB) error {
-	if store == nil {
-		return fmt.Errorf("config store is required")
-	}
-	db := store.DB()
-	if len(txs) > 0 {
-		db = txs[0]
-	}
-	result := db.WithContext(ctx).Model(&tables.TableModel{}).Where("name = ? AND provider_id IN (?)", model, store.DB().Model(&tables.TableProvider{}).Select("id").Where("name = ?", schemas.Transcription)).Update("enabled", enabled)
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return gorm.ErrRecordNotFound
-	}
-	return nil
 }
 
 func ListTranscriptionModels(ctx context.Context, store ConfigStore) ([]TranscriptionModelState, error) {

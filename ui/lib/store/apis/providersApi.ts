@@ -37,7 +37,6 @@ export interface ListModelsResponse {
 // model-catalog Models tab to list (model, provider) entries with their
 // additional_attributes.
 export interface ModelDetails {
-	enabled?: boolean;
 	usage_kind?: string;
 	pricing_configured?: boolean;
 	name: string;
@@ -64,7 +63,6 @@ export interface ListModelDetailsResponse {
 // or omitted additional_attributes clears the column for that row.
 export interface ModelPricingAttributesEntry {
 	create_if_missing?: boolean;
-	enabled?: boolean;
 	model: string;
 	provider: string;
 	additional_attributes?: Record<string, string>;

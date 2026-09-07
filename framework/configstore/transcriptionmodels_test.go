@@ -32,11 +32,10 @@ func TestTranscriptionModelPersistenceAndRepair(t *testing.T) {
 	require.NoError(t, store.DB().Exec("CREATE TABLE config_models (id TEXT PRIMARY KEY, provider_id INTEGER NOT NULL, name TEXT, created_at DATETIME, updated_at DATETIME, UNIQUE(provider_id, name))").Error)
 	require.NoError(t, store.DB().Create(&tables.TableProvider{Name: "transcription"}).Error)
 	require.NoError(t, store.DB().Exec("INSERT INTO config_models (id,provider_id,name) VALUES ('existing',999,'legacy')").Error)
-	// Existing vLLM prices survive the additive migration and all registration operations.
+	// Existing vLLM prices survive registration against the unchanged schema.
 	old := tables.TableModelPricing{Model: "asr-new", Provider: "vllm", Mode: "audio_transcription"}
 	require.NoError(t, store.DB().Create(&old).Error)
-	require.NoError(t, migrationAddConfigModelEnabled(ctx, store.DB(), &mockLogger{}))
-	require.NoError(t, migrationAddConfigModelEnabled(ctx, store.DB(), &mockLogger{}))
+	require.False(t, store.DB().Migrator().HasColumn(&tables.TableModel{}, "enabled"))
 	var wg sync.WaitGroup
 	errs := make(chan error, 8)
 	for range 8 {
@@ -50,16 +49,13 @@ func TestTranscriptionModelPersistenceAndRepair(t *testing.T) {
 	}
 	state, err := GetTranscriptionModel(ctx, store, "asr-new")
 	require.NoError(t, err)
-	require.True(t, state.Enabled)
 	require.True(t, state.PricingConfigured)
 	require.Equal(t, 0.0, *state.InputCostPerToken)
 	priceQuery := store.DB().Model(&tables.TableModelPricing{}).Where("provider = ? AND model = ?", "transcription", "asr-new")
 	require.NoError(t, priceQuery.Update("input_cost_per_token", 0.002).Error)
-	require.NoError(t, SetTranscriptionModelEnabled(ctx, store, "asr-new", false))
 	require.NoError(t, EnsureTranscriptionModel(ctx, store, "asr-new"))
 	state, err = GetTranscriptionModel(ctx, open(), "asr-new")
 	require.NoError(t, err)
-	require.False(t, state.Enabled)
 	require.Equal(t, 0.002, *state.InputCostPerToken)
 	// A null existing price fails closed and is never silently reset to zero.
 	require.NoError(t, priceQuery.Update("input_cost_per_token", nil).Error)
@@ -67,19 +63,19 @@ func TestTranscriptionModelPersistenceAndRepair(t *testing.T) {
 	state, err = GetTranscriptionModel(ctx, store, "asr-new")
 	require.NoError(t, err)
 	require.False(t, state.PricingConfigured)
-	// Missing row (e.g. partial historical setup) is repairable, preserving disabled state.
+	// Missing row (e.g. partial historical setup) is repairable without changing the model registration.
 	require.NoError(t, priceQuery.Delete(&tables.TableModelPricing{}).Error)
 	require.NoError(t, EnsureTranscriptionModel(ctx, store, "asr-new"))
 	state, err = GetTranscriptionModel(ctx, store, "asr-new")
 	require.NoError(t, err)
 	require.True(t, state.PricingConfigured)
-	require.False(t, state.Enabled)
 	var count int64
 	require.NoError(t, store.DB().Model(&tables.TableModel{}).Count(&count).Error)
 	require.EqualValues(t, 2, count)
 	var legacy tables.TableModel
 	require.NoError(t, store.DB().First(&legacy, "id = ?", "existing").Error)
-	require.True(t, legacy.Enabled)
+	require.Equal(t, "legacy", legacy.Name)
+	require.False(t, store.DB().Migrator().HasColumn(&tables.TableModel{}, "enabled"))
 	require.NoError(t, store.DB().First(&old, old.ID).Error)
 	require.Equal(t, "vllm", old.Provider)
 }

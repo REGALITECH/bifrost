@@ -108,7 +108,6 @@ func TestTranscriptionModelDetailsExactBeforePagination(t *testing.T) {
 	require.Equal(t, 1, response.Total)
 	require.Len(t, response.Models, 1)
 	require.Equal(t, "asr", response.Models[0].Name)
-	require.True(t, *response.Models[0].Enabled)
 	require.True(t, *response.Models[0].PricingConfigured)
 	require.Equal(t, "stt", response.Models[0].UsageKind)
 }

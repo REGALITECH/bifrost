@@ -1614,12 +1614,7 @@ func (s *BifrostHTTPServer) UpsertModelPricingAttributes(ctx context.Context, en
 						return err
 					}
 				}
-				if e.Enabled != nil {
-					if err := configstore.SetTranscriptionModelEnabled(ctx, s.Config.ConfigStore, e.Model, *e.Enabled, tx); err != nil {
-						return err
-					}
-				}
-				if (e.CreateIfMissing || e.Enabled != nil) && e.AdditionalAttributes == nil {
+				if e.CreateIfMissing && e.AdditionalAttributes == nil {
 					continue
 				}
 			}

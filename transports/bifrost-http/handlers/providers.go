@@ -54,7 +54,6 @@ var ErrRefreshInProgress = errors.New("model refresh already in progress for thi
 // (model, provider) is the natural key on governance_model_pricing.
 type ModelPricingAttributesEntry struct {
 	CreateIfMissing      bool              `json:"create_if_missing,omitempty"`
-	Enabled              *bool             `json:"enabled,omitempty"`
 	Model                string            `json:"model"`
 	Provider             string            `json:"provider"`
 	AdditionalAttributes map[string]string `json:"additional_attributes,omitempty"`
@@ -661,7 +660,6 @@ type ListModelsResponse struct {
 
 // ModelDetailsResponse represents a model with capability metadata.
 type ModelDetailsResponse struct {
-	Enabled              *bool                 `json:"enabled,omitempty"`
 	UsageKind            string                `json:"usage_kind,omitempty"`
 	PricingConfigured    *bool                 `json:"pricing_configured,omitempty"`
 	Name                 string                `json:"name"`
@@ -806,7 +804,6 @@ func (h *ProviderHandler) listModelDetails(ctx *fasthttp.RequestCtx) {
 				SendError(ctx, 503, "model state unavailable")
 				return
 			}
-			details.Enabled = &state.Enabled
 			details.UsageKind = state.UsageKind
 			details.PricingConfigured = &state.PricingConfigured
 			details.InputCostPerToken = state.InputCostPerToken
@@ -1335,8 +1332,8 @@ func validateRetryBackoff(networkConfig *schemas.NetworkConfig) error {
 
 // upsertModelCatalogEntries handles PUT /api/models/catalog — batch-upserts
 // the additional_attributes JSON on the pricing rows keyed by
-// (model, provider). Transcription supports explicit create_if_missing and enabled
-// fields for registered keyless models. Other entries must already have a pricing
+// (model, provider). Transcription supports explicit create_if_missing
+// field for registered keyless models. Other entries must already have a pricing
 // row. The batch is atomic. An attribute-only entry with an empty map clears it.
 func (h *ProviderHandler) upsertModelCatalogEntries(ctx *fasthttp.RequestCtx) {
 	var payload []ModelPricingAttributesEntry
@@ -1351,7 +1348,7 @@ func (h *ProviderHandler) upsertModelCatalogEntries(ctx *fasthttp.RequestCtx) {
 				return
 			}
 		} else {
-			if payload[i].CreateIfMissing || payload[i].Enabled != nil {
+			if payload[i].CreateIfMissing {
 				SendError(ctx, 400, "registration fields require the transcription provider")
 				return
 			}
