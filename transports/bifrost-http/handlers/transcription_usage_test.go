@@ -5,15 +5,16 @@ import (
 	"encoding/json"
 	"math"
 	"net"
+	"path/filepath"
 	"strconv"
 	"testing"
 
 	"github.com/fasthttp/router"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
-	"github.com/maximhq/bifrost/framework/configstore/tables"
+	"github.com/maximhq/bifrost/framework/logstore"
 	"github.com/maximhq/bifrost/framework/modelcatalog"
-	"github.com/maximhq/bifrost/framework/modelcatalog/datasheet"
+	loggingplugin "github.com/maximhq/bifrost/plugins/logging"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -67,10 +68,10 @@ func newTranscriptionUsageTestContext(body, virtualKey, requestID string) *fasth
 	return ctx
 }
 
-func newTranscriptionUsageTestHandler(t *testing.T, events *[]string) (*TranscriptionUsageHandler, *transcriptionUsageTestPlugin, *transcriptionUsageTestPlugin) {
+func newTranscriptionUsageTestHandler(events *[]string) (*TranscriptionUsageHandler, *transcriptionUsageTestPlugin, *transcriptionUsageTestPlugin) {
 	loggingPlugin := &transcriptionUsageTestPlugin{name: "logging", events: events}
 	governancePlugin := &transcriptionUsageTestPlugin{name: "governance", events: events}
-	config := transcriptionUsageTestConfig(t)
+	config := transcriptionUsageTestConfig()
 	plugins := []schemas.BasePlugin{loggingPlugin, governancePlugin}
 	config.BasePlugins.Store(&plugins)
 	return NewTranscriptionUsageHandler(config, "logging", "governance"), loggingPlugin, governancePlugin
@@ -78,11 +79,11 @@ func newTranscriptionUsageTestHandler(t *testing.T, events *[]string) (*Transcri
 
 func TestTranscriptionUsageHandlerRegistersRoute(t *testing.T) {
 	events := []string{}
-	handler, _, _ := newTranscriptionUsageTestHandler(t, &events)
+	handler, _, _ := newTranscriptionUsageTestHandler(&events)
 	r := router.New()
 	handler.RegisterRoutes(r)
 
-	ctx := newTranscriptionUsageTestContext(`{"audio_ms":300,"turns":1,"outcome":"completed","session_id":"session-1","seq":0,"model":"transcription/qwen3-asr"}`, "vk-test", "usage-1")
+	ctx := newTranscriptionUsageTestContext(`{"audio_ms":300,"turns":1,"outcome":"completed","session_id":"session-1","seq":0,"model":"qwen3-asr"}`, "vk-test", "usage-1")
 	r.Handler(ctx)
 
 	require.Equal(t, fasthttp.StatusAccepted, ctx.Response.StatusCode(), string(ctx.Response.Body()))
@@ -90,8 +91,8 @@ func TestTranscriptionUsageHandlerRegistersRoute(t *testing.T) {
 
 func TestTranscriptionUsageHandlerRecordsUsage(t *testing.T) {
 	events := []string{}
-	handler, loggingPlugin, governancePlugin := newTranscriptionUsageTestHandler(t, &events)
-	ctx := newTranscriptionUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"transcription/qwen3-asr"}`, "vk-test", "usage-request-1")
+	handler, loggingPlugin, governancePlugin := newTranscriptionUsageTestHandler(&events)
+	ctx := newTranscriptionUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"vllm/qwen3-asr"}`, "vk-test", "usage-request-1")
 
 	handler.recordUsage(ctx)
 
@@ -104,7 +105,7 @@ func TestTranscriptionUsageHandlerRecordsUsage(t *testing.T) {
 	require.NotNil(t, loggingPlugin.preRequest)
 	assert.Equal(t, schemas.TranscriptionRequest, loggingPlugin.preRequest.RequestType)
 	require.NotNil(t, loggingPlugin.preRequest.TranscriptionRequest)
-	assert.Equal(t, schemas.Transcription, loggingPlugin.preRequest.TranscriptionRequest.Provider)
+	assert.Equal(t, schemas.VLLM, loggingPlugin.preRequest.TranscriptionRequest.Provider)
 	assert.Equal(t, "qwen3-asr", loggingPlugin.preRequest.TranscriptionRequest.Model)
 	assert.Nil(t, loggingPlugin.preRequest.TranscriptionRequest.Input, "audio must never enter the logging pipeline")
 
@@ -120,7 +121,7 @@ func TestTranscriptionUsageHandlerRecordsUsage(t *testing.T) {
 	require.NotNil(t, governancePlugin.postResponse.TranscriptionResponse.Usage.TotalTokens)
 	assert.Equal(t, 5010, *governancePlugin.postResponse.TranscriptionResponse.Usage.TotalTokens)
 	assert.Equal(t, schemas.TranscriptionRequest, governancePlugin.postResponse.TranscriptionResponse.ExtraFields.RequestType)
-	assert.Equal(t, schemas.Transcription, governancePlugin.postResponse.TranscriptionResponse.ExtraFields.Provider)
+	assert.Equal(t, schemas.VLLM, governancePlugin.postResponse.TranscriptionResponse.ExtraFields.Provider)
 
 	dimensions, ok := loggingPlugin.preContext.Value(schemas.BifrostContextKeyDimensions).(map[string]string)
 	require.True(t, ok)
@@ -145,11 +146,10 @@ func TestTranscriptionUsageHandlerAcceptsKnownModels(t *testing.T) {
 		"unknown",
 	}
 	for _, model := range models {
-		for _, submittedModel := range []string{"transcription/" + model} {
+		for _, submittedModel := range []string{model, "vllm/" + model} {
 			t.Run(submittedModel, func(t *testing.T) {
 				events := []string{}
-				handler, loggingPlugin, governancePlugin := newTranscriptionUsageTestHandler(t, &events)
-				require.NoError(t, configstore.EnsureTranscriptionModel(context.Background(), handler.config.ConfigStore, model))
+				handler, loggingPlugin, governancePlugin := newTranscriptionUsageTestHandler(&events)
 				audioMS, turns, seq := int64(5010), int64(3), int64(7)
 				payload, err := json.Marshal(transcriptionUsageRequest{
 					AudioMS:   &audioMS,
@@ -167,20 +167,20 @@ func TestTranscriptionUsageHandlerAcceptsKnownModels(t *testing.T) {
 				require.Equal(t, fasthttp.StatusAccepted, ctx.Response.StatusCode(), string(ctx.Response.Body()))
 				require.NotNil(t, loggingPlugin.preRequest)
 				require.NotNil(t, loggingPlugin.preRequest.TranscriptionRequest)
-				assert.Equal(t, schemas.Transcription, loggingPlugin.preRequest.TranscriptionRequest.Provider)
+				assert.Equal(t, schemas.VLLM, loggingPlugin.preRequest.TranscriptionRequest.Provider)
 				assert.Equal(t, model, loggingPlugin.preRequest.TranscriptionRequest.Model)
 				require.NotNil(t, governancePlugin.preRequest)
 				require.NotNil(t, governancePlugin.preRequest.TranscriptionRequest)
-				assert.Equal(t, schemas.Transcription, governancePlugin.preRequest.TranscriptionRequest.Provider)
+				assert.Equal(t, schemas.VLLM, governancePlugin.preRequest.TranscriptionRequest.Provider)
 				assert.Equal(t, model, governancePlugin.preRequest.TranscriptionRequest.Model)
 				require.NotNil(t, governancePlugin.postResponse)
 				require.NotNil(t, governancePlugin.postResponse.TranscriptionResponse)
-				assert.Equal(t, schemas.Transcription, governancePlugin.postResponse.TranscriptionResponse.ExtraFields.Provider)
+				assert.Equal(t, schemas.VLLM, governancePlugin.postResponse.TranscriptionResponse.ExtraFields.Provider)
 				assert.Equal(t, model, governancePlugin.postResponse.TranscriptionResponse.ExtraFields.OriginalModelRequested)
 				assert.Equal(t, model, governancePlugin.postResponse.TranscriptionResponse.ExtraFields.ResolvedModelUsed)
 				require.NotNil(t, loggingPlugin.postResponse)
 				require.NotNil(t, loggingPlugin.postResponse.TranscriptionResponse)
-				assert.Equal(t, schemas.Transcription, loggingPlugin.postResponse.TranscriptionResponse.ExtraFields.Provider)
+				assert.Equal(t, schemas.VLLM, loggingPlugin.postResponse.TranscriptionResponse.ExtraFields.Provider)
 				assert.Equal(t, model, loggingPlugin.postResponse.TranscriptionResponse.ExtraFields.OriginalModelRequested)
 				assert.Equal(t, model, loggingPlugin.postResponse.TranscriptionResponse.ExtraFields.ResolvedModelUsed)
 			})
@@ -190,8 +190,8 @@ func TestTranscriptionUsageHandlerAcceptsKnownModels(t *testing.T) {
 
 func TestTranscriptionUsageHandlerRejectsUnknownField(t *testing.T) {
 	events := []string{}
-	handler, _, _ := newTranscriptionUsageTestHandler(t, &events)
-	ctx := newTranscriptionUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"transcription/qwen3-asr","text":"secret"}`, "vk-test", "usage-2")
+	handler, _, _ := newTranscriptionUsageTestHandler(&events)
+	ctx := newTranscriptionUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"qwen3-asr","text":"secret"}`, "vk-test", "usage-2")
 
 	handler.recordUsage(ctx)
 
@@ -202,8 +202,8 @@ func TestTranscriptionUsageHandlerRejectsUnknownField(t *testing.T) {
 
 func TestTranscriptionUsageHandlerRejectsMultipleJSONValues(t *testing.T) {
 	events := []string{}
-	handler, _, _ := newTranscriptionUsageTestHandler(t, &events)
-	ctx := newTranscriptionUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"transcription/qwen3-asr"} {}`, "vk-test", "usage-3")
+	handler, _, _ := newTranscriptionUsageTestHandler(&events)
+	ctx := newTranscriptionUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"qwen3-asr"} {}`, "vk-test", "usage-3")
 
 	handler.recordUsage(ctx)
 
@@ -214,8 +214,8 @@ func TestTranscriptionUsageHandlerRejectsMultipleJSONValues(t *testing.T) {
 
 func TestTranscriptionUsageHandlerRequiresVirtualKey(t *testing.T) {
 	events := []string{}
-	handler, _, _ := newTranscriptionUsageTestHandler(t, &events)
-	ctx := newTranscriptionUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"transcription/qwen3-asr"}`, "", "usage-4")
+	handler, _, _ := newTranscriptionUsageTestHandler(&events)
+	ctx := newTranscriptionUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"qwen3-asr"}`, "", "usage-4")
 
 	handler.recordUsage(ctx)
 
@@ -226,13 +226,13 @@ func TestTranscriptionUsageHandlerRequiresVirtualKey(t *testing.T) {
 
 func TestTranscriptionUsageHandlerReturnsGovernanceRejection(t *testing.T) {
 	events := []string{}
-	handler, _, governancePlugin := newTranscriptionUsageTestHandler(t, &events)
+	handler, _, governancePlugin := newTranscriptionUsageTestHandler(&events)
 	status := fasthttp.StatusForbidden
 	governancePlugin.shortCircuit = &schemas.LLMPluginShortCircuit{Error: &schemas.BifrostError{
 		StatusCode: &status,
 		Error:      &schemas.ErrorField{Message: "virtual key is inactive"},
 	}}
-	ctx := newTranscriptionUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"transcription/qwen3-asr"}`, "vk-test", "usage-5")
+	ctx := newTranscriptionUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"qwen3-asr"}`, "vk-test", "usage-5")
 
 	handler.recordUsage(ctx)
 
@@ -245,12 +245,12 @@ func TestTranscriptionUsageHandlerUsesReloadedGovernancePlugin(t *testing.T) {
 	events := []string{}
 	loggingPlugin := &transcriptionUsageTestPlugin{name: "logging", events: &events}
 	oldGovernancePlugin := &transcriptionUsageTestPlugin{name: "governance", events: &events}
-	config := transcriptionUsageTestConfig(t)
+	config := transcriptionUsageTestConfig()
 	plugins := []schemas.BasePlugin{loggingPlugin, oldGovernancePlugin}
 	config.BasePlugins.Store(&plugins)
 	handler := NewTranscriptionUsageHandler(config, "logging", "governance")
 
-	firstCtx := newTranscriptionUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"transcription/qwen3-asr"}`, "vk-test", "usage-6")
+	firstCtx := newTranscriptionUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"qwen3-asr"}`, "vk-test", "usage-6")
 	handler.recordUsage(firstCtx)
 	require.Equal(t, fasthttp.StatusAccepted, firstCtx.Response.StatusCode(), string(firstCtx.Response.Body()))
 	assert.Equal(t, []string{"logging.pre", "governance.pre", "governance.post", "logging.post"}, events)
@@ -261,7 +261,7 @@ func TestTranscriptionUsageHandlerUsesReloadedGovernancePlugin(t *testing.T) {
 	require.NoError(t, config.ReloadPlugin(newGovernancePlugin))
 	events = nil
 
-	secondCtx := newTranscriptionUsageTestContext(`{"audio_ms":2500,"turns":1,"outcome":"failed","session_id":"session-2","seq":8,"model":"transcription/qwen3-asr"}`, "vk-test", "usage-7")
+	secondCtx := newTranscriptionUsageTestContext(`{"audio_ms":2500,"turns":1,"outcome":"failed","session_id":"session-2","seq":8,"model":"qwen3-asr"}`, "vk-test", "usage-7")
 	handler.recordUsage(secondCtx)
 
 	require.Equal(t, fasthttp.StatusAccepted, secondCtx.Response.StatusCode(), string(secondCtx.Response.Body()))
@@ -279,11 +279,11 @@ func TestTranscriptionUsageHandlerUsesReloadedGovernancePlugin(t *testing.T) {
 func TestTranscriptionUsageHandlerRequiresBothPlugins(t *testing.T) {
 	events := []string{}
 	loggingPlugin := &transcriptionUsageTestPlugin{name: "logging", events: &events}
-	config := transcriptionUsageTestConfig(t)
+	config := transcriptionUsageTestConfig()
 	plugins := []schemas.BasePlugin{loggingPlugin}
 	config.BasePlugins.Store(&plugins)
 	handler := NewTranscriptionUsageHandler(config, "logging", "governance")
-	ctx := newTranscriptionUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"transcription/qwen3-asr"}`, "vk-test", "usage-8")
+	ctx := newTranscriptionUsageTestContext(`{"audio_ms":5010,"turns":3,"outcome":"completed","session_id":"session-1","seq":7,"model":"qwen3-asr"}`, "vk-test", "usage-8")
 
 	handler.recordUsage(ctx)
 
@@ -310,11 +310,9 @@ func TestTranscriptionUsageValidateRequest(t *testing.T) {
 		{name: "blank session ID", payload: transcriptionUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "  ", Seq: &zero, Model: "qwen3-asr"}, errorString: "session_id is required"},
 		{name: "missing sequence", payload: transcriptionUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Model: "qwen3-asr"}, errorString: "seq is required and must be non-negative"},
 		{name: "negative sequence", payload: transcriptionUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &negative, Model: "qwen3-asr"}, errorString: "seq is required and must be non-negative"},
-		{name: "missing model", payload: transcriptionUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero}, errorString: "model must use the transcription provider"},
-		{name: "blank provider model", payload: transcriptionUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "transcription/"}, errorString: "model must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
-		{name: "wrong provider", payload: transcriptionUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "openai/whisper-1"}, errorString: "model must use the transcription provider"},
-		{name: "unknown prefix-less model", payload: transcriptionUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "llama-3"}, errorString: "model must use the transcription provider"},
-		{name: "unknown vllm model", payload: transcriptionUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "vllm/llama-3"}, errorString: "model must use the transcription provider"},
+		{name: "missing model", payload: transcriptionUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero}, errorString: "model is required"},
+		{name: "blank provider model", payload: transcriptionUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "vllm/"}, errorString: "model is required"},
+		{name: "wrong provider", payload: transcriptionUsageRequest{AudioMS: &zero, Turns: &zero, Outcome: "failed", SessionID: "session", Seq: &zero, Model: "openai/whisper-1"}, errorString: "model must use the vllm provider"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -344,10 +342,61 @@ func TestTranscriptionUsageValidateRequestRejectsAudioMSOverflow(t *testing.T) {
 	require.EqualError(t, err, "audio_ms is too large")
 }
 
-func transcriptionUsageTestConfig(t *testing.T) *lib.Config {
-	t.Helper()
-	store := newTestConfigStore(t)
-	require.NoError(t, store.DB().Create(&tables.TableProvider{Name: "transcription"}).Error)
-	require.NoError(t, configstore.EnsureTranscriptionModel(context.Background(), store, "qwen3-asr"))
-	return &lib.Config{ClientConfig: &configstore.ClientConfig{}, ConfigStore: store, ModelCatalog: modelcatalog.NewTestCatalogWithDatasheet(datasheet.New(store, testLogger{}, datasheet.Config{}), store)}
+func transcriptionUsageTestConfig() *lib.Config {
+	catalog := modelcatalog.NewTestCatalog(nil)
+	catalog.SetKeyConfigForProvider(schemas.VLLM, []schemas.Key{{ID: "existing-key", Name: "existing", Models: schemas.WhiteList{"qwen3-asr", "reazonspeech-nemo", "kotoba-whisper", "sherpa-onnx-ja", "sherpa-parakeet-ja", "hiragana-wav2vec2", "unknown"}, Enabled: schemas.Ptr(true)}})
+	return &lib.Config{ClientConfig: &configstore.ClientConfig{}, ModelCatalog: catalog}
+}
+
+func TestTranscriptionUsageUsesExistingModelConfiguration(t *testing.T) {
+	events := []string{}
+	h, loggingPlugin, _ := newTranscriptionUsageTestHandler(&events)
+	body := `{"audio_ms":2500,"turns":1,"outcome":"completed","session_id":"s","seq":1,"model":"vllm/new-asr-v2"}`
+	send := func(status int) {
+		ctx := newTranscriptionUsageTestContext(body, "vk-test", "usage-configured")
+		h.recordUsage(ctx)
+		require.Equal(t, status, ctx.Response.StatusCode(), string(ctx.Response.Body()))
+	}
+	send(400)
+	require.Zero(t, loggingPlugin.preCalls)
+	key := schemas.Key{ID: "existing-key", Models: schemas.WhiteList{"new-asr-v2"}, Enabled: schemas.Ptr(true)}
+	h.config.ModelCatalog.SetKeyConfigForProvider(schemas.VLLM, []schemas.Key{key})
+	send(202)
+	require.Equal(t, "new-asr-v2", loggingPlugin.postResponse.TranscriptionResponse.ExtraFields.OriginalModelRequested)
+	key.Enabled = schemas.Ptr(false)
+	h.config.ModelCatalog.SetKeyConfigForProvider(schemas.VLLM, []schemas.Key{key})
+	send(400)
+	key.Enabled = schemas.Ptr(true)
+	key.BlacklistedModels = schemas.BlackList{"new-asr-v2"}
+	h.config.ModelCatalog.SetKeyConfigForProvider(schemas.VLLM, []schemas.Key{key})
+	send(400)
+	h.config.ModelCatalog = nil
+	send(503)
+}
+
+func TestTranscriptionUsagePersistsThroughExistingLogger(t *testing.T) {
+	SetLogger(testLogger{})
+	ctx := context.Background()
+	store, err := logstore.NewLogStore(ctx, &logstore.Config{Enabled: true, Type: logstore.LogStoreTypeSQLite, Config: &logstore.SQLiteConfig{Path: filepath.Join(t.TempDir(), "logs.db")}}, testLogger{})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close(ctx)) })
+	events := []string{}
+	h, _, gov := newTranscriptionUsageTestHandler(&events)
+	logger, err := loggingplugin.Init(ctx, &loggingplugin.Config{}, testLogger{}, store, h.config.ModelCatalog, nil)
+	require.NoError(t, err)
+	plugins := []schemas.BasePlugin{logger, gov}
+	h.config.BasePlugins.Store(&plugins)
+	body := `{"audio_ms":2500,"turns":2,"outcome":"completed","session_id":"persist-session","seq":3,"model":"vllm/qwen3-asr"}`
+	request := newTranscriptionUsageTestContext(body, "vk-test", "persist-usage")
+	h.recordUsage(request)
+	require.Equal(t, 202, request.Response.StatusCode(), string(request.Response.Body()))
+	require.NoError(t, logger.Cleanup()) // Flush the asynchronous writer before reading.
+	saved, err := store.FindByID(ctx, "persist-usage")
+	require.NoError(t, err)
+	require.Equal(t, "vllm", saved.Provider)
+	require.Equal(t, "qwen3-asr", saved.Model)
+	require.Equal(t, "stt", saved.MetadataParsed["usage_kind"])
+	require.Equal(t, "2500", saved.MetadataParsed["audio_ms"])
+	require.Equal(t, "persist-session", saved.MetadataParsed["session_id"])
+	require.Equal(t, "3", saved.MetadataParsed["seq"])
 }

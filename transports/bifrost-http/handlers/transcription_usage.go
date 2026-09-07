@@ -3,20 +3,18 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/fasthttp/router"
 	"github.com/maximhq/bifrost/core/schemas"
-	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
-	"gorm.io/gorm"
 )
 
 const transcriptionUsagePath = "/v1/audio/transcriptions/usage"
@@ -88,13 +86,14 @@ func (h *TranscriptionUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	state, err := configstore.GetTranscriptionModel(bifrostCtx, h.config.ConfigStore, model)
-	if errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && !state.Enabled) {
-		SendError(ctx, fasthttp.StatusBadRequest, "model must be a registered enabled STT usage model")
+	// Model configuration is managed by the existing provider/key APIs.
+	// Never create a model or pricing row while recording usage.
+	if h.config.ModelCatalog == nil {
+		SendError(ctx, fasthttp.StatusServiceUnavailable, "model catalog is unavailable")
 		return
 	}
-	if err != nil || !state.PricingConfigured || h.config.ModelCatalog == nil {
-		SendError(ctx, fasthttp.StatusServiceUnavailable, "transcription usage model pricing is unavailable")
+	if !slices.Contains(h.config.ModelCatalog.GetModelsForProvider(provider), model) {
+		SendError(ctx, fasthttp.StatusBadRequest, "model must be available in the configured provider catalog")
 		return
 	}
 
@@ -218,12 +217,16 @@ func validateTranscriptionUsageRequest(payload *transcriptionUsageRequest) (sche
 	if payload.Seq == nil || *payload.Seq < 0 {
 		return "", "", fmt.Errorf("seq is required and must be non-negative")
 	}
-	if !strings.HasPrefix(payload.Model, string(schemas.Transcription)+"/") {
-		return "", "", fmt.Errorf("model must use the transcription provider")
+	payload.Model = strings.TrimSpace(payload.Model)
+	if payload.Model == "" {
+		return "", "", fmt.Errorf("model is required")
 	}
-	model := strings.TrimPrefix(payload.Model, string(schemas.Transcription)+"/")
-	if err := configstore.ValidateTranscriptionModelName(model); err != nil {
-		return "", "", err
+	provider, model := schemas.ParseModelString(payload.Model, schemas.VLLM)
+	if provider != schemas.VLLM {
+		return "", "", fmt.Errorf("model must use the vllm provider")
 	}
-	return schemas.Transcription, model, nil
+	if strings.TrimSpace(model) == "" {
+		return "", "", fmt.Errorf("model is required")
+	}
+	return provider, model, nil
 }

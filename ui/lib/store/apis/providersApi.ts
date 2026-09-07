@@ -37,9 +37,6 @@ export interface ListModelsResponse {
 // model-catalog Models tab to list (model, provider) entries with their
 // additional_attributes.
 export interface ModelDetails {
-	enabled?: boolean;
-	usage_kind?: string;
-	pricing_configured?: boolean;
 	name: string;
 	provider: string;
 	context_length?: number;
@@ -63,8 +60,6 @@ export interface ListModelDetailsResponse {
 // (model, provider) is the natural key on governance_model_pricing. An empty
 // or omitted additional_attributes clears the column for that row.
 export interface ModelPricingAttributesEntry {
-	create_if_missing?: boolean;
-	enabled?: boolean;
 	model: string;
 	provider: string;
 	additional_attributes?: Record<string, string>;
@@ -462,8 +457,10 @@ export const providersApi = baseApi.injectEndpoints({
 			providesTags: ["Models"],
 		}),
 
-		// Update catalog attributes, or explicitly ensure/update registered
-		// transcription models. Attribute-only entries require an existing price row.
+		// Batch upsert additional_attributes on existing pricing rows. The
+		// pricing row must already exist for each (model, provider); a missing
+		// row surfaces as a 400. An entry with an empty additional_attributes
+		// map clears the column for that row.
 		upsertModelCatalogEntries: builder.mutation<void, ModelPricingAttributesEntry[]>({
 			query: (entries) => ({
 				url: "/models/catalog",

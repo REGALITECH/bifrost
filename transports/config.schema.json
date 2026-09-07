@@ -430,7 +430,6 @@
         "wafer": {
           "$ref": "#/$defs/provider"
         },
-        "transcription": {"$ref":"#/$defs/provider", "description":"Keyless provider for external STT usage. No inference URL is used."},
         "vllm": {
           "$ref": "#/$defs/provider_with_vllm_config"
         },
@@ -937,7 +936,7 @@
               },
               "provider_configs": {
                 "type": "array",
-                "description": "Provider configurations for this virtual key (empty means no providers allowed, deny-by-default). The usage-only transcription provider needs no key_ids or inference URL; allowed_models [\"*\"] permits registered enabled STT usage models.",
+                "description": "Provider configurations for this virtual key (empty means no providers allowed, deny-by-default)",
                 "items": {
                   "$ref": "#/$defs/virtual_key_provider_config"
                 }

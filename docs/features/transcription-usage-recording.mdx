@@ -1,0 +1,63 @@
+---
+title: "External STT usage recording"
+description: "Record external speech recognition usage against an existing provider model."
+---
+
+`POST /v1/audio/transcriptions/usage` records speech recognition usage that has
+already occurred outside Bifrost. It does not run inference or register models.
+
+## Existing model configuration
+
+Configure the model through the existing provider settings. For a vLLM model,
+the Providers page supports the server URL, model name, optional API key,
+allowed models, and enabled state. Usage recording reads the existing model
+catalog; it does not create or update providers, models, or prices.
+
+The endpoint accepts an available vLLM catalog model, including a model added
+after startup. It no longer uses a hard-coded list of ASR names. Send
+`vllm/<model>`; a bare name retains the existing vLLM default. The client must
+report the model that actually handled the STT request. Catalog membership
+identifies configured models; it does not independently verify that a model
+performed speech recognition.
+
+## Request and saved data
+
+Send a tenant virtual key in `x-bf-vk` and a stable `x-request-id` reused for
+retries:
+
+```json
+{
+  "model": "vllm/qwen3-asr",
+  "audio_ms": 2500,
+  "turns": 2,
+  "outcome": "completed",
+  "session_id": "session-123",
+  "seq": 3
+}
+```
+
+`audio_ms`, `turns`, and `seq` must be non-negative integers; `session_id` must
+be nonblank. `outcome` is `completed` or `failed`. Unknown JSON fields and
+multiple JSON values are rejected. Audio and recognized text are not accepted.
+
+The existing logging and governance hooks record the provider/model, duration,
+turn count, outcome, session, and sequence. `usage_kind` is `stt`. One accounting
+token equals one millisecond: this example records 2,500 input/total tokens and
+zero output tokens. Existing pricing and VK authorization apply; this endpoint
+does not initialize a zero base price or alter pricing overrides. Any configured
+per-token price for this accounting path must be expressed in USD per millisecond.
+
+## Responses
+
+- `202`: accepted by the existing hook pipeline, with
+  `{"id":"<request-id>","status":"accepted"}`. Logging remains asynchronous;
+  this is not a synchronous durable-write acknowledgement.
+- `400`: invalid payload, unsupported provider, or model absent from the
+  available provider catalog.
+- `401`: missing VK. Governance rejections retain their existing status codes.
+- `503`: required plugins or the model catalog are unavailable.
+
+The existing request-ID deduplication behavior is retained. Removing or disabling
+model access through normal provider configuration prevents further usage
+acceptance when the model is no longer in the available catalog. Historical
+usage remains in the existing log store.

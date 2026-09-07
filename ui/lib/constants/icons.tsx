@@ -1,4 +1,4 @@
-import { Database, Landmark, Mic, Network, Shuffle, Workflow } from "lucide-react";
+import { Database, Landmark, Network, Shuffle, Workflow } from "lucide-react";
 import { useTheme } from "next-themes";
 import { cn } from "../utils";
 
@@ -719,7 +719,6 @@ export const ProviderIcons = {
 			</svg>
 		);
 	},
-	transcription: ({ size = "md", className = "" }: IconProps) => <Mic size={resolveSize(size)} className={className} />,
 	vllm: ({ size = "md", className = "" }: IconProps) => {
 		const resolvedSize = resolveSize(size);
 		return (
