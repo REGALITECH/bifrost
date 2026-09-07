@@ -259,8 +259,8 @@ func (mc *ModelCatalog) IsModelAllowedForProvider(provider schemas.ModelProvider
 	if provider == configstore.TranscriptionUsageProvider {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		state, err := configstore.GetTranscriptionModel(ctx, mc.configStore, model)
-		return err == nil && state.PricingConfigured && (allowedModels.IsAllowed(model) || allowedModels.IsAllowed(string(provider)+"/"+model))
+		_, err := configstore.GetTranscriptionModel(ctx, mc.configStore, model)
+		return err == nil && (allowedModels.IsAllowed(model) || allowedModels.IsAllowed(string(provider)+"/"+model))
 	}
 	isCustomProvider := false
 	hasListModelsEndpointDisabled := false

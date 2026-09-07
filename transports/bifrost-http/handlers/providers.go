@@ -657,7 +657,6 @@ type ListModelsResponse struct {
 // ModelDetailsResponse represents a model with capability metadata.
 type ModelDetailsResponse struct {
 	UsageKind            string                `json:"usage_kind,omitempty"`
-	PricingConfigured    *bool                 `json:"pricing_configured,omitempty"`
 	Name                 string                `json:"name"`
 	Provider             string                `json:"provider"`
 	ContextLength        *int                  `json:"context_length,omitempty"`
@@ -801,9 +800,6 @@ func (h *ProviderHandler) listModelDetails(ctx *fasthttp.RequestCtx) {
 				return
 			}
 			details.UsageKind = state.UsageKind
-			details.PricingConfigured = &state.PricingConfigured
-			details.InputCostPerToken = state.InputCostPerToken
-			details.OutputCostPerToken = state.OutputCostPerToken
 		}
 		responseModels = append(responseModels, details)
 	}

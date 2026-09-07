@@ -41,19 +41,14 @@ func ValidateTranscriptionModelName(model string) error {
 	return nil
 }
 
-// TranscriptionModelState exposes the persisted base price, before scoped pricing overrides.
+// TranscriptionModelState identifies a registered STT usage model.
 type TranscriptionModelState struct {
-	Model              string                `json:"model"`
-	Provider           schemas.ModelProvider `json:"provider"`
-	UsageKind          string                `json:"usage_kind"`
-	PricingConfigured  bool                  `json:"pricing_configured"`
-	InputCostPerToken  *float64              `json:"input_cost_per_token"`
-	OutputCostPerToken *float64              `json:"output_cost_per_token"`
+	Model     string                `json:"model"`
+	Provider  schemas.ModelProvider `json:"provider"`
+	UsageKind string                `json:"usage_kind"`
 }
 
-// EnsureTranscriptionModel atomically creates a registration and its explicit
-// zero base price. Concurrent/repeated calls never overwrite existing state or
-// pricing. A missing price row is repaired, but a null existing price is not.
+// EnsureTranscriptionModel creates a registration if missing without changing pricing.
 func EnsureTranscriptionModel(ctx context.Context, store ConfigStore, model string, txs ...*gorm.DB) error {
 	if err := ValidateTranscriptionModelName(model); err != nil {
 		return err
@@ -67,12 +62,7 @@ func EnsureTranscriptionModel(ctx context.Context, store ConfigStore, model stri
 			return err
 		}
 		row := tables.TableModel{ID: uuid.NewString(), ProviderID: provider.ID, Name: model}
-		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error; err != nil {
-			return err
-		}
-		zero := 0.0
-		price := tables.TableModelPricing{Model: model, Provider: string(TranscriptionUsageProvider), Mode: "audio_transcription", InputCostPerToken: &zero, OutputCostPerToken: &zero}
-		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&price).Error
+		return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error
 	}
 	if len(txs) > 0 {
 		return write(txs[0])
@@ -92,26 +82,7 @@ func GetTranscriptionModel(ctx context.Context, store ConfigStore, model string)
 	if err := store.DB().WithContext(ctx).Where("name = ? AND provider_id = ?", model, provider.ID).First(&row).Error; err != nil {
 		return nil, err
 	}
-	state := &TranscriptionModelState{Model: row.Name, Provider: TranscriptionUsageProvider, UsageKind: "stt"}
-	price, err := GetTranscriptionModelPrice(ctx, store, model)
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return state, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	state.InputCostPerToken, state.OutputCostPerToken = price.InputCostPerToken, price.OutputCostPerToken
-	state.PricingConfigured = price.InputCostPerToken != nil && price.OutputCostPerToken != nil && *price.InputCostPerToken >= 0 && *price.OutputCostPerToken >= 0
-	return state, nil
-}
-
-func GetTranscriptionModelPrice(ctx context.Context, store ConfigStore, model string) (*tables.TableModelPricing, error) {
-	if store == nil {
-		return nil, fmt.Errorf("config store is required")
-	}
-	var price tables.TableModelPricing
-	err := store.DB().WithContext(ctx).Where("model = ? AND provider = ? AND mode = ?", model, TranscriptionUsageProvider, "audio_transcription").First(&price).Error
-	return &price, err
+	return &TranscriptionModelState{Model: row.Name, Provider: TranscriptionUsageProvider, UsageKind: "stt"}, nil
 }
 
 func ListTranscriptionModels(ctx context.Context, store ConfigStore) ([]TranscriptionModelState, error) {
@@ -128,11 +99,7 @@ func ListTranscriptionModels(ctx context.Context, store ConfigStore) ([]Transcri
 	}
 	states := make([]TranscriptionModelState, 0, len(rows))
 	for _, row := range rows {
-		state, err := GetTranscriptionModel(ctx, store, row.Name)
-		if err != nil {
-			return nil, err
-		}
-		states = append(states, *state)
+		states = append(states, TranscriptionModelState{Model: row.Name, Provider: TranscriptionUsageProvider, UsageKind: "stt"})
 	}
 	return states, nil
 }

@@ -13,7 +13,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestTranscriptionModelPersistenceAndRepair(t *testing.T) {
+func TestTranscriptionModelPersistenceWithoutPricing(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "models.db")
 	open := func() *RDBConfigStore {
@@ -47,28 +47,18 @@ func TestTranscriptionModelPersistenceAndRepair(t *testing.T) {
 	for err := range errs {
 		require.NoError(t, err)
 	}
-	state, err := GetTranscriptionModel(ctx, store, "asr-new")
+	state, err := GetTranscriptionModel(ctx, open(), "asr-new")
 	require.NoError(t, err)
-	require.True(t, state.PricingConfigured)
-	require.Equal(t, 0.0, *state.InputCostPerToken)
-	priceQuery := store.DB().Model(&tables.TableModelPricing{}).Where("provider = ? AND model = ?", "transcription", "asr-new")
-	require.NoError(t, priceQuery.Update("input_cost_per_token", 0.002).Error)
+	require.Equal(t, "asr-new", state.Model)
+	var prices int64
+	require.NoError(t, store.DB().Model(&tables.TableModelPricing{}).Where("provider = ?", "transcription").Count(&prices).Error)
+	require.Zero(t, prices)
+	// Re-registration leaves an existing base price untouched.
+	price := tables.TableModelPricing{Model: "asr-new", Provider: "transcription", Mode: "audio_transcription", InputCostPerToken: new(0.002)}
+	require.NoError(t, store.DB().Create(&price).Error)
 	require.NoError(t, EnsureTranscriptionModel(ctx, store, "asr-new"))
-	state, err = GetTranscriptionModel(ctx, open(), "asr-new")
-	require.NoError(t, err)
-	require.Equal(t, 0.002, *state.InputCostPerToken)
-	// A null existing price fails closed and is never silently reset to zero.
-	require.NoError(t, priceQuery.Update("input_cost_per_token", nil).Error)
-	require.NoError(t, EnsureTranscriptionModel(ctx, store, "asr-new"))
-	state, err = GetTranscriptionModel(ctx, store, "asr-new")
-	require.NoError(t, err)
-	require.False(t, state.PricingConfigured)
-	// Missing row (e.g. partial historical setup) is repairable without changing the model registration.
-	require.NoError(t, priceQuery.Delete(&tables.TableModelPricing{}).Error)
-	require.NoError(t, EnsureTranscriptionModel(ctx, store, "asr-new"))
-	state, err = GetTranscriptionModel(ctx, store, "asr-new")
-	require.NoError(t, err)
-	require.True(t, state.PricingConfigured)
+	require.NoError(t, store.DB().First(&price, price.ID).Error)
+	require.Equal(t, 0.002, *price.InputCostPerToken)
 	var count int64
 	require.NoError(t, store.DB().Model(&tables.TableModel{}).Count(&count).Error)
 	require.EqualValues(t, 2, count)
@@ -80,17 +70,13 @@ func TestTranscriptionModelPersistenceAndRepair(t *testing.T) {
 	require.Equal(t, "vllm", old.Provider)
 }
 
-func TestTranscriptionModelAtomicFailure(t *testing.T) {
+func TestTranscriptionModelRegistrationWithoutPricingTable(t *testing.T) {
 	store := setupRDBTestStore(t)
 	require.NoError(t, store.DB().AutoMigrate(&tables.TableModel{}))
 	require.NoError(t, store.DB().Create(&tables.TableProvider{Name: "transcription", CustomProviderConfigJSON: `{"base_provider_type":"openai","is_key_less":true,"allowed_requests":{}}`}).Error)
-	// No pricing table: the second insert fails and the registration must roll back.
-	require.Error(t, EnsureTranscriptionModel(context.Background(), store, "atomic"))
-	var count int64
-	require.NoError(t, store.DB().Model(&tables.TableModel{}).Count(&count).Error)
-	require.Zero(t, count)
-	require.NoError(t, store.DB().AutoMigrate(&tables.TableModelPricing{}))
-	require.NoError(t, EnsureTranscriptionModel(context.Background(), store, "atomic"))
+	require.NoError(t, EnsureTranscriptionModel(context.Background(), store, "asr"))
+	_, err := GetTranscriptionModel(context.Background(), store, "asr")
+	require.NoError(t, err)
 }
 
 func TestTranscriptionModelNames(t *testing.T) {

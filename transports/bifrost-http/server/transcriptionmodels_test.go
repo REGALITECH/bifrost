@@ -30,17 +30,18 @@ func TestTranscriptionCatalogRegistrationPreservesState(t *testing.T) {
 	ensure := []handlers.ModelPricingAttributesEntry{{Provider: "transcription", Model: "asr", CreateIfMissing: true}}
 	require.NoError(t, s.UpsertModelPricingAttributes(ctx, ensure))
 	require.Equal(t, []string{"asr"}, catalog.GetModelsForProvider(configstore.TranscriptionUsageProvider))
-	require.NoError(t, store.DB().Model(&tables.TableModelPricing{}).Where("provider = ? AND model = ?", "transcription", "asr").Updates(map[string]any{"input_cost_per_token": 0.002, "additional_attributes": "{\"owner\":\"existing\"}"}).Error)
+	var count int64
+	require.NoError(t, store.DB().Model(&tables.TableModelPricing{}).Where("provider = ?", "transcription").Count(&count).Error)
+	require.Zero(t, count)
+	price := tables.TableModelPricing{Model: "asr", Provider: "transcription", Mode: "audio_transcription", InputCostPerToken: new(0.002), AdditionalAttributes: map[string]string{"owner": "existing"}}
+	require.NoError(t, store.DB().Create(&price).Error)
 	require.NoError(t, s.UpsertModelPricingAttributes(ctx, ensure))
-	state, err := configstore.GetTranscriptionModel(ctx, store, "asr")
-	require.NoError(t, err)
-	require.Equal(t, 0.002, *state.InputCostPerToken)
-	price, err := configstore.GetTranscriptionModelPrice(ctx, store, "asr")
-	require.NoError(t, err)
+	require.NoError(t, store.DB().First(&price, price.ID).Error)
+	require.Equal(t, 0.002, *price.InputCostPerToken)
 	require.JSONEq(t, `{"owner":"existing"}`, price.AdditionalAttributesJSON)
 	require.Equal(t, []string{"asr"}, catalog.GetModelsForProvider(configstore.TranscriptionUsageProvider))
 	require.Equal(t, []string{"asr"}, catalog.GetUnfilteredModelsForProvider(configstore.TranscriptionUsageProvider))
-	// A failing later entry rolls back both registration and price inserts.
+	// A failing later entry rolls back registration inserts.
 	require.Error(t, s.UpsertModelPricingAttributes(ctx, []handlers.ModelPricingAttributesEntry{{Provider: "transcription", Model: "rollback", CreateIfMissing: true}, {Provider: "openai", Model: "nonexistent"}}))
 	_, err = configstore.GetTranscriptionModel(ctx, store, "rollback")
 	require.Error(t, err)

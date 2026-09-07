@@ -46,17 +46,11 @@ func TestTranscriptionWildcardAndPricing(t *testing.T) {
 	}
 	usage := &schemas.BifrostLLMUsage{PromptTokens: 2500, TotalTokens: 2500}
 	require.Zero(t, catalog.CalculateCostForUsage(usage, configstore.TranscriptionUsageProvider, "brand-new-2", schemas.TranscriptionRequest, nil))
-	require.NoError(t, store.DB().Model(&tables.TableModelPricing{}).Where("provider = ? AND model = ?", "transcription", "brand-new-2").Update("input_cost_per_token", 0.002).Error)
-	// No catalog refresh: another replica sees the current base price immediately.
-	require.InDelta(t, 5.0, catalog.CalculateCostForUsage(usage, configstore.TranscriptionUsageProvider, "brand-new-2", schemas.TranscriptionRequest, nil), 1e-9)
-	require.NoError(t, configstore.EnsureTranscriptionModel(ctx, store, "brand-new-2"))
-	require.InDelta(t, 5.0, catalog.CalculateCostForUsage(usage, configstore.TranscriptionUsageProvider, "brand-new-2", schemas.TranscriptionRequest, nil), 1e-9)
 
 	providerID := "transcription"
 	require.NoError(t, catalog.SetPricingOverrides([]tables.TablePricingOverride{{ID: "stt-price", ScopeKind: "provider", ProviderID: &providerID, MatchType: "exact", Pattern: "brand-new-2", RequestTypes: []schemas.RequestType{schemas.TranscriptionRequest}, PricingPatchJSON: `{"input_cost_per_token":0.003}`}}))
 	require.InDelta(t, 7.5, catalog.CalculateCostForUsage(usage, configstore.TranscriptionUsageProvider, "brand-new-2", schemas.TranscriptionRequest, nil), 1e-9)
 	require.NoError(t, configstore.EnsureTranscriptionModel(ctx, store, "brand-new-2"))
 	require.InDelta(t, 7.5, catalog.CalculateCostForUsage(usage, configstore.TranscriptionUsageProvider, "brand-new-2", schemas.TranscriptionRequest, nil), 1e-9)
-	require.NoError(t, store.DB().Model(&tables.TableModelPricing{}).Where("provider = ? AND model = ?", "transcription", "brand-new-2").Update("input_cost_per_token", nil).Error)
-	require.False(t, catalog.IsModelAllowedForProvider(configstore.TranscriptionUsageProvider, "brand-new-2", nil, schemas.WhiteList{"*"}))
+	require.True(t, catalog.IsModelAllowedForProvider(configstore.TranscriptionUsageProvider, "brand-new-2", nil, schemas.WhiteList{"*"}))
 }

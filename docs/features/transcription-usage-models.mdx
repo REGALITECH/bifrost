@@ -51,12 +51,11 @@ prefixed with `transcription/`; there is no backend-engine normalization.
 | `PUT /api/models/catalog` | `[{"provider":"transcription","model":"qwen3-asr","create_if_missing":true}]` | Idempotent registration; 204 |
 | `GET /api/models/details?provider=transcription&query=qwen3-asr&exact=true&unfiltered=true` | None | Exact model details, or an empty list if absent |
 
-`create_if_missing` is supported for this usage provider. It inserts the model
-and explicit zero input/output base prices in one transaction using the existing
-`config_models` and `governance_model_pricing` tables. Repeated or concurrent
-registration preserves edited prices and attributes. It repairs a missing price
-row, but preserves existing null prices and reports `pricing_configured:false`.
-Other providers retain the existing catalog attribute-update behavior.
+`create_if_missing` is supported for this usage provider. It inserts only the
+model registration into the existing `config_models` table. Repeated or concurrent
+registration is idempotent and does not create or modify pricing rows.
+Other providers retain the existing catalog attribute-update behavior. Explicit
+`additional_attributes` updates still require an existing pricing row.
 
 `exact=true` filters case-sensitively before pagination. The response includes:
 
@@ -64,19 +63,16 @@ Other providers retain the existing catalog attribute-update behavior.
 {
   "name": "qwen3-asr",
   "provider": "transcription",
-  "usage_kind": "stt",
-  "pricing_configured": true,
-  "input_cost_per_token": 0,
-  "output_cost_per_token": 0
+  "usage_kind": "stt"
 }
 ```
 
-Prices are persisted base prices before scoped overrides. One accounting token
-is one audio millisecond. Configure subsequent prices through the existing
-pricing overrides API/UI; for example, `input_cost_per_token:0.000002` means
-$0.002 for 1,000 ms. Registration and external datasheet refreshes preserve
-these prices and overrides. Initial prices are explicitly zero in the pricing
-table; existing logging may represent a zero calculated cost as null.
+Pricing is optional. Usage is recorded without a base price or pricing override;
+the log cost is null and the Logs table displays N/A when no cost is calculated.
+One accounting token is one audio millisecond. If cost accounting is needed,
+configure the existing pricing overrides API/UI; for example,
+`input_cost_per_token:0.000002` means $0.002 for 1,000 ms. Overrides work without
+a base pricing row. Registration does not modify existing prices or overrides.
 
 ## Virtual keys and usage
 
@@ -87,8 +83,8 @@ Create tenant virtual keys through the existing governance API, including:
 ```
 
 `key_ids` may be omitted or empty. Wildcard permission includes subsequently
-registered models, but does not bypass the usage endpoint's registration and
-pricing checks. Existing VK allowlists, blacklists, revoked keys, and other
+registered models, but does not bypass the usage endpoint's registration
+checks. Existing VK allowlists, blacklists, revoked keys, and other
 provider restrictions remain effective. There is no per-model enabled state.
 
 Send `POST /v1/audio/transcriptions/usage` with `x-bf-vk` and a stable
@@ -108,16 +104,16 @@ Send `POST /v1/audio/transcriptions/usage` with `x-bf-vk` and a stable
 Success is 202. The existing logging queue writes the usage asynchronously;
 a successful response is not a synchronous durable-write acknowledgement.
 Unknown models or a deleted provider return 400; missing VK returns 401.
-Governance rejection preserves its existing status. Invalid provider settings,
-unconfigured prices, or missing required plugins return 503. No audio content
+Governance rejection preserves its existing status. Invalid provider settings
+or missing required plugins return 503. No audio content
 or recognized text is sent to this endpoint.
 
 ## Reconciliation and deployment
 
-Verify the provider, register the catalog entry, and check its exact identity,
-`usage_kind`, and pricing before saving the STT service and notifying runtime
+Verify the provider, register the catalog entry, and check its exact identity
+and `usage_kind` before saving the STT service and notifying runtime
 consumers. Retry the same name after a timeout or partial failure. Retain shared
-models and prices if the ETLA DB write fails or an STT service is deleted.
+models if the ETLA DB write fails or an STT service is deleted.
 Rename by registering a new identity; existing sessions and historical usage
 retain their original names.
 

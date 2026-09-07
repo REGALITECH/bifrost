@@ -70,6 +70,9 @@ func TestTranscriptionUsageWithRealGovernance(t *testing.T) {
 	require.NoError(t, err)
 	// Register after plugin startup and after VK creation: no provider reload required.
 	require.NoError(t, configstore.EnsureTranscriptionModel(context.Background(), store, "later-asr"))
+	var priceCount int64
+	require.NoError(t, store.DB().Model(&tables.TableModelPricing{}).Where("provider = ?", "transcription").Count(&priceCount).Error)
+	require.Zero(t, priceCount, "usage registration must not create base prices")
 	for i, key := range keys {
 		body := `{"audio_ms":2500,"turns":1,"outcome":"completed","session_id":"s","seq":1,"model":"transcription/later-asr"}`
 		ctx := newTranscriptionUsageTestContext(body, key.Value.GetValue(), fmt.Sprintf("usage-%d", i))
@@ -101,7 +104,6 @@ func TestTranscriptionModelDetailsExactBeforePagination(t *testing.T) {
 	require.Equal(t, 1, response.Total)
 	require.Len(t, response.Models, 1)
 	require.Equal(t, "asr", response.Models[0].Name)
-	require.True(t, *response.Models[0].PricingConfigured)
 	require.Equal(t, "stt", response.Models[0].UsageKind)
 }
 
@@ -122,9 +124,6 @@ func TestTranscriptionUsageRejectsMissingOrChangedRegistration(t *testing.T) {
 		}},
 		{"inference URL configured", 503, func(s configstore.ConfigStore) error {
 			return s.DB().Model(&tables.TableProvider{}).Where("name = ?", "transcription").Update("network_config_json", `{"base_url":"https://example.invalid"}`).Error
-		}},
-		{"pricing missing", 503, func(s configstore.ConfigStore) error {
-			return s.DB().Where("provider = ?", "transcription").Delete(&tables.TableModelPricing{}).Error
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
