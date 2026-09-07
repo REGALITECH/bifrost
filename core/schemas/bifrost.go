@@ -68,6 +68,8 @@ const (
 	XAI           ModelProvider = "xai"
 	Replicate     ModelProvider = "replicate"
 	VLLM          ModelProvider = "vllm"
+	// Transcription is reserved for externally performed STT usage; it has no inference client.
+	Transcription ModelProvider = "transcription"
 	Runway        ModelProvider = "runway"
 	Runware       ModelProvider = "runware"
 	Fireworks     ModelProvider = "fireworks"

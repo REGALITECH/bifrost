@@ -936,7 +936,7 @@
               },
               "provider_configs": {
                 "type": "array",
-                "description": "Provider configurations for this virtual key (empty means no providers allowed, deny-by-default)",
+                "description": "Provider configurations for this virtual key (empty means no providers allowed, deny-by-default). The usage-only transcription provider needs no key_ids or inference URL; allowed_models [\"*\"] permits registered enabled STT usage models.",
                 "items": {
                   "$ref": "#/$defs/virtual_key_provider_config"
                 }

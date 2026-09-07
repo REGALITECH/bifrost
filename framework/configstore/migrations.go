@@ -460,6 +460,7 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_live_models_sync_interval_column"}, run: migrationAddLiveModelsSyncIntervalColumn},
 	{IDs: []string{"add_pricing_override_user_id_column"}, run: migrationAddPricingOverrideUserIDColumn},
 	{IDs: []string{"add_budget_reset_config_column"}, run: migrationAddBudgetResetConfigColumn},
+	{IDs: []string{"add_transcription_models_table"}, run: migrationAddTranscriptionModelsTable},
 }
 
 // quoteSQLiteIdentifier quotes a SQLite identifier, escaping any double quotes.
@@ -11151,4 +11152,14 @@ func migrationAddPricingOverrideUserIDColumn(ctx context.Context, db *gorm.DB, l
 		return fmt.Errorf("error while running pricing override user_id column migration: %s", err.Error())
 	}
 	return nil
+}
+
+// Additive migration: rollback retains registrations and historical pricing.
+func migrationAddTranscriptionModelsTable(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{
+		ID:       "add_transcription_models_table",
+		Migrate:  func(tx *gorm.DB) error { return tx.WithContext(ctx).AutoMigrate(&tables.TableTranscriptionModel{}) },
+		Rollback: func(tx *gorm.DB) error { return nil },
+	}})
+	return m.Migrate()
 }

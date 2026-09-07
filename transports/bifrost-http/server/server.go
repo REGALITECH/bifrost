@@ -1924,6 +1924,7 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	featureFlagsHandler := handlers.NewFeatureFlagsHandler(s.Config.FeatureFlags, s.Config.ConfigStore)
 	fishAudioUsageHandler.RegisterRoutes(s.Router, middlewares...)
 	transcriptionUsageHandler.RegisterRoutes(s.Router, middlewares...)
+	transcriptionUsageHandler.RegisterModelRoutes(s.Router, middlewares...)
 	// Going ahead with API handlers
 	oauth2DiscoveryHandler := handlers.NewOAuth2DiscoveryHandler(s.Config)
 	oauth2IssuanceHandler := handlers.NewOAuth2IssuanceHandler(s.Config, s.TempTokens, s.OAuth2IdentityResolver)

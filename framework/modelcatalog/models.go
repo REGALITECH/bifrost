@@ -1,9 +1,11 @@
 package modelcatalog
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
@@ -248,6 +250,12 @@ func (mc *ModelCatalog) GetProvidersForModel(model string) []schemas.ModelProvid
 //   - explicit allowedModels: direct or provider-prefixed match against the
 //     provider's catalog.
 func (mc *ModelCatalog) IsModelAllowedForProvider(provider schemas.ModelProvider, model string, providerConfig *configstore.ProviderConfig, allowedModels schemas.WhiteList) bool {
+	if provider == schemas.Transcription {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		state, err := configstore.GetTranscriptionModel(ctx, mc.configStore, model)
+		return err == nil && state.Enabled && state.PricingConfigured && (allowedModels.IsAllowed(model) || allowedModels.IsAllowed(string(provider)+"/"+model))
+	}
 	isCustomProvider := false
 	hasListModelsEndpointDisabled := false
 	if providerConfig != nil && providerConfig.CustomProviderConfig != nil {

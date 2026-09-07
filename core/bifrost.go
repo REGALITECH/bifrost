@@ -29,8 +29,8 @@ import (
 	"github.com/maximhq/bifrost/core/providers/cohere"
 	"github.com/maximhq/bifrost/core/providers/deepseek"
 	"github.com/maximhq/bifrost/core/providers/elevenlabs"
-	"github.com/maximhq/bifrost/core/providers/fishaudio"
 	"github.com/maximhq/bifrost/core/providers/fireworks"
+	"github.com/maximhq/bifrost/core/providers/fishaudio"
 	"github.com/maximhq/bifrost/core/providers/gemini"
 	"github.com/maximhq/bifrost/core/providers/groq"
 	"github.com/maximhq/bifrost/core/providers/huggingface"
@@ -4311,6 +4311,9 @@ func (bifrost *Bifrost) UpdateToolManagerConfig(maxAgentDepth int, toolExecution
 
 // createBaseProvider creates a provider based on the base provider type
 func (bifrost *Bifrost) createBaseProvider(providerKey schemas.ModelProvider, config *schemas.ProviderConfig) (schemas.Provider, error) {
+	if providerKey == schemas.Transcription {
+		return nil, fmt.Errorf("transcription is reserved for usage accounting and cannot serve inference")
+	}
 	// Determine which provider type to create
 	targetProviderKey := providerKey
 

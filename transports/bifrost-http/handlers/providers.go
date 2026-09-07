@@ -262,6 +262,10 @@ func (h *ProviderHandler) addProvider(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusBadRequest, "Invalid request payload")
 		return
 	}
+	if payload.Provider == schemas.Transcription {
+		SendError(ctx, fasthttp.StatusBadRequest, "transcription is usage-only; register models through /api/transcription/models")
+		return
+	}
 	// Validate provider
 	if payload.Provider == "" {
 		SendError(ctx, fasthttp.StatusBadRequest, "Missing provider")
