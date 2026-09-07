@@ -47,6 +47,7 @@ import (
 	"github.com/maximhq/bifrost/core/providers/runway"
 	"github.com/maximhq/bifrost/core/providers/sarvam"
 	"github.com/maximhq/bifrost/core/providers/sgl"
+	"github.com/maximhq/bifrost/core/providers/transcription"
 	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
 	"github.com/maximhq/bifrost/core/providers/vertex"
 	"github.com/maximhq/bifrost/core/providers/vllm"
@@ -4311,9 +4312,10 @@ func (bifrost *Bifrost) UpdateToolManagerConfig(maxAgentDepth int, toolExecution
 
 // createBaseProvider creates a provider based on the base provider type
 func (bifrost *Bifrost) createBaseProvider(providerKey schemas.ModelProvider, config *schemas.ProviderConfig) (schemas.Provider, error) {
-	if providerKey == schemas.Transcription {
-		return nil, fmt.Errorf("transcription is reserved for usage accounting and cannot serve inference")
+	if providerKey == schemas.Transcription && (config.CustomProviderConfig != nil || config.NetworkConfig.BaseURL != "") {
+		return nil, fmt.Errorf("transcription does not accept inference configuration")
 	}
+
 	// Determine which provider type to create
 	targetProviderKey := providerKey
 
@@ -4335,6 +4337,8 @@ func (bifrost *Bifrost) createBaseProvider(providerKey schemas.ModelProvider, co
 	}
 
 	switch targetProviderKey {
+	case schemas.Transcription:
+		return &transcription.Provider{}, nil
 	case schemas.OpenAI:
 		return openai.NewOpenAIProvider(config, bifrost.logger), nil
 	case schemas.Anthropic:
@@ -6620,7 +6624,7 @@ func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas
 		// batch/file/container operations that manage their own key lists.
 		var keyProvider func(usedKeyIDs, deadKeyIDs map[string]bool) (schemas.Key, error)
 
-		if providerRequiresKey(config.CustomProviderConfig) {
+		if provider.GetProviderKey() != schemas.Transcription && providerRequiresKey(config.CustomProviderConfig) {
 			// ListModels needs all enabled/supported keys so providers can aggregate
 			// and report per-key statuses (KeyStatuses).
 			if req.RequestType == schemas.ListModelsRequest {

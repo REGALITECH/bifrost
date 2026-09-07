@@ -20,6 +20,7 @@ func TestTranscriptionWildcardAndPricing(t *testing.T) {
 	store, err := configstore.NewConfigStore(ctx, &configstore.Config{Enabled: true, Type: configstore.ConfigStoreTypeSQLite, Config: &configstore.SQLiteConfig{Path: filepath.Join(t.TempDir(), "config.db")}}, logger)
 	require.NoError(t, err)
 	t.Cleanup(func() { store.Close(ctx) })
+	require.NoError(t, store.DB().Create(&tables.TableProvider{Name: "transcription"}).Error)
 	catalog := modelcatalog.NewTestCatalogWithDatasheet(datasheet.New(store, logger, datasheet.Config{}), store)
 	resolver := NewBudgetResolver(nil, catalog, logger, nil)
 	for _, tenant := range []string{"tenant-a", "tenant-b"} {

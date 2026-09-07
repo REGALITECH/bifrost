@@ -6,77 +6,12 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/fasthttp/router"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/plugins/governance"
 	"github.com/stretchr/testify/require"
-	"github.com/valyala/fasthttp"
 )
-
-func TestTranscriptionModelManagementAndUsage(t *testing.T) {
-	events := []string{}
-	h, _, _ := newTranscriptionUsageTestHandler(t, &events)
-	r := router.New()
-	h.RegisterRoutes(r)
-	h.RegisterModelRoutes(r)
-	request := func(method, path, body string, status int) *fasthttp.RequestCtx {
-		ctx := newTranscriptionUsageTestContext(body, "vk-test", "usage-new")
-		ctx.Request.Header.SetMethod(method)
-		ctx.Request.SetRequestURI(path)
-		r.Handler(ctx)
-		require.Equal(t, status, ctx.Response.StatusCode(), string(ctx.Response.Body()))
-		return ctx
-	}
-	usage := `{"audio_ms":2500,"turns":1,"outcome":"completed","session_id":"s","seq":1,"model":"transcription/New-asr"}`
-	request("POST", transcriptionUsagePath, usage, 400)
-	request("GET", "/api/transcription/models/New-asr", "", 404)
-	request("POST", "/api/transcription/models", `{"model":"New-asr"}`, 200)
-	request("POST", transcriptionUsagePath, usage, 202)
-	request("PUT", "/api/transcription/models/New-asr", `{"enabled":false}`, 200)
-	request("POST", transcriptionUsagePath, usage, 400)
-	ctx := request("POST", "/api/transcription/models", `{"model":"New-asr"}`, 200)
-	var state configstore.TranscriptionModelState
-	require.NoError(t, json.Unmarshal(ctx.Response.Body(), &state))
-	require.False(t, state.Enabled)
-	request("PUT", "/api/transcription/models/New-asr", `{"enabled":true}`, 200)
-	request("POST", transcriptionUsagePath, usage, 202)
-	request("GET", "/api/transcription/models", "", 200)
-	for _, body := range []string{`{"model":" New-asr"}`, `{"model":"transcription/New-asr"}`, `{"model":"New-asr","enabled":true}`, `null`, `{} {}`} {
-		request("POST", "/api/transcription/models", body, 400)
-	}
-	request("PUT", "/api/transcription/models/New-asr", `{}`, 400)
-	request("PUT", "/api/transcription/models/missing", `{"enabled":true}`, 404)
-	// Missing pricing is visible to reconciliation and blocks accounting.
-	require.NoError(t, h.config.ConfigStore.DB().Where("provider = ? AND model = ?", "transcription", "New-asr").Delete(&tables.TableModelPricing{}).Error)
-	request("POST", transcriptionUsagePath, usage, 503)
-	ctx = request("GET", "/api/transcription/models/New-asr", "", 200)
-	require.NoError(t, json.Unmarshal(ctx.Response.Body(), &state))
-	require.False(t, state.PricingConfigured)
-	request("POST", "/api/transcription/models", `{"model":"New-asr"}`, 200)
-	request("POST", transcriptionUsagePath, usage, 202)
-	// No external inference configuration was created as a side effect.
-	providers, err := h.config.ConfigStore.GetProviders(context.Background())
-	require.NoError(t, err)
-	require.Empty(t, providers)
-}
-
-func TestTranscriptionModelRoutesApplyManagementMiddleware(t *testing.T) {
-	events := []string{}
-	h, _, _ := newTranscriptionUsageTestHandler(t, &events)
-	r := router.New()
-	auth, err := InitAuthMiddleware(h.config.ConfigStore, nil, nil)
-	require.NoError(t, err)
-	auth.UpdateAuthConfig(&configstore.AuthConfig{IsEnabled: true, AdminUserName: schemas.NewSecretVar("admin"), AdminPassword: schemas.NewSecretVar("test-password")})
-	h.RegisterModelRoutes(r, auth.APIMiddleware())
-	ctx := newTranscriptionUsageTestContext(`{"model":"unauthorized"}`, "vk-only", "")
-	ctx.Request.SetRequestURI("/api/transcription/models")
-	r.Handler(ctx)
-	require.Equal(t, 401, ctx.Response.StatusCode())
-	_, err = configstore.GetTranscriptionModel(context.Background(), h.config.ConfigStore, "unauthorized")
-	require.Error(t, err)
-}
 
 type transcriptionVKManager struct {
 	pricingOverrideTestGovernanceManager
@@ -90,6 +25,7 @@ func (m transcriptionVKManager) ReloadVirtualKey(ctx context.Context, id string)
 func TestTranscriptionVirtualKeyWithoutExternalKeys(t *testing.T) {
 	SetLogger(testLogger{})
 	store := newTestConfigStore(t)
+	require.NoError(t, store.DB().Create(&tables.TableProvider{Name: "transcription"}).Error)
 	h := &GovernanceHandler{configStore: store, governanceManager: transcriptionVKManager{store: store}}
 	for _, body := range []string{
 		`{"name":"tenant-one","provider_configs":[{"provider":"transcription","allowed_models":["*"]}]}`,
@@ -152,4 +88,27 @@ func TestTranscriptionProviderManagementRejectsInference(t *testing.T) {
 	ctx := newTestRequestCtx(`{"provider":"transcription","custom_provider_config":{"base_provider_type":"vllm"}}`)
 	h.addProvider(ctx)
 	require.Equal(t, 400, ctx.Response.StatusCode())
+}
+
+func TestTranscriptionModelDetailsExactBeforePagination(t *testing.T) {
+	SetLogger(testLogger{})
+	config := transcriptionUsageTestConfig(t)
+	for _, name := range []string{"asr", "asr-extra", "Asr"} {
+		require.NoError(t, configstore.EnsureTranscriptionModel(context.Background(), config.ConfigStore, name))
+	}
+	h := providerHandlerForTest(schemas.Transcription, nil, []string{"asr-extra", "Asr", "asr"}, []string{"asr-extra", "Asr", "asr"})
+	h.inMemoryStore.ModelCatalog = config.ModelCatalog
+	h.dbStore = config.ConfigStore
+	ctx := newTestRequestCtx("")
+	ctx.Request.SetRequestURI("/api/models/details?provider=transcription&query=asr&exact=true&unfiltered=true&limit=1")
+	h.listModelDetails(ctx)
+	require.Equal(t, 200, ctx.Response.StatusCode(), string(ctx.Response.Body()))
+	var response ListModelDetailsResponse
+	require.NoError(t, json.Unmarshal(ctx.Response.Body(), &response))
+	require.Equal(t, 1, response.Total)
+	require.Len(t, response.Models, 1)
+	require.Equal(t, "asr", response.Models[0].Name)
+	require.True(t, *response.Models[0].Enabled)
+	require.True(t, *response.Models[0].PricingConfigured)
+	require.Equal(t, "stt", response.Models[0].UsageKind)
 }

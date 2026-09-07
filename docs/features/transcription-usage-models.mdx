@@ -4,9 +4,10 @@ description: "Register and reconcile external STT accounting identities without 
 ---
 
 The reserved `transcription` provider accounts for speech recognition performed
-outside Bifrost. It has no inference client, URL, or external API key. Normal
-vLLM inference configuration is independent. Do not add `transcription` to the
-inference `providers` configuration.
+outside Bifrost. It is a built-in, keyless provider shown on the existing Providers page.
+Create it with the standard provider API; no inference URL or API key is needed.
+Inference requests return an unsupported-operation error. Normal vLLM
+configuration is independent.
 
 Management routes use the existing `/api` authentication middleware. A tenant
 virtual key does not authorize management when dashboard authentication is enabled.
@@ -25,18 +26,23 @@ Existing sessions can retain their original name; retain its model and price.
 
 ## Management API
 
+Create the provider once with `POST /api/providers` and
+`{"provider":"transcription"}` (200 on creation, 409 when already configured).
+Then use the existing model catalog API:
+
 | Method and path | Body | Result |
 | --- | --- | --- |
-| `POST /api/transcription/models` | `{"model":"qwen3-asr"}` | Idempotent registration; 200 state |
-| `GET /api/transcription/models/qwen3-asr` | None | 200 state; 404 if absent |
-| `GET /api/transcription/models` | None | `{"models":[...]}` in model order |
-| `PUT /api/transcription/models/qwen3-asr` | `{"enabled":false}` | Explicit state update; 200 state; 404 if absent |
+| `PUT /api/models/catalog` | `[{"provider":"transcription","model":"qwen3-asr","create_if_missing":true}]` | Idempotent registration; 204 |
+| `GET /api/models/details?provider=transcription&query=qwen3-asr&exact=true&unfiltered=true` | None | 200 with the exact model, or an empty list if absent |
+| `GET /api/models/details?provider=transcription&unfiltered=true` | None | Paginated model details, including disabled models |
+| `PUT /api/models/catalog` | `[{"provider":"transcription","model":"qwen3-asr","enabled":false}]` | Explicit enabled-state update; 204 |
 
-State response:
+`exact=true` performs a case-sensitive exact match before pagination. The details
+response contains `models` and `total`; each transcription model includes:
 
 ```json
 {
-  "model": "qwen3-asr",
+  "name": "qwen3-asr",
   "provider": "transcription",
   "usage_kind": "stt",
   "enabled": true,
@@ -46,12 +52,19 @@ State response:
 }
 ```
 
+The existing Providers page shows these models under Transcription, with model
+registration, enabled-state controls, refresh, and a link to pricing overrides.
+The standard Models page also lists them. No separate STT management route or
+registry is used.
+
 Registration and the initial explicit zero base price are inserted in one
-ConfigStore transaction. Repeated or concurrent requests do not overwrite
-existing prices or re-enable disabled models. A missing base price row is
-recreated at zero on POST; existing null price fields are preserved and reported
-as `pricing_configured:false`. GET returns 200 with that diagnostic state.
-Unknown fields and invalid names return 400; store failures return 503.
+ConfigStore transaction. Repeated or concurrent `create_if_missing` requests
+preserve prices, disabled state, and additional attributes. They repair a missing
+base price row at zero, but preserve existing null prices and report
+`pricing_configured:false`. Do not send `enabled:true` during reconciliation;
+that field is an explicit operator update. The new creation and enabled fields
+are supported only for the transcription provider; other providers retain the
+existing catalog attribute-update behavior.
 
 The response prices are persisted **base** prices before scoped overrides.
 Prices use USD per accounting token, and **one accounting token is one millisecond**.
@@ -111,22 +124,23 @@ or required plugins returns 503. No audio or recognized text is accepted here.
 
 ## Reconciliation and deployment
 
-Register with POST, then GET and verify identity, `enabled`, `usage_kind`, and
+Ensure the provider, PUT the catalog entry, then GET and verify identity, `enabled`, `usage_kind`, and
 `pricing_configured` before saving the STT service configuration and notifying
-runtime consumers. On timeout or partial success, repeat POST/GET with the same
+runtime consumers. On timeout or partial success, repeat the provider ensure and PUT/GET with the same
 name. If ETLA DB saving fails after Bifrost succeeds, retain the shared model
 and retry. Disabled models require explicit operator action. Deleting an STT
 service must not delete or disable a shared Bifrost model.
 
-The additive ConfigStore migration creates `governance_transcription_models`
-with model identity, enabled state, and timestamps. Pricing remains in
-`governance_model_pricing`; no ETLA DB tables or columns are added. Registration
-checks and base price lookups read the shared store, so replicas do not wait for
-the datasheet refresh interval. Use the existing persistent ConfigStore storage
-across restart/redeployment; an ephemeral database cannot preserve registrations.
+Provider and model identity are stored in the existing `config_providers` and
+`config_models` tables. An additive migration adds `config_models.enabled` with
+a default of true, preserving existing model behavior. Pricing remains in
+`governance_model_pricing`; no dedicated registry or ETLA DB schema is added.
+Registration checks and base price lookups read the shared store. Use persistent
+ConfigStore storage across restart/redeployment; an ephemeral database cannot
+preserve registrations.
 
 Deploy Bifrost before clients begin sending the new provider name. On application
-rollback retain the new table and price rows (migration rollback deliberately
+rollback retain the additive column and provider/model/price rows (migration rollback deliberately
 retains data), and pause new usage senders until the compatible version returns.
 The old binary does not accept the new namespace. This change does not migrate
 existing vLLM names, logs, prices, tenants, or STT rows, and does not install a

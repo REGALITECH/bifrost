@@ -84,9 +84,6 @@ func UnregisterKnownProvider(provider ModelProvider) {
 
 // IsKnownProvider checks if a provider string is known.
 func IsKnownProvider(provider string) bool {
-	if provider == string(Transcription) {
-		return true
-	}
 	knownProvidersMu.RLock()
 	defer knownProvidersMu.RUnlock()
 	return knownProviders[provider]

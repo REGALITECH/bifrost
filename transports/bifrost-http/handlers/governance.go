@@ -3518,9 +3518,7 @@ func (h *GovernanceHandler) getConfiguredProviderSet(ctx context.Context) (map[s
 	if err != nil {
 		return nil, err
 	}
-	providerSet := make(map[schemas.ModelProvider]struct{}, len(providers)+1)
-	// Usage accounting has no external credentials or inference provider configuration.
-	providerSet[schemas.Transcription] = struct{}{}
+	providerSet := make(map[schemas.ModelProvider]struct{}, len(providers))
 	for _, provider := range providers {
 		providerName := schemas.ModelProvider(strings.TrimSpace(provider.Name))
 		if providerName == "" {

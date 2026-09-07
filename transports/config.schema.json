@@ -430,6 +430,7 @@
         "wafer": {
           "$ref": "#/$defs/provider"
         },
+        "transcription": {"$ref":"#/$defs/provider", "description":"Keyless provider for external STT usage. No inference URL is used."},
         "vllm": {
           "$ref": "#/$defs/provider_with_vllm_config"
         },

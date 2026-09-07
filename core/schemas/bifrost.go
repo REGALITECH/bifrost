@@ -91,6 +91,7 @@ var SupportedBaseProviders = []ModelProvider{
 
 // StandardProviders is the list of all built-in (non-custom) providers.
 var StandardProviders = []ModelProvider{
+	Transcription,
 	Anthropic,
 	Azure,
 	Bedrock,

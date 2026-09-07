@@ -11,6 +11,7 @@ import (
 	"github.com/fasthttp/router"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
+	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/modelcatalog"
 	"github.com/maximhq/bifrost/framework/modelcatalog/datasheet"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
@@ -346,6 +347,7 @@ func TestTranscriptionUsageValidateRequestRejectsAudioMSOverflow(t *testing.T) {
 func transcriptionUsageTestConfig(t *testing.T) *lib.Config {
 	t.Helper()
 	store := newTestConfigStore(t)
+	require.NoError(t, store.DB().Create(&tables.TableProvider{Name: "transcription"}).Error)
 	require.NoError(t, configstore.EnsureTranscriptionModel(context.Background(), store, "qwen3-asr"))
 	return &lib.Config{ClientConfig: &configstore.ClientConfig{}, ConfigStore: store, ModelCatalog: modelcatalog.NewTestCatalogWithDatasheet(datasheet.New(store, testLogger{}, datasheet.Config{}), store)}
 }

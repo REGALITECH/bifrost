@@ -743,6 +743,15 @@ func (s *BifrostHTTPServer) ReloadProvider(ctx context.Context, provider schemas
 		}
 	}
 
+	// Usage-only providers have no upstream discovery call to lazily initialize
+	// the runtime. Register the built-in provider explicitly for normal status/UI.
+	if provider == schemas.Transcription {
+		if err := s.Client.UpdateProvider(provider); err != nil {
+			return nil, err
+		}
+		return updatedProvider, nil
+	}
+
 	// In-memory store holds the latest schemas.Key slice after the most recent
 	// CRUD write — read from there to avoid re-fetching + re-converting from DB.
 	inMemoryKeys, err := s.Config.GetProviderKeysRaw(provider)
@@ -903,6 +912,9 @@ func keyEnabled(key schemas.Key) bool {
 // keyless. Used to pick the live-cache key for OnKey* helpers: keyless
 // providers cache under the empty-string sentinel.
 func isKeylessProvider(provider schemas.ModelProvider, cfg *lib.Config) bool {
+	if provider == schemas.Transcription {
+		return true
+	}
 	if cfg == nil {
 		return false
 	}
@@ -1394,6 +1406,10 @@ func (s *BifrostHTTPServer) RefreshLiveModelsForAllKeys(ctx context.Context, pro
 // Callers are responsible for invalidating stale entries first when keys
 // have been removed from the provider's set.
 func (s *BifrostHTTPServer) RefreshLiveModelsForProvider(ctx context.Context, provider schemas.ModelProvider, keys []schemas.Key) {
+	if provider == schemas.Transcription {
+		return
+	} // Registered models are read from ConfigStore.
+
 	if len(keys) == 0 {
 		// Empty key slice + non-keyless provider would write under the "" sentinel
 		// reserved for keyless providers — colliding with the keyless namespace and
@@ -1592,6 +1608,21 @@ func (s *BifrostHTTPServer) UpsertModelPricingAttributes(ctx context.Context, en
 	var missing []string
 	err := s.Config.ConfigStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
 		for _, e := range entries {
+			if e.Provider == string(schemas.Transcription) {
+				if e.CreateIfMissing {
+					if err := configstore.EnsureTranscriptionModel(ctx, s.Config.ConfigStore, e.Model, tx); err != nil {
+						return err
+					}
+				}
+				if e.Enabled != nil {
+					if err := configstore.SetTranscriptionModelEnabled(ctx, s.Config.ConfigStore, e.Model, *e.Enabled, tx); err != nil {
+						return err
+					}
+				}
+				if (e.CreateIfMissing || e.Enabled != nil) && e.AdditionalAttributes == nil {
+					continue
+				}
+			}
 			rows, err := s.Config.ConfigStore.UpsertModelPricingAttributes(ctx, e.Model, e.Provider, e.AdditionalAttributes, tx)
 			if err != nil {
 				return err
@@ -1924,7 +1955,6 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	featureFlagsHandler := handlers.NewFeatureFlagsHandler(s.Config.FeatureFlags, s.Config.ConfigStore)
 	fishAudioUsageHandler.RegisterRoutes(s.Router, middlewares...)
 	transcriptionUsageHandler.RegisterRoutes(s.Router, middlewares...)
-	transcriptionUsageHandler.RegisterModelRoutes(s.Router, middlewares...)
 	// Going ahead with API handlers
 	oauth2DiscoveryHandler := handlers.NewOAuth2DiscoveryHandler(s.Config)
 	oauth2IssuanceHandler := handlers.NewOAuth2IssuanceHandler(s.Config, s.TempTokens, s.OAuth2IdentityResolver)

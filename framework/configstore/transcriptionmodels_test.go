@@ -28,12 +28,15 @@ func TestTranscriptionModelPersistenceAndRepair(t *testing.T) {
 		return store
 	}
 	store := open()
-	require.NoError(t, store.DB().AutoMigrate(&tables.TableModelPricing{}))
+	require.NoError(t, store.DB().AutoMigrate(&tables.TableModelPricing{}, &tables.TableProvider{}))
+	require.NoError(t, store.DB().Exec("CREATE TABLE config_models (id TEXT PRIMARY KEY, provider_id INTEGER NOT NULL, name TEXT, created_at DATETIME, updated_at DATETIME, UNIQUE(provider_id, name))").Error)
+	require.NoError(t, store.DB().Create(&tables.TableProvider{Name: "transcription"}).Error)
+	require.NoError(t, store.DB().Exec("INSERT INTO config_models (id,provider_id,name) VALUES ('existing',999,'legacy')").Error)
 	// Existing vLLM prices survive the additive migration and all registration operations.
 	old := tables.TableModelPricing{Model: "asr-new", Provider: "vllm", Mode: "audio_transcription"}
 	require.NoError(t, store.DB().Create(&old).Error)
-	require.NoError(t, migrationAddTranscriptionModelsTable(ctx, store.DB(), &mockLogger{}))
-	require.NoError(t, migrationAddTranscriptionModelsTable(ctx, store.DB(), &mockLogger{}))
+	require.NoError(t, migrationAddConfigModelEnabled(ctx, store.DB(), &mockLogger{}))
+	require.NoError(t, migrationAddConfigModelEnabled(ctx, store.DB(), &mockLogger{}))
 	var wg sync.WaitGroup
 	errs := make(chan error, 8)
 	for range 8 {
@@ -72,19 +75,23 @@ func TestTranscriptionModelPersistenceAndRepair(t *testing.T) {
 	require.True(t, state.PricingConfigured)
 	require.False(t, state.Enabled)
 	var count int64
-	require.NoError(t, store.DB().Model(&tables.TableTranscriptionModel{}).Count(&count).Error)
-	require.EqualValues(t, 1, count)
+	require.NoError(t, store.DB().Model(&tables.TableModel{}).Count(&count).Error)
+	require.EqualValues(t, 2, count)
+	var legacy tables.TableModel
+	require.NoError(t, store.DB().First(&legacy, "id = ?", "existing").Error)
+	require.True(t, legacy.Enabled)
 	require.NoError(t, store.DB().First(&old, old.ID).Error)
 	require.Equal(t, "vllm", old.Provider)
 }
 
 func TestTranscriptionModelAtomicFailure(t *testing.T) {
 	store := setupRDBTestStore(t)
-	require.NoError(t, store.DB().AutoMigrate(&tables.TableTranscriptionModel{}))
+	require.NoError(t, store.DB().AutoMigrate(&tables.TableModel{}))
+	require.NoError(t, store.DB().Create(&tables.TableProvider{Name: "transcription"}).Error)
 	// No pricing table: the second insert fails and the registration must roll back.
 	require.Error(t, EnsureTranscriptionModel(context.Background(), store, "atomic"))
 	var count int64
-	require.NoError(t, store.DB().Model(&tables.TableTranscriptionModel{}).Count(&count).Error)
+	require.NoError(t, store.DB().Model(&tables.TableModel{}).Count(&count).Error)
 	require.Zero(t, count)
 	require.NoError(t, store.DB().AutoMigrate(&tables.TableModelPricing{}))
 	require.NoError(t, EnsureTranscriptionModel(context.Background(), store, "atomic"))
