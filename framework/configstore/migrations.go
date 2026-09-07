@@ -460,6 +460,7 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_live_models_sync_interval_column"}, run: migrationAddLiveModelsSyncIntervalColumn},
 	{IDs: []string{"add_pricing_override_user_id_column"}, run: migrationAddPricingOverrideUserIDColumn},
 	{IDs: []string{"add_budget_reset_config_column"}, run: migrationAddBudgetResetConfigColumn},
+	{IDs: []string{"add_config_model_enabled"}, run: migrationAddConfigModelEnabled},
 }
 
 // quoteSQLiteIdentifier quotes a SQLite identifier, escaping any double quotes.
@@ -11151,4 +11152,12 @@ func migrationAddPricingOverrideUserIDColumn(ctx context.Context, db *gorm.DB, l
 		return fmt.Errorf("error while running pricing override user_id column migration: %s", err.Error())
 	}
 	return nil
+}
+
+// Existing registered models remain enabled on upgrade.
+func migrationAddConfigModelEnabled(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	m := migrator.New(db, migrator.DefaultOptions, []*migrator.Migration{{ID: "add_config_model_enabled", Migrate: func(tx *gorm.DB) error {
+		return addColumnIfNotExists(tx.WithContext(ctx), logger, &tables.TableModel{}, "enabled")
+	}, Rollback: func(tx *gorm.DB) error { return nil }}})
+	return m.Migrate()
 }

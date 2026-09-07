@@ -1,0 +1,147 @@
+---
+title: "STT usage model registration"
+description: "Register and reconcile external STT accounting identities without inference credentials."
+---
+
+The reserved `transcription` provider accounts for speech recognition performed
+outside Bifrost. It is a built-in, keyless provider shown on the existing Providers page.
+Create it with the standard provider API; no inference URL or API key is needed.
+Inference requests return an unsupported-operation error. Normal vLLM
+configuration is independent.
+
+Management routes use the existing `/api` authentication middleware. A tenant
+virtual key does not authorize management when dashboard authentication is enabled.
+The usage endpoint always requires a virtual key and the governance and logging plugins.
+
+## Names
+
+Use the STT registration name exactly, preserving case. The bare name must match
+`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`: 1–128 ASCII characters, starting with a
+letter or digit. Whitespace, slashes, wildcard characters, and non-ASCII names
+are rejected. No trimming, alias mapping, or case conversion occurs.
+
+Management APIs accept the bare name; usage accepts only `transcription/<name>`.
+Rename by registering a new name and switching new sessions to that name.
+Existing sessions can retain their original name; retain its model and price.
+
+## Management API
+
+Create the provider once with `POST /api/providers` and
+`{"provider":"transcription"}` (200 on creation, 409 when already configured).
+Then use the existing model catalog API:
+
+| Method and path | Body | Result |
+| --- | --- | --- |
+| `PUT /api/models/catalog` | `[{"provider":"transcription","model":"qwen3-asr","create_if_missing":true}]` | Idempotent registration; 204 |
+| `GET /api/models/details?provider=transcription&query=qwen3-asr&exact=true&unfiltered=true` | None | 200 with the exact model, or an empty list if absent |
+| `GET /api/models/details?provider=transcription&unfiltered=true` | None | Paginated model details, including disabled models |
+| `PUT /api/models/catalog` | `[{"provider":"transcription","model":"qwen3-asr","enabled":false}]` | Explicit enabled-state update; 204 |
+
+`exact=true` performs a case-sensitive exact match before pagination. The details
+response contains `models` and `total`; each transcription model includes:
+
+```json
+{
+  "name": "qwen3-asr",
+  "provider": "transcription",
+  "usage_kind": "stt",
+  "enabled": true,
+  "pricing_configured": true,
+  "input_cost_per_token": 0,
+  "output_cost_per_token": 0
+}
+```
+
+The existing Providers page shows these models under Transcription, with model
+registration, enabled-state controls, refresh, and a link to pricing overrides.
+The standard Models page also lists them. No separate STT management route or
+registry is used.
+
+Registration and the initial explicit zero base price are inserted in one
+ConfigStore transaction. Repeated or concurrent `create_if_missing` requests
+preserve prices, disabled state, and additional attributes. They repair a missing
+base price row at zero, but preserve existing null prices and report
+`pricing_configured:false`. Do not send `enabled:true` during reconciliation;
+that field is an explicit operator update. The new creation and enabled fields
+are supported only for the transcription provider; other providers retain the
+existing catalog attribute-update behavior.
+
+The response prices are persisted **base** prices before scoped overrides.
+Prices use USD per accounting token, and **one accounting token is one millisecond**.
+For example, `input_cost_per_token:0.000002` gives a cost of $0.002 for 1,000 ms.
+Later prices can be configured through existing pricing overrides:
+
+```json
+{
+  "name": "qwen3-asr STT price",
+  "scope_kind": "provider",
+  "provider_id": "transcription",
+  "match_type": "exact",
+  "pattern": "qwen3-asr",
+  "request_types": ["transcription"],
+  "patch": {"input_cost_per_token": 0.000002}
+}
+```
+
+Submit that body to `POST /api/governance/pricing-overrides`. Registration
+resynchronization preserves overrides and existing base prices. External
+datasheet refreshes cannot overwrite the reserved transcription pricing namespace.
+
+## Virtual keys and usage
+
+Include this provider entry when creating a new tenant VK through the existing
+`POST /api/governance/virtual-keys` route:
+
+```json
+{"provider":"transcription","allowed_models":["*"]}
+```
+
+`key_ids` may be omitted or empty. Wildcard access requires an enabled, registered
+model with non-null, non-negative input and output base prices. Models registered
+later become available without updating the VK. Explicit model allowlists,
+blacklists, inactive/revoked VKs, and other provider restrictions still apply.
+
+Send usage to `POST /v1/audio/transcriptions/usage`, with `x-bf-vk` and a stable
+`x-request-id` reused for retries:
+
+```json
+{
+  "model": "transcription/qwen3-asr",
+  "audio_ms": 2500,
+  "turns": 1,
+  "outcome": "completed",
+  "session_id": "session-123",
+  "seq": 0
+}
+```
+
+Success is 202 `{"id":"<request-id>","status":"accepted"}`. Existing hook
+accounting and deduplication behavior is retained; acceptance does not make
+asynchronous logging a synchronous durable acknowledgement. Unknown/disabled
+models or malformed input return 400; missing VK returns 401; VK governance
+rejection preserves its existing error status. Missing pricing/store/catalog
+or required plugins returns 503. No audio or recognized text is accepted here.
+
+## Reconciliation and deployment
+
+Ensure the provider, PUT the catalog entry, then GET and verify identity, `enabled`, `usage_kind`, and
+`pricing_configured` before saving the STT service configuration and notifying
+runtime consumers. On timeout or partial success, repeat the provider ensure and PUT/GET with the same
+name. If ETLA DB saving fails after Bifrost succeeds, retain the shared model
+and retry. Disabled models require explicit operator action. Deleting an STT
+service must not delete or disable a shared Bifrost model.
+
+Provider and model identity are stored in the existing `config_providers` and
+`config_models` tables. An additive migration adds `config_models.enabled` with
+a default of true, preserving existing model behavior. Pricing remains in
+`governance_model_pricing`; no dedicated registry or ETLA DB schema is added.
+Registration checks and base price lookups read the shared store. Use persistent
+ConfigStore storage across restart/redeployment; an ephemeral database cannot
+preserve registrations.
+
+Deploy Bifrost before clients begin sending the new provider name. On application
+rollback retain the additive column and provider/model/price rows (migration rollback deliberately
+retains data), and pause new usage senders until the compatible version returns.
+The old binary does not accept the new namespace. This change does not migrate
+existing vLLM names, logs, prices, tenants, or STT rows, and does not install a
+persistent local Bifrost service.

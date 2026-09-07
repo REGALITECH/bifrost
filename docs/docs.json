@@ -236,7 +236,7 @@
                 "icon": "user-lock",
                 "pages": [
                   "features/governance/virtual-keys",
-                  "features/transcription-usage-recording",
+                  "features/transcription-usage-models",
                   "features/governance/routing",
                   "features/governance/budget-and-limits",
                   "features/governance/model-limits",

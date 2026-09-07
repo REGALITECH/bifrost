@@ -6,6 +6,7 @@ import "time"
 type TableModel struct {
 	ID         string    `gorm:"primaryKey" json:"id"`
 	ProviderID uint      `gorm:"index;not null;uniqueIndex:idx_provider_name" json:"provider_id"`
+	Enabled    bool      `gorm:"not null;default:true" json:"enabled"`
 	Name       string    `gorm:"uniqueIndex:idx_provider_name" json:"name"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`

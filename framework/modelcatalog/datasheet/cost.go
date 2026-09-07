@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 )
 
@@ -1280,6 +1282,18 @@ func (s *Store) resolvePricing(routingInfo schemas.RoutingInfo, requestType sche
 //
 //	bool              — true when a pricing entry was found, false otherwise.
 func (s *Store) getBasePricing(model, provider string, requestType schemas.RequestType) (*configstoreTables.TableModelPricing, bool) {
+	// Usage registrations are shared across replicas and must be visible without
+	// waiting for the external datasheet refresh. Keep scoped overrides above.
+	if provider == string(schemas.Transcription) {
+		if requestType != schemas.TranscriptionRequest {
+			return nil, false
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		price, err := configstore.GetTranscriptionModelPrice(ctx, s.configStore, model)
+		return price, err == nil
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 

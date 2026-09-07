@@ -1314,3 +1314,8 @@ export type GlobalHeaderFilterConfigSchema = z.infer<typeof globalHeaderFilterCo
 export type GlobalHeaderFilterFormSchema = z.infer<typeof globalHeaderFilterFormSchema>;
 export type RoutingRuleSchema = z.infer<typeof routingRuleSchema>;
 export type BudgetOverrideFormSchema = z.infer<typeof budgetOverrideFormSchema>;
+export const RegisteredUsageModelSchema = z.object({
+	model: z
+		.string()
+		.regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/, "Use 1–128 letters, digits, dots, underscores or hyphens; start with a letter or digit."),
+});
