@@ -53,6 +53,7 @@ var ErrRefreshInProgress = errors.New("model refresh already in progress for thi
 // ModelPricingAttributesEntry is the wire shape for PUT /api/models/catalog.
 // (model, provider) is the natural key on governance_model_pricing.
 type ModelPricingAttributesEntry struct {
+	CreateIfMissing      bool              `json:"create_if_missing,omitempty"`
 	Model                string            `json:"model"`
 	Provider             string            `json:"provider"`
 	AdditionalAttributes map[string]string `json:"additional_attributes,omitempty"`
@@ -255,7 +256,7 @@ func (h *ProviderHandler) getProvider(ctx *fasthttp.RequestCtx) {
 }
 
 // addProvider handles POST /api/providers - Add a new provider
-// NOTE: This only gets called when a new custom provider is added
+// Used for both standard and custom provider registration.
 func (h *ProviderHandler) addProvider(ctx *fasthttp.RequestCtx) {
 	var payload providerCreatePayload
 	if err := sonic.Unmarshal(ctx.PostBody(), &payload); err != nil {
@@ -655,6 +656,7 @@ type ListModelsResponse struct {
 
 // ModelDetailsResponse represents a model with capability metadata.
 type ModelDetailsResponse struct {
+	UsageKind            string                `json:"usage_kind,omitempty"`
 	Name                 string                `json:"name"`
 	Provider             string                `json:"provider"`
 	ContextLength        *int                  `json:"context_length,omitempty"`
@@ -677,6 +679,7 @@ type ListModelDetailsResponse struct {
 }
 
 type modelListQuery struct {
+	Exact      bool
 	Provider   schemas.ModelProvider
 	Query      string
 	KeyIDs     []string
@@ -698,6 +701,7 @@ type listedModel struct {
 // listModels handles GET /api/models - List models with filtering
 // Query parameters:
 //   - query: Filter models by name (case-insensitive partial match)
+//   - exact: If true, match query exactly and case-sensitively before pagination
 //   - provider: Filter by specific provider name
 //   - keys: Comma-separated list of provider key UUIDs to filter models accessible by those keys
 //   - limit: Maximum number of results to return (default: 5)
@@ -740,6 +744,7 @@ func (h *ProviderHandler) listModels(ctx *fasthttp.RequestCtx) {
 // listModelDetails handles GET /api/models/details - List models with capability metadata.
 // Query parameters:
 //   - query: Filter models by name (case-insensitive partial match)
+//   - exact: If true, match query exactly and case-sensitively before pagination
 //   - provider: Filter by specific provider name
 //   - keys: Comma-separated list of key IDs to filter models accessible by those keys
 //   - unfiltered: If true, bypass provider-level model pool restrictions only
@@ -788,6 +793,14 @@ func (h *ProviderHandler) listModelDetails(ctx *fasthttp.RequestCtx) {
 			details.IsDeprecated = capabilities.IsDeprecated
 			details.AdditionalAttributes = capabilities.AdditionalAttributes
 		}
+		if model.Provider == configstore.TranscriptionUsageProvider {
+			state, err := configstore.GetTranscriptionModel(ctx, h.dbStore, model.Name)
+			if err != nil {
+				SendError(ctx, 503, "model state unavailable")
+				return
+			}
+			details.UsageKind = state.UsageKind
+		}
 		responseModels = append(responseModels, details)
 	}
 
@@ -815,6 +828,7 @@ func (h *ProviderHandler) parseModelListQuery(ctx *fasthttp.RequestCtx, defaultL
 		Query:      string(queryArgs.Peek("query")),
 		Limit:      defaultLimit,
 		Unfiltered: string(queryArgs.Peek("unfiltered")) == "true",
+		Exact:      string(queryArgs.Peek("exact")) == "true",
 	}
 
 	if keysRaw := queryArgs.Peek("keys"); len(keysRaw) > 0 {
@@ -897,6 +911,9 @@ func (h *ProviderHandler) listManagementModels(query modelListQuery) ([]listedMo
 		models = append(models, h.listManagementModelsForProvider(provider, query)...)
 	}
 
+	if query.Exact {
+		models = slices.DeleteFunc(models, func(m listedModel) bool { return m.Name != query.Query })
+	}
 	total := len(models)
 	if query.Offset > 0 {
 		if query.Offset >= len(models) {
@@ -1307,10 +1324,9 @@ func validateRetryBackoff(networkConfig *schemas.NetworkConfig) error {
 
 // upsertModelCatalogEntries handles PUT /api/models/catalog — batch-upserts
 // the additional_attributes JSON on the pricing rows keyed by
-// (model, provider). Every requested (model, provider) must already exist in
-// governance_model_pricing; the whole batch is rejected atomically if any
-// entry is missing. An entry with an empty AdditionalAttributes map clears
-// the column for that (model, provider).
+// (model, provider). Transcription supports explicit create_if_missing
+// field for registered keyless models. Other entries must already have a pricing
+// row. The batch is atomic. An attribute-only entry with an empty map clears it.
 func (h *ProviderHandler) upsertModelCatalogEntries(ctx *fasthttp.RequestCtx) {
 	var payload []ModelPricingAttributesEntry
 	if err := sonic.Unmarshal(ctx.PostBody(), &payload); err != nil {
@@ -1318,7 +1334,18 @@ func (h *ProviderHandler) upsertModelCatalogEntries(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	for i := range payload {
-		payload[i].Model = strings.TrimSpace(payload[i].Model)
+		if payload[i].Provider == string(configstore.TranscriptionUsageProvider) {
+			if err := configstore.ValidateTranscriptionModelName(payload[i].Model); err != nil {
+				SendError(ctx, 400, err.Error())
+				return
+			}
+		} else {
+			if payload[i].CreateIfMissing {
+				SendError(ctx, 400, "registration fields require the transcription provider")
+				return
+			}
+			payload[i].Model = strings.TrimSpace(payload[i].Model)
+		}
 		payload[i].Provider = strings.TrimSpace(payload[i].Provider)
 		if payload[i].Model == "" || payload[i].Provider == "" {
 			SendError(ctx, fasthttp.StatusBadRequest, "model and provider are required for every catalog entry")
@@ -1327,6 +1354,10 @@ func (h *ProviderHandler) upsertModelCatalogEntries(ctx *fasthttp.RequestCtx) {
 	}
 
 	if err := h.modelsManager.UpsertModelPricingAttributes(ctx, payload); err != nil {
+		if errors.Is(err, configstore.ErrTranscriptionProviderConfig) {
+			SendError(ctx, fasthttp.StatusBadRequest, err.Error())
+			return
+		}
 		SendError(ctx, fasthttp.StatusInternalServerError, fmt.Sprintf("failed to upsert catalog entries: %v", err))
 		return
 	}

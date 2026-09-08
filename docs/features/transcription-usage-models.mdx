@@ -1,0 +1,127 @@
+---
+title: "STT usage model registration"
+description: "Register external STT accounting models through existing custom provider and catalog management."
+---
+
+STT inference runs outside Bifrost. The usage endpoint records its audio usage
+under `transcription/<STT registration name>` using the existing governance and
+logging plugins. `transcription` is a custom provider name, not a new built-in
+inference provider.
+
+## Configure the custom provider
+
+Use the existing `POST /api/providers` endpoint:
+
+```json
+{
+  "provider": "transcription",
+  "custom_provider_config": {
+    "base_provider_type": "openai",
+    "is_key_less": true,
+    "allowed_requests": {}
+  }
+}
+```
+
+No external API key, dummy key, or inference URL is required. The empty
+`allowed_requests` object disables all provider operations, including model
+discovery and inference. Do not omit it or use `null`: those values allow all
+operations. Explicit `false` values are equivalent to omitted members of this
+object. Although the OpenAI base implementation has a default upstream URL,
+these disabled operations never call it.
+
+Creation returns 200; an existing provider returns 409. Read
+`GET /api/providers/transcription` to verify the same OpenAI base, keyless
+setting, all operations disabled, and no configured inference URL. Do not
+silently overwrite a conflicting provider. Model registration and usage both
+reject incompatible stored provider configuration.
+
+The existing Providers page displays `transcription` as CUSTOM and keyless.
+Its keyless view has no model table. Registered model names appear in the
+existing Model Catalog Overview and Models tabs; no new UI is added.
+
+## Register and inspect models
+
+Management APIs use the bare, case-sensitive STT registration name. It must
+match `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`. Usage requests use the same name
+prefixed with `transcription/`; there is no backend-engine normalization.
+
+| Method and path | Body | Result |
+| --- | --- | --- |
+| `PUT /api/models/catalog` | `[{"provider":"transcription","model":"qwen3-asr","create_if_missing":true}]` | Idempotent registration; 204 |
+| `GET /api/models/details?provider=transcription&query=qwen3-asr&exact=true&unfiltered=true` | None | Exact model details, or an empty list if absent |
+
+`create_if_missing` is supported for this usage provider. It inserts only the
+model registration into the existing `config_models` table. Repeated or concurrent
+registration is idempotent and does not create or modify pricing rows.
+Other providers retain the existing catalog attribute-update behavior. Explicit
+`additional_attributes` updates still require an existing pricing row.
+
+`exact=true` filters case-sensitively before pagination. The response includes:
+
+```json
+{
+  "name": "qwen3-asr",
+  "provider": "transcription",
+  "usage_kind": "stt"
+}
+```
+
+Pricing is optional. Usage is recorded without a base price or pricing override;
+the log cost is null and the Logs table displays N/A when no cost is calculated.
+One accounting token is one audio millisecond. If cost accounting is needed,
+configure the existing pricing overrides API/UI; for example,
+`input_cost_per_token:0.000002` means $0.002 for 1,000 ms. Overrides work without
+a base pricing row. Registration does not modify existing prices or overrides.
+
+## Virtual keys and usage
+
+Create tenant virtual keys through the existing governance API, including:
+
+```json
+{"provider":"transcription","allowed_models":["*"]}
+```
+
+`key_ids` may be omitted or empty. Wildcard permission includes subsequently
+registered models, but does not bypass the usage endpoint's registration
+checks. Existing VK allowlists, blacklists, revoked keys, and other
+provider restrictions remain effective. There is no per-model enabled state.
+
+Send `POST /v1/audio/transcriptions/usage` with `x-bf-vk` and a stable
+`x-request-id` reused for retries:
+
+```json
+{
+  "model": "transcription/qwen3-asr",
+  "audio_ms": 2500,
+  "turns": 1,
+  "outcome": "completed",
+  "session_id": "call-session-id",
+  "seq": 0
+}
+```
+
+Success is 202. The existing logging queue writes the usage asynchronously;
+a successful response is not a synchronous durable-write acknowledgement.
+Unknown models or a deleted provider return 400; missing VK returns 401.
+Governance rejection preserves its existing status. Invalid provider settings
+or missing required plugins return 503. No audio content
+or recognized text is sent to this endpoint.
+
+## Reconciliation and deployment
+
+Verify the provider, register the catalog entry, and check its exact identity
+and `usage_kind` before saving the STT service and notifying runtime
+consumers. Retry the same name after a timeout or partial failure. Retain shared
+models if the ETLA DB write fails or an STT service is deleted.
+Rename by registering a new identity; existing sessions and historical usage
+retain their original names.
+
+No columns, migrations, separate registry, or ETLA DB fields are added. Use
+persistent ConfigStore storage. Removing the provider makes its registrations
+unavailable to usage checks; previously stored usage remains historical data.
+
+Deploy the compatible Bifrost version before the Admin/Streaming clients. No
+legacy vLLM-model, VK, or historical-data migration is included. The base usage
+endpoint does not accept the new identity contract. On rollback, pause new
+usage senders until compatible code is restored. Fish/TTS is outside this scope.
