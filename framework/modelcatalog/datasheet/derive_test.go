@@ -9,9 +9,9 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
-// TestApplyDerivations verifies that the Fish Audio rule mints only listed TTS
+// TestDeriveFishAudioPricing verifies that Fish Audio pricing includes only listed TTS
 // models, copies the expected fields, and owns its cost pointer independently.
-func TestApplyDerivations(t *testing.T) {
+func TestDeriveFishAudioPricing(t *testing.T) {
 	sourceCost := 1.5e-05
 	transcriptionCost := 0.0001
 	pricing := map[string]Entry{
@@ -32,7 +32,7 @@ func TestApplyDerivations(t *testing.T) {
 	}
 
 	before := len(pricing)
-	count := applyDerivations(pricing, builtinDerivations, nil)
+	count := deriveFishAudioPricing(pricing, nil)
 	if count != 1 {
 		t.Fatalf("expected one derived row, got %d", count)
 	}
@@ -72,9 +72,9 @@ func TestApplyDerivations(t *testing.T) {
 	}
 }
 
-// TestApplyDerivationsSkipsInvalidSources verifies that source metadata and a
+// TestDeriveFishAudioPricingSkipsInvalidSources verifies that source metadata and a
 // positive input token cost are required before a target row can be minted.
-func TestApplyDerivationsSkipsInvalidSources(t *testing.T) {
+func TestDeriveFishAudioPricingSkipsInvalidSources(t *testing.T) {
 	positiveCost := 1.5e-05
 	zeroCost := 0.0
 	tests := []struct {
@@ -101,7 +101,7 @@ func TestApplyDerivationsSkipsInvalidSources(t *testing.T) {
 				},
 			}
 
-			if count := applyDerivations(pricing, builtinDerivations, nil); count != 0 {
+			if count := deriveFishAudioPricing(pricing, nil); count != 0 {
 				t.Fatalf("expected no derived rows, got %d", count)
 			}
 			if _, ok := pricing["fishaudio/s1"]; ok {
@@ -111,9 +111,9 @@ func TestApplyDerivationsSkipsInvalidSources(t *testing.T) {
 	}
 }
 
-// TestApplyDerivationsNativeWins verifies that a datasheet-native target row
+// TestDeriveFishAudioPricingNativeWins verifies that a datasheet-native target row
 // is neither overwritten nor included in the derived-row count.
-func TestApplyDerivationsNativeWins(t *testing.T) {
+func TestDeriveFishAudioPricingNativeWins(t *testing.T) {
 	sourceCost := 1.5e-05
 	nativeCost := 2.5e-05
 	pricing := map[string]Entry{
@@ -134,7 +134,7 @@ func TestApplyDerivationsNativeWins(t *testing.T) {
 		},
 	}
 
-	if count := applyDerivations(pricing, builtinDerivations, nil); count != 0 {
+	if count := deriveFishAudioPricing(pricing, nil); count != 0 {
 		t.Fatalf("expected native target not to be counted, got %d", count)
 	}
 	got := pricing["fishaudio/s1"]
@@ -146,18 +146,18 @@ func TestApplyDerivationsNativeWins(t *testing.T) {
 	}
 }
 
-// TestApplyDerivationsEmpty verifies that an empty pricing map and nil logger
+// TestDeriveFishAudioPricingEmpty verifies that an empty pricing map and nil logger
 // are accepted without adding rows or panicking.
-func TestApplyDerivationsEmpty(t *testing.T) {
+func TestDeriveFishAudioPricingEmpty(t *testing.T) {
 	pricing := make(map[string]Entry)
-	if count := applyDerivations(pricing, builtinDerivations, nil); count != 0 {
+	if count := deriveFishAudioPricing(pricing, nil); count != 0 {
 		t.Fatalf("expected no derived rows from an empty map, got %d", count)
 	}
 }
 
-// TestLoadFromLocalFilesWithDerivations verifies that URL loading applies the
-// built-in Fish Audio rule while preserving the source OpenRouter rows.
-func TestLoadFromLocalFilesWithDerivations(t *testing.T) {
+// TestLoadFromLocalFilesWithFishAudioPricing verifies that URL loading applies the
+// Fish Audio pricing derivation while preserving the source OpenRouter rows.
+func TestLoadFromLocalFilesWithFishAudioPricing(t *testing.T) {
 	logger := bifrost.NewDefaultLogger(schemas.LogLevelWarn)
 	ctx := context.Background()
 	store := New(nil, logger, Config{
