@@ -1,0 +1,19 @@
+{
+  "plugins": [
+    {
+      "name": "metronome",
+      "enabled": true,
+      "path": "/absolute/path/to/metronome.so",
+      "config": {
+        "dry_run": true,
+        "api_key_env": "METRONOME_API_KEY",
+        "customer_mapping": {
+          "BIFROST_VIRTUAL_KEY_UUID": "METRONOME_SANDBOX_CUSTOMER_ID"
+        },
+        "default_customer_id": "",
+        "model_mapping": {},
+        "provider_mapping": {}
+      }
+    }
+  ]
+}

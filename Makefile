@@ -2862,3 +2862,16 @@ run-provider-harness-test: $(if $(HELP),,install-newman) ## Run the Bifrost prov
 	fi; \
 	if [ "$$NEWMAN_EXIT" -ne 0 ]; then exit $$NEWMAN_EXIT; fi; \
 	exit $$STREAM_CANCEL_EXIT
+
+.PHONY: build-metronome test-metronome test-metronome-integration
+build-metronome: ## Build the Metronome .so with the flags used by make build LOCAL=1 (native/SQLite)
+	@mkdir -p build
+	CGO_ENABLED=1 go build -trimpath -tags sqlite_static -buildmode=plugin -o build/metronome.so ./plugins/metronome
+
+test-metronome: ## Test Metronome event conversion and delivery against a local HTTP server
+	go test -race ./plugins/metronome -count=1
+
+test-metronome-integration: ## Verify the Fish Audio handler with the actual native plugin in dry run
+	@mkdir -p tmp/metronome-test
+	CGO_ENABLED=1 go build -buildmode=plugin -o tmp/metronome-test/metronome.so ./plugins/metronome
+	BIFROST_TEST_METRONOME_PLUGIN="$(CURDIR)/tmp/metronome-test/metronome.so" go test ./transports/bifrost-http/handlers -run '^TestFishAudioUsageNativeMetronomePlugin$$' -count=1 -v

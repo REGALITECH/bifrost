@@ -2,12 +2,15 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
+	"os"
 	"testing"
 
 	"github.com/fasthttp/router"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
+	pluginloader "github.com/maximhq/bifrost/framework/plugins"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,14 +18,15 @@ import (
 )
 
 type fishAudioUsageTestPlugin struct {
-	name         string
-	events       *[]string
-	preRequest   *schemas.BifrostRequest
-	preContext   *schemas.BifrostContext
-	postResponse *schemas.BifrostResponse
-	shortCircuit *schemas.LLMPluginShortCircuit
-	preCalls     int
-	postCalls    int
+	name              string
+	events            *[]string
+	preRequest        *schemas.BifrostRequest
+	preContext        *schemas.BifrostContext
+	postResponse      *schemas.BifrostResponse
+	shortCircuit      *schemas.LLMPluginShortCircuit
+	preCalls          int
+	postCalls         int
+	authenticatedVKID string
 }
 
 func (p *fishAudioUsageTestPlugin) GetName() string { return p.name }
@@ -35,8 +39,12 @@ func (p *fishAudioUsageTestPlugin) PreLLMHook(ctx *schemas.BifrostContext, req *
 	p.preCalls++
 	p.preRequest = req
 	p.preContext = ctx
+	if p.authenticatedVKID != "" {
+		ctx.SetValue(schemas.BifrostContextKeyGovernanceVirtualKeyID, p.authenticatedVKID)
+	}
 	return req, p.shortCircuit, nil
 }
+
 func (p *fishAudioUsageTestPlugin) PostLLMHook(_ *schemas.BifrostContext, response *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError, error) {
 	*p.events = append(*p.events, p.name+".post")
 	p.postCalls++
@@ -142,6 +150,17 @@ func TestFishAudioUsageHandlerRequiresVirtualKey(t *testing.T) {
 	assert.Empty(t, events)
 }
 
+func TestFishAudioUsageHandlerRequiresRequestID(t *testing.T) {
+	for _, id := range []string{"", "   "} {
+		events := []string{}
+		handler, _, _ := newFishAudioUsageTestHandler(&events)
+		ctx := newFishAudioUsageTestContext(`{"billable_bytes":42,"audio_ms":1250,"outcome":"completed","turn_id":"turn-1","sub_id":"sub-1","model":"s2-pro"}`, "vk-test", id)
+		handler.recordUsage(ctx)
+		assert.Equal(t, fasthttp.StatusBadRequest, ctx.Response.StatusCode())
+		assert.Empty(t, events)
+	}
+}
+
 func TestFishAudioUsageHandlerReturnsGovernanceRejection(t *testing.T) {
 	events := []string{}
 	handler, _, governancePlugin := newFishAudioUsageTestHandler(&events)
@@ -227,5 +246,138 @@ func TestValidateFishAudioUsageRequest(t *testing.T) {
 			_, _, err := validateFishAudioUsageRequest(&test.payload)
 			assert.Error(t, err)
 		})
+	}
+}
+
+type fishAudioUsageReporter struct {
+	post func(*schemas.BifrostContext, *schemas.HTTPRequest, *schemas.HTTPResponse) error
+}
+
+func (p *fishAudioUsageReporter) GetName() string { return "metronome" }
+func (p *fishAudioUsageReporter) Cleanup() error  { return nil }
+func (p *fishAudioUsageReporter) HTTPTransportPreHook(*schemas.BifrostContext, *schemas.HTTPRequest) (*schemas.HTTPResponse, error) {
+	return nil, nil
+}
+func (p *fishAudioUsageReporter) HTTPTransportPostHook(ctx *schemas.BifrostContext, req *schemas.HTTPRequest, resp *schemas.HTTPResponse) error {
+	return p.post(ctx, req, resp)
+}
+func (p *fishAudioUsageReporter) HTTPTransportStreamChunkHook(_ *schemas.BifrostContext, _ *schemas.HTTPRequest, chunk *schemas.BifrostStreamChunk) (*schemas.BifrostStreamChunk, error) {
+	return chunk, nil
+}
+
+const fishAudioReportBody = `{"billable_bytes":54,"audio_ms":2500,"outcome":"completed","turn_id":"turn-1","sub_id":"sub-1","model":"s2-pro","occurred_at":"2026-09-15T15:00:00+09:00"}`
+
+func TestFishAudioUsageMetronomeDelivery(t *testing.T) {
+	for _, delivery := range []string{"sent", "dry_run", "failed", "legacy"} {
+		t.Run(delivery, func(t *testing.T) {
+			SetLogger(&mockLogger{})
+			events := []string{}
+			handler, _, governance := newFishAudioUsageTestHandler(&events)
+			governance.authenticatedVKID = "vk-uuid"
+			reporter := &fishAudioUsageReporter{post: func(ctx *schemas.BifrostContext, req *schemas.HTTPRequest, resp *schemas.HTTPResponse) error {
+				assert.Equal(t, []string{"logging.pre", "governance.pre", "governance.post", "logging.post"}, events)
+				assert.Equal(t, "vk-uuid", ctx.Value(schemas.BifrostContextKeyGovernanceVirtualKeyID))
+				assert.Equal(t, "report-id", ctx.Value(schemas.BifrostContextKeyRequestID))
+				assert.Equal(t, fishAudioUsagePath, req.Path)
+				assert.Empty(t, req.Headers, "never forward secrets")
+				var body fishAudioUsageRequest
+				require.NoError(t, json.Unmarshal(req.Body, &body))
+				assert.Equal(t, "2026-09-15T06:00:00Z", body.OccurredAt)
+				assert.EqualValues(t, 54, *body.BillableBytes)
+				if delivery == "failed" {
+					return fmt.Errorf("test network failure")
+				}
+				if delivery != "legacy" {
+					resp.Headers["x-bf-metronome-status"] = delivery
+					resp.Headers["x-bf-metronome-transaction-id"] = "stable-event"
+				}
+				return nil
+			}}
+			handler.SetMetronomeResolver(func() (schemas.HTTPTransportPlugin, error) { return reporter, nil })
+			ctx := newFishAudioUsageTestContext(fishAudioReportBody, "secret-vk", "report-id")
+			handler.recordUsage(ctx)
+			if delivery == "failed" || delivery == "legacy" {
+				assert.Equal(t, fasthttp.StatusServiceUnavailable, ctx.Response.StatusCode())
+				return
+			}
+			require.Equal(t, fasthttp.StatusAccepted, ctx.Response.StatusCode())
+			var receipt fishAudioUsageResponse
+			require.NoError(t, json.Unmarshal(ctx.Response.Body(), &receipt))
+			assert.Equal(t, delivery, receipt.MetronomeStatus)
+			assert.Equal(t, "stable-event", receipt.TransactionID)
+		})
+	}
+}
+
+func TestFishAudioUsageReporterValidationAndReload(t *testing.T) {
+	events := []string{}
+	handler, _, governance := newFishAudioUsageTestHandler(&events)
+	calls := 0
+	reporter := &fishAudioUsageReporter{post: func(_ *schemas.BifrostContext, _ *schemas.HTTPRequest, resp *schemas.HTTPResponse) error {
+		calls++
+		resp.Headers["x-bf-metronome-status"] = "sent"
+		resp.Headers["x-bf-metronome-transaction-id"] = "event"
+		return nil
+	}}
+	var current schemas.HTTPTransportPlugin = reporter
+	handler.SetMetronomeResolver(func() (schemas.HTTPTransportPlugin, error) { return current, nil })
+	ctx := newFishAudioUsageTestContext(`{"billable_bytes":0,"audio_ms":0,"outcome":"failed","turn_id":"t","sub_id":"s","model":"s2-pro"}`, "vk", "id")
+	handler.recordUsage(ctx)
+	assert.Equal(t, 400, ctx.Response.StatusCode())
+	assert.Empty(t, events)
+	status := 403
+	governance.shortCircuit = &schemas.LLMPluginShortCircuit{Error: &schemas.BifrostError{StatusCode: &status, Error: &schemas.ErrorField{Message: "inactive"}}}
+	ctx = newFishAudioUsageTestContext(fishAudioReportBody, "vk", "id")
+	handler.recordUsage(ctx)
+	assert.Equal(t, 403, ctx.Response.StatusCode())
+	assert.Zero(t, calls)
+	governance.shortCircuit = nil
+	ctx = newFishAudioUsageTestContext(fishAudioReportBody, "vk", "id")
+	handler.recordUsage(ctx)
+	assert.Equal(t, 202, ctx.Response.StatusCode())
+	assert.Equal(t, 1, calls)
+	current = nil // unloading is observed on the next request
+	ctx = newFishAudioUsageTestContext(fishAudioReportBody, "vk", "id")
+	handler.recordUsage(ctx)
+	assert.Equal(t, 202, ctx.Response.StatusCode())
+	assert.Equal(t, 1, calls)
+	handler.SetMetronomeResolver(func() (schemas.HTTPTransportPlugin, error) { return nil, fmt.Errorf("plugin failed to load") })
+	ctx = newFishAudioUsageTestContext(fishAudioReportBody, "vk", "id")
+	handler.recordUsage(ctx)
+	assert.Equal(t, 503, ctx.Response.StatusCode())
+	assert.Equal(t, 1, calls)
+}
+
+// Build the real .so with the same Go toolchain/flags before running this test.
+// This covers symbol discovery and the handler/exporter contract without a key
+// or a live Metronome request. See make test-metronome-integration.
+func TestFishAudioUsageNativeMetronomePlugin(t *testing.T) {
+	path := os.Getenv("BIFROST_TEST_METRONOME_PLUGIN")
+	if path == "" {
+		t.Skip("set BIFROST_TEST_METRONOME_PLUGIN to a freshly built plugin")
+	}
+	loader := &pluginloader.SharedObjectPluginLoader{}
+	plugin, err := loader.LoadPlugin(path, map[string]any{"dry_run": true, "customer_mapping": map[string]string{"vk-uuid": "sandbox-customer"}})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, plugin.Cleanup()) })
+	exporter, ok := plugin.(schemas.HTTPTransportPlugin)
+	require.True(t, ok)
+	events := []string{}
+	handler, _, gov := newFishAudioUsageTestHandler(&events)
+	gov.authenticatedVKID = "vk-uuid"
+	handler.SetMetronomeResolver(func() (schemas.HTTPTransportPlugin, error) { return exporter, nil })
+	var first fishAudioUsageResponse
+	for range 2 {
+		ctx := newFishAudioUsageTestContext(fishAudioReportBody, "secret-vk", "source-event")
+		handler.recordUsage(ctx)
+		require.Equal(t, 202, ctx.Response.StatusCode(), string(ctx.Response.Body()))
+		var receipt fishAudioUsageResponse
+		require.NoError(t, json.Unmarshal(ctx.Response.Body(), &receipt))
+		require.Equal(t, "dry_run", receipt.MetronomeStatus)
+		require.NotEmpty(t, receipt.TransactionID)
+		if first.TransactionID != "" {
+			assert.Equal(t, first, receipt)
+		}
+		first = receipt
 	}
 }

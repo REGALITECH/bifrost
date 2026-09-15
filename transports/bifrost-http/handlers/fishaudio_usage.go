@@ -9,6 +9,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/fasthttp/router"
 	"github.com/maximhq/bifrost/core/schemas"
@@ -27,11 +28,13 @@ var fishAudioUsageOutcomes = map[string]struct{}{
 
 // FishAudioUsageHandler records Fish Audio usage that occurred outside Bifrost,
 // such as playback of a cached TTS clip. Callers must reuse x-request-id when
-// retrying; the existing logging and governance hooks use it for deduplication.
+// retrying. Logging deduplicates by ID; governance only deduplicates briefly
+// in memory. Metronome uses a separate stable transaction ID for delivery.
 type FishAudioUsageHandler struct {
 	config               *lib.Config
 	loggingPluginName    string
 	governancePluginName string
+	metronomeResolver    func() (schemas.HTTPTransportPlugin, error)
 }
 
 type fishAudioUsageRequest struct {
@@ -41,11 +44,20 @@ type fishAudioUsageRequest struct {
 	TurnID        string `json:"turn_id"`
 	SubID         string `json:"sub_id"`
 	Model         string `json:"model"`
+	OccurredAt    string `json:"occurred_at,omitempty"`
 }
 
 type fishAudioUsageResponse struct {
-	ID     string `json:"id"`
-	Status string `json:"status"`
+	ID              string `json:"id"`
+	Status          string `json:"status"`
+	MetronomeStatus string `json:"metronome_status,omitempty"`
+	TransactionID   string `json:"transaction_id,omitempty"`
+}
+
+// SetMetronomeResolver resolves the current plugin once per report so reloads
+// are honored. Only this exporter is invoked, not the full inference pipeline.
+func (h *FishAudioUsageHandler) SetMetronomeResolver(resolve func() (schemas.HTTPTransportPlugin, error)) {
+	h.metronomeResolver = resolve
 }
 
 func NewFishAudioUsageHandler(config *lib.Config, loggingPluginName, governancePluginName string) *FishAudioUsageHandler {
@@ -67,6 +79,10 @@ func (h *FishAudioUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusServiceUnavailable, "Fish Audio usage recording requires the logging and governance plugins")
 		return
 	}
+	if strings.TrimSpace(string(ctx.Request.Header.Peek("x-request-id"))) == "" {
+		SendError(ctx, fasthttp.StatusBadRequest, "x-request-id is required; reuse the same ID and payload when retrying")
+		return
+	}
 
 	payload, err := decodeFishAudioUsageRequest(ctx.PostBody())
 	if err != nil {
@@ -86,6 +102,18 @@ func (h *FishAudioUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusUnauthorized, "virtual key is required. Provide a virtual key via the x-bf-vk header.")
 		return
 	}
+	var metronome schemas.HTTPTransportPlugin
+	if h.metronomeResolver != nil {
+		metronome, err = h.metronomeResolver()
+		if err != nil {
+			SendError(ctx, fasthttp.StatusServiceUnavailable, "Metronome usage reporting is unavailable")
+			return
+		}
+	}
+	if metronome != nil && payload.OccurredAt == "" {
+		SendError(ctx, fasthttp.StatusBadRequest, "occurred_at in RFC3339 format is required for Metronome; preserve it when retrying")
+		return
+	}
 
 	requestID, _ := bifrostCtx.Value(schemas.BifrostContextKeyRequestID).(string)
 	bifrostCtx.SetValue(schemas.BifrostContextKeySkipBudgetAndRateLimits, true)
@@ -100,6 +128,9 @@ func (h *FishAudioUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 	dimensions["outcome"] = payload.Outcome
 	dimensions["turn_id"] = payload.TurnID
 	dimensions["sub_id"] = payload.SubID
+	if payload.OccurredAt != "" {
+		dimensions["occurred_at"] = payload.OccurredAt
+	}
 	bifrostCtx.SetValue(schemas.BifrostContextKeyDimensions, dimensions)
 
 	request := &schemas.BifrostRequest{
@@ -151,7 +182,34 @@ func (h *FishAudioUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, "Fish Audio usage recording failed")
 		return
 	}
-	SendJSONWithStatus(ctx, fishAudioUsageResponse{ID: requestID, Status: "accepted"}, fasthttp.StatusAccepted)
+	receipt := fishAudioUsageResponse{ID: requestID, Status: "accepted"}
+	if metronome != nil {
+		// Forward only the validated usage body. In particular, never forward
+		// the raw VK, caller dimensions, or arbitrary HTTP headers to the exporter.
+		body, err := schemas.MarshalSorted(payload)
+		if err != nil {
+			SendError(ctx, fasthttp.StatusInternalServerError, "unable to encode Fish Audio usage")
+			return
+		}
+		req := schemas.AcquireHTTPRequest()
+		defer schemas.ReleaseHTTPRequest(req)
+		req.Method, req.Path, req.Body = fasthttp.MethodPost, fishAudioUsagePath, body
+		resp := schemas.AcquireHTTPResponse()
+		defer schemas.ReleaseHTTPResponse(resp)
+		resp.StatusCode = fasthttp.StatusAccepted
+		if err := metronome.HTTPTransportPostHook(bifrostCtx, req, resp); err != nil {
+			logger.Warn("Fish Audio Metronome delivery failed: %v", err)
+			SendError(ctx, fasthttp.StatusServiceUnavailable, "Metronome delivery failed; retry with the same x-request-id and payload")
+			return
+		}
+		receipt.MetronomeStatus = resp.Headers["x-bf-metronome-status"]
+		receipt.TransactionID = resp.Headers["x-bf-metronome-transaction-id"]
+		if resp.StatusCode != fasthttp.StatusAccepted || receipt.TransactionID == "" || (receipt.MetronomeStatus != "sent" && receipt.MetronomeStatus != "dry_run") {
+			SendError(ctx, fasthttp.StatusServiceUnavailable, "Metronome did not acknowledge external usage; check that the plugin supports Fish Audio reporting")
+			return
+		}
+	}
+	SendJSONWithStatus(ctx, receipt, fasthttp.StatusAccepted)
 }
 
 func (h *FishAudioUsageHandler) runPostHooks(ctx *schemas.BifrostContext, loggingPlugin, governancePlugin schemas.LLMPlugin, response *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError) {
@@ -181,6 +239,13 @@ func decodeFishAudioUsageRequest(body []byte) (*fishAudioUsageRequest, error) {
 }
 
 func validateFishAudioUsageRequest(payload *fishAudioUsageRequest) (schemas.ModelProvider, string, error) {
+	if payload.OccurredAt != "" {
+		at, err := time.Parse(time.RFC3339Nano, payload.OccurredAt)
+		if err != nil || at.IsZero() {
+			return "", "", fmt.Errorf("occurred_at must be an RFC3339 timestamp")
+		}
+		payload.OccurredAt = at.UTC().Format(time.RFC3339Nano)
+	}
 	if payload.BillableBytes == nil || *payload.BillableBytes < 0 {
 		return "", "", fmt.Errorf("billable_bytes is required and must be non-negative")
 	}

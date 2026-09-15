@@ -1889,6 +1889,13 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	governancePlugin, _ := lib.FindPluginAs[schemas.LLMPlugin](s.Config, governancePluginName)
 	fishAudioUsageHandler := handlers.NewFishAudioUsageHandler(s.Config, logging.PluginName, governancePluginName)
 	transcriptionUsageHandler := handlers.NewTranscriptionUsageHandler(s.Config, logging.PluginName, governancePluginName)
+	fishAudioUsageHandler.SetMetronomeResolver(func() (schemas.HTTPTransportPlugin, error) {
+		status, configured := s.Config.GetPluginStatusByName("metronome")
+		if !configured || status.Status == schemas.PluginStatusDisabled {
+			return nil, nil
+		}
+		return lib.FindPluginAs[schemas.HTTPTransportPlugin](s.Config, "metronome")
+	})
 	if governancePlugin != nil {
 		governanceHandler, err = handlers.NewGovernanceHandler(callbacks, s.Config.ConfigStore, govLogManager, s.ExternalQuotaBudgetResolver)
 		if err != nil {

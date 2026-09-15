@@ -2305,6 +2305,67 @@
             "if": {
               "properties": {
                 "name": {
+                  "const": "metronome"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "path"
+              ],
+              "properties": {
+                "config": {
+                  "type": "object",
+                  "properties": {
+                    "dry_run": {
+                      "type": "boolean",
+                      "default": true,
+                      "description": "Log usage events instead of sending them to Metronome"
+                    },
+                    "api_key_env": {
+                      "type": "string",
+                      "minLength": 1,
+                      "default": "METRONOME_API_KEY",
+                      "description": "Environment variable containing the Metronome sandbox API key"
+                    },
+                    "customer_mapping": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "description": "Authenticated Bifrost virtual-key UUID to Metronome customer ID or ingest alias"
+                    },
+                    "default_customer_id": {
+                      "type": "string",
+                      "description": "Optional single-customer sandbox fallback; empty means unmapped keys are skipped"
+                    },
+                    "model_mapping": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "description": "Bifrost provider/model to exact Metronome model name"
+                    },
+                    "provider_mapping": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "description": "Bifrost provider to exact Metronome provider name"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "name": {
                   "const": "telemetry"
                 }
               }
