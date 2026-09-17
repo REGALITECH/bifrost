@@ -209,24 +209,14 @@ configure the explicit Sandbox mapping, and restart with the Sandbox key in the
 process environment. `transports/Dockerfile.metronome` builds both Linux binaries
 in one environment; loading a rebuilt .so into an older image is not supported.
 
-Prepare a fresh synthetic event (no Fish Audio API call or audio generation):
-
-```sh
-python3 plugins/metronome/examples/fishaudio.py prepare --event /tmp/fish-event.json
-python3 plugins/metronome/examples/fishaudio.py send --event /tmp/fish-event.json
-# Repeat the SAME send command to check deduplication.
-```
-
-The sender prompts for a VK without echoing it, or reads `BIFROST_VIRTUAL_KEY`.
-Its default gateway is `http://127.0.0.1:18081`; override with `--base-url`.
-The existing external stub must add `occurred_at` to its saved payload before it
-can use a Metronome-enabled gateway. Its synthetic quantities are not a Fish
-Audio invoice or proof of real generation.
+Send a usage report to `POST /v1/fishaudio/usage` using the request format above,
+with `x-bf-vk` and a stable `x-request-id`. Save the payload, including
+`occurred_at`, before sending and reuse it unchanged when checking deduplication.
 
 After `metronome_status: "sent"`, query `/v1/events/search` with
 `{"transactionIds": ["<returned transaction_id>"]}` using the Sandbox key.
 Check `matched_customer`, `matched_billable_metrics`, and `is_duplicate`, then
-verify metric/invoice quantities: first send = 54 bytes / 2500 ms; replay must not
-increase billable quantity. Also test unmapped VK, inactive VK, interrupted
+verify that metric/invoice quantities match the submitted report; replay must
+not increase billable quantity. Also test unmapped VK, inactive VK, interrupted
 outcomes, and delivery failure. Search API reference:
 https://docs.metronome.com/api-reference/usage/search-events
