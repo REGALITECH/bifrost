@@ -208,6 +208,7 @@
             "icon": "puzzle-piece",
             "pages": [
               "plugins/getting-started",
+              "plugins/metronome",
               "plugins/building-dynamic-binary",
               "plugins/sequencing",
               {

@@ -1,5 +1,5 @@
-// Package main exports a native Bifrost plugin for Metronome sandbox ingestion.
-package main
+// Package metronome exports Bifrost usage to Metronome.
+package metronome
 
 import (
 	"bytes"
@@ -8,9 +8,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"maps"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -20,8 +19,8 @@ import (
 )
 
 type Config struct {
-	DryRun    bool   `json:"dry_run"`
-	APIKeyEnv string `json:"api_key_env"`
+	DryRun bool               `json:"dry_run"`
+	APIKey *schemas.SecretVar `json:"api_key,omitempty"`
 	// Keys are authenticated governance virtual-key UUIDs, never secret VK tokens.
 	CustomerMapping map[string]string `json:"customer_mapping"`
 	// Explicit single-customer sandbox fallback; leave empty for tenant isolation.
@@ -31,12 +30,12 @@ type Config struct {
 	ProviderMapping map[string]string `json:"provider_mapping"`
 }
 
-type Event struct {
-	TransactionID string     `json:"transaction_id"`
-	CustomerID    string     `json:"customer_id"`
-	EventType     string     `json:"event_type"`
-	Timestamp     string     `json:"timestamp"`
-	Properties    TokenUsage `json:"properties"`
+type Event[T any] struct {
+	TransactionID string `json:"transaction_id"`
+	CustomerID    string `json:"customer_id"`
+	EventType     string `json:"event_type"`
+	Timestamp     string `json:"timestamp"`
+	Properties    T      `json:"properties"`
 }
 
 type TokenUsage struct {
@@ -52,11 +51,16 @@ type requestKey string
 
 const attemptKey requestKey = "metronome-attempt-id"
 
-type exporter struct {
+const PluginName = "metronome"
+
+var _ schemas.LLMPlugin = (*Plugin)(nil)
+
+type Plugin struct {
+	logger schemas.Logger
 	config Config
 	apiKey string
 	client *http.Client
-	queue  chan Event
+	queue  chan Event[TokenUsage]
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -64,43 +68,44 @@ type exporter struct {
 	closed bool
 }
 
-var active *exporter
+func (p *Plugin) GetName() string { return PluginName }
 
-func GetName() string { return "metronome" }
-
-// Init reads credentials from the process environment, so the plugin API never
-// stores or returns the secret. A missing key is fine in the default dry run.
-func Init(raw any) error {
-	cfg := Config{DryRun: true, APIKeyEnv: "METRONOME_API_KEY"}
-	if raw != nil {
-		data, err := schemas.MarshalSorted(raw)
-		if err != nil {
-			return fmt.Errorf("encode metronome config: %w", err)
-		}
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			return fmt.Errorf("decode metronome config: %w", err)
-		}
+// Omitted dry_run defaults to true, including configs decoded by the server.
+func (c *Config) UnmarshalJSON(data []byte) error {
+	type plain Config
+	value := plain{DryRun: true}
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
 	}
-	if cfg.APIKeyEnv == "" {
-		return fmt.Errorf("metronome api_key_env must not be empty")
-	}
-	key := strings.TrimSpace(os.Getenv(cfg.APIKeyEnv))
-	if !cfg.DryRun && key == "" {
-		return fmt.Errorf("metronome credential environment variable is not set")
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	p := &exporter{config: cfg, apiKey: key, queue: make(chan Event, 1000), ctx: ctx, cancel: cancel,
-		client: &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
-	active = p
-	p.wg.Add(1)
-	go p.run()
-	log.Printf("[metronome] initialized dry_run=%t", cfg.DryRun)
+	*c = Config(value)
 	return nil
 }
 
-func PreRequestHook(_ *schemas.BifrostContext, _ *schemas.BifrostRequest) error { return nil }
+func Init(config *Config, logger schemas.Logger) (*Plugin, error) {
+	cfg := Config{DryRun: true}
+	if config != nil {
+		cfg = *config
+	}
+	cfg.CustomerMapping = maps.Clone(cfg.CustomerMapping)
+	cfg.ModelMapping = maps.Clone(cfg.ModelMapping)
+	cfg.ProviderMapping = maps.Clone(cfg.ProviderMapping)
+	key := strings.TrimSpace(cfg.APIKey.GetValue())
+	if !cfg.DryRun && key == "" {
+		return nil, fmt.Errorf("metronome api_key is required for live delivery")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &Plugin{config: cfg, logger: logger, apiKey: key, queue: make(chan Event[TokenUsage], 1000), ctx: ctx, cancel: cancel,
+		client: &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	p.wg.Add(1)
+	go p.run()
+	return p, nil
+}
 
-func PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (*schemas.BifrostRequest, *schemas.LLMPluginShortCircuit, error) {
+func (p *Plugin) PreRequestHook(_ *schemas.BifrostContext, _ *schemas.BifrostRequest) error {
+	return nil
+}
+
+func (p *Plugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (*schemas.BifrostRequest, *schemas.LLMPluginShortCircuit, error) {
 	// A small scalar only: no request or stream content is retained in context.
 	if ctx != nil {
 		ctx.SetValue(attemptKey, uuid.NewString())
@@ -108,8 +113,7 @@ func PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (*sche
 	return req, nil, nil
 }
 
-func PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, upstreamErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError, error) {
-	p := active
+func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, upstreamErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError, error) {
 	if p == nil || ctx == nil || resp == nil || upstreamErr != nil {
 		return resp, upstreamErr, nil
 	}
@@ -132,7 +136,7 @@ func PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, ups
 		return resp, upstreamErr, nil
 	}
 	if usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.CachedInputTokens < 0 || usage.CachedWriteTokens < 0 {
-		log.Print("[metronome] skipped inconsistent token counts")
+		p.logger.Warn("[metronome] skipped inconsistent token counts")
 		return resp, upstreamErr, nil
 	}
 	if usage.InputTokens+usage.OutputTokens+usage.CachedInputTokens+usage.CachedWriteTokens == 0 {
@@ -144,7 +148,7 @@ func PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, ups
 		customer = p.config.DefaultCustomerID
 	}
 	if customer == "" {
-		log.Print("[metronome] skipped usage: configure customer_mapping for the authenticated virtual-key ID")
+		p.logger.Warn("[metronome] skipped usage: configure customer_mapping for the authenticated virtual-key ID")
 		return resp, upstreamErr, nil
 	}
 	provider, model := string(extra.RoutingInfo.Provider), extra.RoutingInfo.Model
@@ -179,19 +183,19 @@ func PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, ups
 	}
 	attempt, _ := ctx.Value(attemptKey).(string)
 	if attempt == "" {
-		log.Print("[metronome] skipped usage: missing pre-hook attempt ID")
+		p.logger.Warn("[metronome] skipped usage: missing pre-hook attempt ID")
 		return resp, upstreamErr, nil
 	}
 	retries, _ := ctx.Value(schemas.BifrostContextKeyNumberOfRetries).(int)
 	id := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%s:%s", attempt, retries, provider, model)))
-	event := Event{TransactionID: fmt.Sprintf("bifrost-%x", id), CustomerID: customer, EventType: "token-billing", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Properties: usage}
+	event := Event[TokenUsage]{TransactionID: fmt.Sprintf("bifrost-%x", id), CustomerID: customer, EventType: "token-billing", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Properties: usage}
 	// Copy scalar usage before returning: Bifrost may release pooled responses.
 	p.mu.RLock()
 	if !p.closed {
 		select {
 		case p.queue <- event:
 		default:
-			log.Printf("[metronome] queue full; dropped transaction=%s", event.TransactionID)
+			p.logger.Warn("[metronome] queue full; dropped transaction=%s", event.TransactionID)
 		}
 	}
 	p.mu.RUnlock()
@@ -231,31 +235,31 @@ func extractUsage(resp *schemas.BifrostResponse) (TokenUsage, bool) {
 	return u, true
 }
 
-func (p *exporter) run() {
+func (p *Plugin) run() {
 	defer p.wg.Done()
 	for event := range p.queue {
 		if p.ctx.Err() != nil {
-			log.Print("[metronome] shutdown deadline reached; pending sandbox events dropped")
+			p.logger.Warn("[metronome] shutdown deadline reached; pending sandbox events dropped")
 			return
 		}
-		payload, err := schemas.MarshalSorted([]Event{event})
+		payload, err := schemas.MarshalSorted([]Event[TokenUsage]{event})
 		if err != nil {
-			log.Print("[metronome] unable to encode event")
+			p.logger.Warn("[metronome] unable to encode event")
 			continue
 		}
 		if p.config.DryRun {
-			log.Printf("[metronome] dry_run %s", payload)
+			p.logger.Info("[metronome] dry_run %s", payload)
 			continue
 		}
 		if err := p.send(p.ctx, event.TransactionID, payload); err != nil {
-			log.Printf("[metronome] dropped transaction=%s: %v", event.TransactionID, err)
+			p.logger.Warn("[metronome] dropped transaction=%s: %v", event.TransactionID, err)
 		}
 	}
 }
 
 // send retries the identical serialized payload. External usage propagates errors
-// to its caller; the original token exporter still uses its background queue.
-func (p *exporter) send(ctx context.Context, id string, payload []byte) error {
+// to its caller; token usage still uses its background queue.
+func (p *Plugin) send(ctx context.Context, id string, payload []byte) error {
 	for attempt := 0; attempt < 3; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -274,12 +278,12 @@ func (p *exporter) send(ctx context.Context, id string, payload []byte) error {
 			resp.Body.Close()
 		}
 		if err == nil && status == http.StatusOK {
-			log.Printf("[metronome] accepted transaction=%s", id)
+			p.logger.Info("[metronome] accepted transaction=%s", id)
 			return nil
 		}
 		// Keep upstream bodies, credentials and network error URLs out of logs.
-		log.Printf("[metronome] ingest failed transaction=%s status=%d attempt=%d", id, status, attempt+1)
-		if err == nil && status != 429 && status < 500 {
+		p.logger.Warn("[metronome] ingest failed transaction=%s status=%d attempt=%d", id, status, attempt+1)
+		if err == nil && status != http.StatusTooManyRequests && status < 500 {
 			return fmt.Errorf("metronome rejected ingestion (HTTP %d)", status)
 		}
 		if attempt < 2 {
@@ -293,8 +297,7 @@ func (p *exporter) send(ctx context.Context, id string, payload []byte) error {
 	return fmt.Errorf("metronome retry limit reached")
 }
 
-func Cleanup() error {
-	p := active
+func (p *Plugin) Cleanup() error {
 	if p == nil {
 		return nil
 	}

@@ -1,4 +1,4 @@
-package main
+package metronome
 
 import (
 	"context"
@@ -8,17 +8,14 @@ import (
 )
 
 func TestTokenUsageStillUsesLLMQueue(t *testing.T) {
-	p := &exporter{config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1"}}, queue: make(chan Event, 4), ctx: context.Background()}
-	old := active
-	active = p
-	t.Cleanup(func() { active = old })
+	p := &Plugin{logger: testLogger{}, config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1"}}, queue: make(chan Event[TokenUsage], 4), ctx: context.Background()}
 	ctx := audioContext("vk-1", "request")
-	PreLLMHook(ctx, nil)
+	p.PreLLMHook(ctx, nil)
 	response := &schemas.BifrostResponse{ChatResponse: &schemas.BifrostChatResponse{Usage: &schemas.BifrostLLMUsage{
 		PromptTokens: 100, CompletionTokens: 10, PromptTokensDetails: &schemas.ChatPromptTokensDetails{CachedReadTokens: 20, CachedWriteTokens: 5},
 	}}}
 	response.PopulateExtraFields(schemas.ChatCompletionRequest, schemas.OpenAI, "test-model", "test-model")
-	_, _, err := PostLLMHook(ctx, response, nil)
+	_, _, err := p.PostLLMHook(ctx, response, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,17 +31,17 @@ func TestTokenUsageStillUsesLLMQueue(t *testing.T) {
 	// source of external audio events, so there is no second billable event.
 	speech := &schemas.BifrostResponse{SpeechResponse: &schemas.BifrostSpeechResponse{Usage: &schemas.SpeechUsage{InputChars: 54}}}
 	speech.PopulateExtraFields(schemas.SpeechRequest, schemas.FishAudio, "s2-pro", "s2-pro")
-	PostLLMHook(ctx, speech, nil)
+	p.PostLLMHook(ctx, speech, nil)
 	if len(p.queue) != 0 {
 		t.Fatal("speech was double-exported via the token hook")
 	}
 	response.PopulateExtraFields(schemas.ChatCompletionStreamRequest, schemas.OpenAI, "test-model", "test-model")
-	PostLLMHook(ctx, response, nil)
+	p.PostLLMHook(ctx, response, nil)
 	if len(p.queue) != 0 {
 		t.Fatal("non-final stream exported")
 	}
 	ctx.SetValue(schemas.BifrostContextKeyStreamEndIndicator, true)
-	PostLLMHook(ctx, response, nil)
+	p.PostLLMHook(ctx, response, nil)
 	if len(p.queue) != 1 {
 		t.Fatal("final stream usage missing")
 	}

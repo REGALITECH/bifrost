@@ -25,6 +25,7 @@ go work use ./plugins/governance
 go work use ./plugins/jsonparser
 go work use ./plugins/logging
 go work use ./plugins/maxim
+go work use ./plugins/metronome
 go work use ./plugins/mocker
 go work use ./plugins/otel
 go work use ./plugins/prompts

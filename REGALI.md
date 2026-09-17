@@ -27,6 +27,8 @@ As of 2026-08-20, relative to upstream commit `0a8a38c9` (2026-08-15):
 | --- | --- |
 | Fish Audio provider (speech + realtime WS) | `core/providers/fishaudio/`, `core/schemas/`, `core/internal/llmtests/`, `framework/streaming/audio.go`, `plugins/logging/operations.go`, `transports/bifrost-http/`, `transports/config.schema.json`, `ui/lib/constants/`, `docs/providers/supported-providers/fishaudio.mdx` |
 | Fish Audio catalog pricing derived from the datasheet's OpenRouter rows | `framework/modelcatalog/datasheet/derive.go`, `framework/modelcatalog/datasheet/derive_test.go`, `framework/modelcatalog/datasheet/testdata/pricing-openrouter-fishaudio.json`, `framework/modelcatalog/datasheet/sync.go` (one call site) |
+| Metronome builtin exporter and external usage delivery (2026-09) | `plugins/metronome/`, `transports/bifrost-http/{handlers/fishaudio_usage.go,server/plugins.go,lib/config.go}`, `transports/go.mod`, `transports/config.schema.json`, `transports/Dockerfile.local`, `Makefile`, `docs/plugins/metronome.mdx`, `docs/docs.json`, `examples/configs/withmetronome/` |
+| Metronome CI coverage and release smoke test | `.github/workflows/metronome-tests.yml`, `.github/workflows/scripts/{setup-go-workspace.sh,validate-schema-sync.sh,test-metronome-image.sh}`, `.github/dependabot.yml`, `.github/workflows/regali-docker-release.yml` |
 | GHCR release workflow (new file) | `.github/workflows/regali-docker-release.yml` |
 | `FISH_AUDIO_API_KEY` plumbed into upstream test jobs | `.github/workflows/pr-tests.yml`, `.github/workflows/release-pipeline.yml` |
 | Snyk workflow deleted (not usable in a fork) | `.github/workflows/snyk.yml` |
@@ -181,3 +183,17 @@ image generation. Use a credential issued for testing, never a production key.
   permission and owners get `admin`, the same as every other repository in the org. The org has no
   teams.
 - Secret scanning and push protection are enabled; Dependabot security updates are disabled.
+
+## Metronome verification
+
+`make test-metronome` runs the exporter, HTTP handler, and builtin registration
+tests with the race detector and no live credentials. The dedicated
+`metronome-tests.yml` runs this on every PR to main, independently of the
+secret-bearing test approval environment. An unrelated green workflow is not
+evidence that these tests ran. The release job also boots each static image
+with the documented dry-run config and verifies `metronome` is loaded.
+
+The module is fork-only: `transports/go.mod` uses a local replacement until a
+separate module publication strategy is adopted. Keep this workspace/replacement
+and the explicit CI module lists when syncing upstream. The builtin needs no
+extra wiring in `server.go`; its Fish Audio handler resolves it from `lib.Config`.

@@ -1,4 +1,4 @@
-package main
+package metronome
 
 import (
 	"context"
@@ -24,9 +24,9 @@ func audioContext(vk, id string) *schemas.BifrostContext {
 }
 
 func TestFishAudioEvent(t *testing.T) {
-	p := &exporter{config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1", "vk-2": "customer-1"}}}
+	p := &Plugin{logger: testLogger{}, config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1", "vk-2": "customer-1"}}}
 	ctx := audioContext("vk-1", "source-event-1")
-	event, err := p.fishAudioEvent(ctx, []byte(audioBody))
+	event, err := p.fishAudioEvent(ctx, audioUsage(t, audioBody))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,14 +40,14 @@ func TestFishAudioEvent(t *testing.T) {
 		t.Fatal("transaction ID too long")
 	}
 	// New exporter and new pre-hook attempt must preserve the external event ID.
-	PreLLMHook(ctx, nil)
-	restarted := &exporter{config: p.config}
-	again, err := restarted.fishAudioEvent(ctx, []byte(audioBody))
+	p.PreLLMHook(ctx, nil)
+	restarted := &Plugin{logger: testLogger{}, config: p.config}
+	again, err := restarted.fishAudioEvent(ctx, audioUsage(t, audioBody))
 	if err != nil || event != again {
 		t.Fatalf("replay changed event: %+v / %v", again, err)
 	}
 	for _, pair := range [][2]string{{"vk-2", "source-event-1"}, {"vk-1", "source-event-2"}} {
-		other, err := p.fishAudioEvent(audioContext(pair[0], pair[1]), []byte(audioBody))
+		other, err := p.fishAudioEvent(audioContext(pair[0], pair[1]), audioUsage(t, audioBody))
 		if err != nil || other.TransactionID == event.TransactionID {
 			t.Fatalf("identity collision: %+v / %v", other, err)
 		}
@@ -55,21 +55,21 @@ func TestFishAudioEvent(t *testing.T) {
 	// Zero-usage and non-completed reports are observations, not LLM failures.
 	for _, outcome := range []string{"completed", "failed", "barged_in", "cache_hit"} {
 		body := strings.ReplaceAll(strings.ReplaceAll(audioBody, "completed", outcome), `"billable_bytes":54`, `"billable_bytes":0`)
-		got, err := p.fishAudioEvent(ctx, []byte(body))
+		got, err := p.fishAudioEvent(ctx, audioUsage(t, body))
 		if err != nil || got.Properties.Outcome != outcome || got.Properties.BillableBytes != 0 {
 			t.Fatalf("outcome %s: %+v / %v", outcome, got, err)
 		}
 	}
 	p.config.ProviderMapping = map[string]string{"fishaudio": "fish"}
 	p.config.ModelMapping = map[string]string{"fishaudio/s2-pro": "voice/pro"}
-	mapped, err := p.fishAudioEvent(ctx, []byte(audioBody))
+	mapped, err := p.fishAudioEvent(ctx, audioUsage(t, audioBody))
 	if err != nil || mapped.Properties.Provider != "fish" || mapped.Properties.Model != "voice/pro" || mapped.TransactionID != event.TransactionID {
 		t.Fatalf("bad mapping: %+v / %v", mapped, err)
 	}
 }
 
 func TestFishAudioEventRejectsInvalidReports(t *testing.T) {
-	p := &exporter{config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1"}, DefaultCustomerID: "must-not-be-used"}}
+	p := &Plugin{logger: testLogger{}, config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1"}, DefaultCustomerID: "must-not-be-used"}}
 	cases := []struct{ name, vk, id, body string }{
 		{"unauthenticated", "", "req", audioBody},
 		{"unmapped", "other", "req", audioBody},
@@ -84,7 +84,7 @@ func TestFishAudioEventRejectsInvalidReports(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := audioContext(tc.vk, tc.id)
 			ctx.SetValue(schemas.BifrostContextKeyDimensions, map[string]string{"customer_id": "customer-1"})
-			if _, err := p.fishAudioEvent(ctx, []byte(tc.body)); err == nil {
+			if _, err := p.fishAudioEvent(ctx, audioUsage(t, tc.body)); err == nil {
 				t.Fatal("accepted invalid report")
 			}
 		})
@@ -110,7 +110,7 @@ func TestFishAudioHTTPDelivery(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	defer server.Close()
-	p := &exporter{config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1"}}, apiKey: "sandbox-test-key", ctx: context.Background()}
+	p := &Plugin{logger: testLogger{}, config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1"}}, apiKey: "sandbox-test-key", ctx: context.Background()}
 	p.client = &http.Client{Timeout: time.Second, Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		// Only tests reroute the production URL; configuration cannot redirect credentials.
 		clone := r.Clone(r.Context())
@@ -118,23 +118,20 @@ func TestFishAudioHTTPDelivery(t *testing.T) {
 		clone.URL.Host = strings.TrimPrefix(server.URL, "http://")
 		return http.DefaultTransport.RoundTrip(clone)
 	})}
-	old := active
-	active = p
-	t.Cleanup(func() { active = old })
-	req := &schemas.HTTPRequest{Method: "POST", Path: "/v1/fishaudio/usage", Body: []byte(audioBody)}
+	usage := audioUsage(t, audioBody)
 	for range 2 {
-		resp := &schemas.HTTPResponse{StatusCode: 202}
-		if err := HTTPTransportPostHook(audioContext("vk-1", "event-1"), req, resp); err != nil {
+		receipt, err := p.ReportFishAudio(audioContext("vk-1", "event-1"), usage)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if resp.Headers["x-bf-metronome-status"] != "sent" || resp.Headers["x-bf-metronome-transaction-id"] == "" {
-			t.Fatalf("missing acknowledgment: %+v", resp)
+		if receipt.Status != "sent" || receipt.TransactionID == "" {
+			t.Fatalf("missing acknowledgment: %+v", receipt)
 		}
 	}
 	if len(received) != 3 || string(received[0]) != string(received[1]) || string(received[1]) != string(received[2]) {
 		t.Fatalf("retry changed payload: %q", received)
 	}
-	var events []fishAudioEvent
+	var events []Event[fishAudioProperties]
 	if err := json.Unmarshal(received[0], &events); err != nil || len(events) != 1 || events[0].Properties.BillableBytes != 54 {
 		t.Fatalf("invalid wire event: %s", received[0])
 	}
@@ -146,20 +143,16 @@ func TestFishAudioHTTPDelivery(t *testing.T) {
 }
 
 func TestFishAudioHTTPFailureAndDryRun(t *testing.T) {
-	p := &exporter{config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1"}}, ctx: context.Background()}
-	old := active
-	active = p
-	t.Cleanup(func() { active = old })
-	req := &schemas.HTTPRequest{Method: "POST", Path: "/v1/fishaudio/usage", Body: []byte(audioBody)}
+	p := &Plugin{logger: testLogger{}, config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1"}}, ctx: context.Background()}
+	usage := audioUsage(t, audioBody)
 	calls := 0
 	p.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
 		return &http.Response{StatusCode: 401, Body: io.NopCloser(strings.NewReader("secret error body")), Header: make(http.Header)}, nil
 	})}
-	resp := &schemas.HTTPResponse{StatusCode: 202}
-	err := HTTPTransportPostHook(audioContext("vk-1", "event"), req, resp)
-	if err == nil || calls != 1 || len(resp.Headers) != 0 || strings.Contains(fmt.Sprint(err), "secret") {
-		t.Fatalf("failure acknowledged: calls=%d resp=%+v err=%v", calls, resp, err)
+	receipt, err := p.ReportFishAudio(audioContext("vk-1", "event"), usage)
+	if err == nil || calls != 1 || receipt != (Receipt{}) || strings.Contains(fmt.Sprint(err), "secret") {
+		t.Fatalf("failure acknowledged: calls=%d resp=%+v err=%v", calls, receipt, err)
 	}
 	// Cancellation never reaches the network.
 	parent, cancel := context.WithCancel(context.Background())
@@ -173,25 +166,16 @@ func TestFishAudioHTTPFailureAndDryRun(t *testing.T) {
 	}
 	ctx.SetValue(schemas.BifrostContextKeyGovernanceVirtualKeyID, "vk-1")
 	ctx.SetValue(schemas.BifrostContextKeyRequestID, "event")
-	if err := HTTPTransportPostHook(ctx, req, resp); err == nil || calls != 1 {
+	if _, err := p.ReportFishAudio(ctx, usage); err == nil || calls != 1 {
 		t.Fatal("cancelled request sent")
 	}
 	p.config.DryRun = true
-	if err := HTTPTransportPostHook(audioContext("vk-1", "event"), req, resp); err != nil || calls != 1 || resp.Headers["x-bf-metronome-status"] != "dry_run" {
+	if receipt, err := p.ReportFishAudio(audioContext("vk-1", "event"), usage); err != nil || calls != 1 || receipt.Status != "dry_run" {
 		t.Fatalf("dry run failed: %v", err)
 	}
 	p.closed = true
-	if err := HTTPTransportPostHook(audioContext("vk-1", "event"), req, resp); err == nil {
+	if _, err := p.ReportFishAudio(audioContext("vk-1", "event"), usage); err == nil {
 		t.Fatal("closed exporter acknowledged")
-	}
-	// Other endpoints and governance rejection must never export usage.
-	for _, test := range []struct {
-		path   string
-		status int
-	}{{"/v1/audio/speech", 202}, {"/v1/fishaudio/usage", 403}} {
-		if err := HTTPTransportPostHook(nil, &schemas.HTTPRequest{Method: "POST", Path: test.path}, &schemas.HTTPResponse{StatusCode: test.status}); err != nil {
-			t.Fatal(err)
-		}
 	}
 }
 
@@ -199,7 +183,7 @@ func TestFishAudioDeliveryRetryExhaustion(t *testing.T) {
 	for _, status := range []int{0, 503} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			calls := 0
-			p := &exporter{config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1"}}, ctx: context.Background()}
+			p := &Plugin{logger: testLogger{}, config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1"}}, ctx: context.Background()}
 			p.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 				calls++
 				if status == 0 {
@@ -207,14 +191,19 @@ func TestFishAudioDeliveryRetryExhaustion(t *testing.T) {
 				}
 				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
 			})}
-			old := active
-			active = p
-			t.Cleanup(func() { active = old })
-			resp := &schemas.HTTPResponse{StatusCode: 202}
-			err := HTTPTransportPostHook(audioContext("vk-1", "event"), &schemas.HTTPRequest{Method: "POST", Path: "/v1/fishaudio/usage", Body: []byte(audioBody)}, resp)
-			if err == nil || calls != 3 || len(resp.Headers) != 0 {
+			receipt, err := p.ReportFishAudio(audioContext("vk-1", "event"), audioUsage(t, audioBody))
+			if err == nil || calls != 3 || receipt != (Receipt{}) {
 				t.Fatalf("failed delivery acknowledged: calls=%d, err=%v", calls, err)
 			}
 		})
 	}
+}
+
+func audioUsage(t *testing.T, body string) *FishAudioUsage {
+	t.Helper()
+	var usage FishAudioUsage
+	if err := json.Unmarshal([]byte(body), &usage); err != nil {
+		t.Fatal(err)
+	}
+	return &usage
 }

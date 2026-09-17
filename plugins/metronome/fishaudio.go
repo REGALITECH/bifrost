@@ -1,29 +1,25 @@
-package main
+package metronome
 
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
-	"log"
-	"net/http"
+	"math"
 	"strings"
 	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
-// This contract uses the existing HTTP plugin interface; it requires no core
-// schema, provider, or plugin-loader changes. The handler invokes it only after
-// governance authentication, with a normalized body and no secret headers.
-type fishAudioUsage struct {
+// FishAudioUsage is the external usage contract shared by the transport and exporter.
+type FishAudioUsage struct {
 	BillableBytes *int64 `json:"billable_bytes"`
 	AudioMS       *int64 `json:"audio_ms"`
 	Outcome       string `json:"outcome"`
 	TurnID        string `json:"turn_id"`
 	SubID         string `json:"sub_id"`
 	Model         string `json:"model"`
-	OccurredAt    string `json:"occurred_at"`
+	OccurredAt    string `json:"occurred_at,omitempty"`
 }
 
 type fishAudioProperties struct {
@@ -38,16 +34,8 @@ type fishAudioProperties struct {
 	SubID         string `json:"sub_id"`
 }
 
-type fishAudioEvent struct {
-	TransactionID string              `json:"transaction_id"`
-	CustomerID    string              `json:"customer_id"`
-	EventType     string              `json:"event_type"`
-	Timestamp     string              `json:"timestamp"`
-	Properties    fishAudioProperties `json:"properties"`
-}
-
-func (p *exporter) fishAudioEvent(ctx *schemas.BifrostContext, body []byte) (fishAudioEvent, error) {
-	var event fishAudioEvent
+func (p *Plugin) fishAudioEvent(ctx *schemas.BifrostContext, usage *FishAudioUsage) (Event[fishAudioProperties], error) {
+	var event Event[fishAudioProperties]
 	if ctx == nil {
 		return event, fmt.Errorf("missing authenticated context")
 	}
@@ -62,28 +50,12 @@ func (p *exporter) fishAudioEvent(ctx *schemas.BifrostContext, body []byte) (fis
 	if strings.TrimSpace(customer) == "" {
 		return event, fmt.Errorf("configure customer_mapping for the authenticated virtual-key ID")
 	}
-	var usage fishAudioUsage
-	if err := json.Unmarshal(body, &usage); err != nil {
-		return event, fmt.Errorf("invalid external usage JSON")
+	provider, model, err := usage.Validate()
+	if err != nil {
+		return event, err
 	}
-	if usage.BillableBytes == nil || *usage.BillableBytes < 0 || usage.AudioMS == nil || *usage.AudioMS < 0 {
-		return event, fmt.Errorf("external usage requires non-negative billable_bytes and audio_ms")
-	}
-	switch usage.Outcome {
-	case "completed", "barged_in", "failed", "cache_hit":
-	default:
-		return event, fmt.Errorf("invalid external usage outcome")
-	}
-	if strings.TrimSpace(usage.TurnID) == "" || strings.TrimSpace(usage.SubID) == "" {
-		return event, fmt.Errorf("external usage requires turn_id and sub_id")
-	}
-	at, err := time.Parse(time.RFC3339Nano, usage.OccurredAt)
-	if err != nil || at.IsZero() {
+	if usage.OccurredAt == "" {
 		return event, fmt.Errorf("external usage requires occurred_at in RFC3339 format")
-	}
-	provider, model := schemas.ParseModelString(strings.TrimSpace(usage.Model), schemas.FishAudio)
-	if provider != schemas.FishAudio || strings.TrimSpace(model) == "" {
-		return event, fmt.Errorf("external usage requires a Fish Audio model")
 	}
 	// Length-delimited JSON avoids ambiguous concatenation. This ID survives
 	// application retries, plugin reloads and process restarts. Never include a
@@ -104,56 +76,90 @@ func (p *exporter) fishAudioEvent(ctx *schemas.BifrostContext, body []byte) (fis
 	} else if !strings.Contains(model, "/") {
 		props.Model = props.Provider + "/" + model
 	}
-	return fishAudioEvent{TransactionID: fmt.Sprintf("bf-fishaudio-%x", id), CustomerID: customer,
-		EventType: "fishaudio-usage", Timestamp: at.UTC().Format(time.RFC3339Nano), Properties: props}, nil
+	return Event[fishAudioProperties]{TransactionID: fmt.Sprintf("bf-fishaudio-%x", id), CustomerID: customer,
+		EventType: "fishaudio-usage", Timestamp: usage.OccurredAt, Properties: props}, nil
 }
 
-// HTTPTransportPostHook sends external usage synchronously. Unlike the token
-// queue, it does not acknowledge an event that could be lost on process exit.
-// On failure the reporting client must retry the SAME saved event.
-func HTTPTransportPostHook(ctx *schemas.BifrostContext, req *schemas.HTTPRequest, resp *schemas.HTTPResponse) error {
-	if req == nil || resp == nil || req.Method != http.MethodPost || req.Path != "/v1/fishaudio/usage" || resp.StatusCode != http.StatusAccepted {
-		return nil
-	}
-	p := active
-	if p == nil {
-		return fmt.Errorf("metronome is not initialized")
-	}
+// Receipt is returned only after successful ingestion or an explicit dry run.
+type Receipt struct {
+	Status        string
+	TransactionID string
+}
+
+// ReportFishAudio waits for ingestion. On failure the caller retries the SAME
+// saved event. Only authenticated governance context and typed usage are read.
+func (p *Plugin) ReportFishAudio(ctx *schemas.BifrostContext, usage *FishAudioUsage) (Receipt, error) {
 	p.mu.RLock()
 	closed := p.closed
 	p.mu.RUnlock()
 	if closed {
-		return fmt.Errorf("metronome is shutting down")
+		return Receipt{}, fmt.Errorf("metronome is shutting down")
 	}
-	event, err := p.fishAudioEvent(ctx, req.Body)
+	event, err := p.fishAudioEvent(ctx, usage)
 	if err != nil {
-		return err
+		return Receipt{}, err
 	}
-	payload, err := schemas.MarshalSorted([]fishAudioEvent{event})
+	payload, err := schemas.MarshalSorted([]Event[fishAudioProperties]{event})
 	if err != nil {
-		return err
+		return Receipt{}, err
 	}
 	status := "sent"
 	if p.config.DryRun {
-		log.Printf("[metronome] dry_run %s", payload)
+		p.logger.Info("[metronome] dry_run %s", payload)
 		status = "dry_run"
 	} else {
-		// A fixed deadline bounds all three attempts. Shutdown also cancels an
-		// in-flight external report; no request/body is retained in context.
 		sendCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 		stop := context.AfterFunc(p.ctx, cancel)
 		defer stop()
 		defer cancel()
 		if err := p.send(sendCtx, event.TransactionID, payload); err != nil {
-			return err
+			return Receipt{}, err
 		}
 	}
-	if resp.Headers == nil {
-		resp.Headers = make(map[string]string, 2)
+	return Receipt{Status: status, TransactionID: event.TransactionID}, nil
+}
+
+func (payload *FishAudioUsage) Validate() (schemas.ModelProvider, string, error) {
+	if payload == nil {
+		return "", "", fmt.Errorf("usage is required")
 	}
-	// Explicit acknowledgment lets the handler detect an older .so whose HTTP
-	// hook is a no-op, instead of silently claiming successful delivery.
-	resp.Headers["x-bf-metronome-status"] = status
-	resp.Headers["x-bf-metronome-transaction-id"] = event.TransactionID
-	return nil
+	if payload.OccurredAt != "" {
+		at, err := time.Parse(time.RFC3339Nano, payload.OccurredAt)
+		if err != nil || at.IsZero() {
+			return "", "", fmt.Errorf("occurred_at must be an RFC3339 timestamp")
+		}
+		payload.OccurredAt = at.UTC().Format(time.RFC3339Nano)
+	}
+	if payload.BillableBytes == nil || *payload.BillableBytes < 0 {
+		return "", "", fmt.Errorf("billable_bytes is required and must be non-negative")
+	}
+	if *payload.BillableBytes > int64(math.MaxInt) {
+		return "", "", fmt.Errorf("billable_bytes is too large")
+	}
+	if payload.AudioMS == nil || *payload.AudioMS < 0 {
+		return "", "", fmt.Errorf("audio_ms is required and must be non-negative")
+	}
+	switch payload.Outcome {
+	case "completed", "barged_in", "failed", "cache_hit":
+	default:
+		return "", "", fmt.Errorf("outcome must be one of completed, barged_in, failed, or cache_hit")
+	}
+	if strings.TrimSpace(payload.TurnID) == "" {
+		return "", "", fmt.Errorf("turn_id is required")
+	}
+	if strings.TrimSpace(payload.SubID) == "" {
+		return "", "", fmt.Errorf("sub_id is required")
+	}
+	payload.Model = strings.TrimSpace(payload.Model)
+	if payload.Model == "" {
+		return "", "", fmt.Errorf("model is required")
+	}
+	provider, model := schemas.ParseModelString(payload.Model, schemas.FishAudio)
+	if provider != schemas.FishAudio {
+		return "", "", fmt.Errorf("model must use the fishaudio provider")
+	}
+	if strings.TrimSpace(model) == "" {
+		return "", "", fmt.Errorf("model is required")
+	}
+	return provider, model, nil
 }

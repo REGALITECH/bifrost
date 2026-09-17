@@ -34,7 +34,7 @@ if [ ! -f "$REPO_ROOT/go.work" ]; then
     go work init
     for mod in ./core ./framework \
                ./plugins/compat ./plugins/governance ./plugins/jsonparser \
-               ./plugins/logging ./plugins/maxim ./plugins/mocker \
+               ./plugins/logging ./plugins/maxim ./plugins/metronome ./plugins/mocker \
                ./plugins/otel ./plugins/prompts ./plugins/semanticcache \
                ./plugins/telemetry \
                ./transports ./cli; do
