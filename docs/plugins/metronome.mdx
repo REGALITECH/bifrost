@@ -32,8 +32,7 @@ your gateway configuration. The builtin entry uses `name: "metronome"`,
   "version": 1,
   "config": {
     "dry_run": true,
-    "api_key": "env.METRONOME_API_KEY",
-    "customer_mapping": { "BIFROST_VIRTUAL_KEY_UUID": "METRONOME_CUSTOMER_ID" }
+    "api_key": "env.METRONOME_API_KEY"
   }
 }
 ```
@@ -62,35 +61,70 @@ bash .github/workflows/scripts/test-metronome-image.sh bifrost-metronome
 
 ## Customer identity
 
-`customer_mapping` maps **Bifrost governance virtual-key UUIDs** to Metronome
-customer IDs or ingest aliases. Use the UUID in the virtual-key management view,
-not the secret `sk-bf-...` value passed in `x-bf-vk`. The ID is read from the
-authenticated governance context; arbitrary caller-supplied tenant headers are
-not trusted as billing identities. Unmapped token requests are skipped with a warning;
-external audio reports fail visibly instead.
+Both token and external Fish Audio events use the **authenticated Bifrost
+governance virtual-key UUID** directly as `customer_id`. Register this UUID in
+the intended Metronome customer's `ingest_aliases`. Use the UUID in the virtual-key
+management view, not the secret `sk-bf-...` value passed in `x-bf-vk`.
+No per-customer routing table is configured in Bifrost.
 
-For one local sandbox customer, `default_customer_id` can route otherwise
-unmapped token usage to that customer. External audio requires an explicit mapping. Keep it empty when exercising tenant isolation.
-Multiple virtual-key UUIDs may map to the same Metronome customer.
+For example, create a Metronome customer for tenant A, add tenant A's VK UUID as
+an ingest alias, and attach a contract using the shared rate card. Repeat for
+tenant B with its own VK and customer. The aliases resolve on the Metronome side;
+Metronome's generated customer UUID remains the ID used by management APIs.
+Customer/contract provisioning can be manual and does not require a Bifrost
+governance Customer or Team for this integration.
+
+The exporter reads the UUID only from authenticated governance context. Raw keys,
+arbitrary caller headers and submitted customer/tenant dimensions cannot select
+the billing customer. Missing or blank authenticated IDs skip token export with
+a warning and fail external audio delivery. The exporter does not query Metronome
+to check aliases: ingest acceptance does not establish that the intended customer
+or metric matched. Verify matching before relying on usage or invoice totals.
+
+Multiple VK UUIDs can be registered as aliases on the same Metronome customer.
+When replacing a VK, add the new UUID to that customer and retain old aliases for
+historical usage and retries. Never reassign an old alias to a different tenant.
+The [setIngestAliases API](https://docs.metronome.com/api-reference/customers/create-or-update-customer-ingest-aliases)
+replaces the complete alias set, so include existing aliases when updating it.
+
+### Migrate from customer mappings
+
+This changes the usage event's customer identifier. Before enabling the new version:
+
+1. Register each existing VK UUID as an ingest alias on its existing Metronome
+   customer, preserving other aliases. Check keys previously using the token-only
+   fallback individually so usage stays with the intended tenant.
+2. Remove `customer_mapping` and `default_customer_id` from the plugin config,
+   including empty values. The plugin rejects these legacy settings to avoid
+   silently changing an existing installation's billing identity.
+3. Increase the plugin configuration's `version` above the stored version and
+   restart using an image with this change.
+4. Send fresh usage from two tenant keys and inspect each event's matched customer
+   and billable metrics, then verify each customer's draft invoice.
+
+External transaction IDs remain based on the VK UUID and original request ID.
+Do not regenerate IDs or timestamps when replaying a saved report during migration.
 
 ## Enable sandbox delivery later
 
 1. Register at https://signup.metronome.com/ and complete the emailed login flow.
-2. In the sandbox, create a customer and note its ID (or configure an ingest alias).
+2. In the sandbox, create a customer and register the tenant's Bifrost virtual-key
+   UUID as an ingest alias. The UUID comes from the virtual-key management view.
 3. Create a rate card and customer contract. For a manual first experiment, make
    four SUM billable metrics filtered by `event_type = token-billing`, measuring
    `input_tokens`, `output_tokens`, `cached_input_tokens`, `cached_write_tokens`.
    Add `model` and `provider` as group keys before saving the metrics. Create
    usage products and rates using those keys, and attach the rate card to the
    customer contract. Event ingestion alone does not create pricing or contracts.
-4. Update `customer_mapping` in the plugin configuration.
+4. Use the mapping-free plugin configuration above. No customer ID is stored in it.
 5. Put a **sandbox** API key in the Bifrost process environment as
    `METRONOME_API_KEY`, referenced by `api_key: "env.METRONOME_API_KEY"`. For Docker, pass
    the environment variable into the container. Do not put secrets in config JSON.
 6. Set `dry_run: false` and restart. Missing credentials cause plugin initialization
    to fail visibly; the gateway's existing plugin loader reports that status.
 7. When ready for a later integration check, make a normal gateway request using
-   the mapped virtual key, then inspect Metronome Events and the draft invoice.
+   the virtual key whose UUID was registered as an alias, then inspect Metronome
+   Events and the draft invoice.
 
 The API hostname is shared between sandbox and production; the API key determines
 the instance. This plugin cannot infer the instance from an opaque API key.
@@ -174,7 +208,7 @@ body is otherwise unchanged; unknown fields are still rejected.
 Unlike queued token events, audio reports wait for Metronome's HTTP 200 before
 returning 202. Up to three identical requests are attempted for network errors,
 429 and 5xx, with a 12-second overall deadline and 3-second per-attempt timeout.
-An ingest error, missing customer mapping, shutdown, or configured plugin that
+An ingest error, missing authenticated virtual-key ID, shutdown, or configured plugin that
 failed to initialize returns 503. The caller must retain and retry its event.
 There is no server-side background retry after a failed external report.
 
@@ -185,12 +219,11 @@ behavior and omits these fields. **202 without `metronome_status: "sent"` does
 not confirm Metronome delivery.** Ingest acceptance also does not prove that a
 customer, billable metric, or invoice matched; verify those in Sandbox.
 
-The Metronome plugin requires an explicit `customer_mapping` entry keyed by the
-authenticated governance VK UUID, including for audio dry run. Audio never uses
-`default_customer_id`. Do not use a caller header, secret VK value, or submitted
-customer field as the billing identity. For the existing local stub, the mapping
-key is `d9092762-f3ba-4109-af19-f76fb5ff0e41`; choose an actual Sandbox customer
-as its value. This example does not change any live mapping or credentials.
+The Metronome plugin uses the authenticated governance VK UUID as the customer
+ingest alias, including for audio dry run. Do not use a caller header, secret VK
+value, or submitted customer field as the billing identity. Register the reporting
+key's UUID as an alias on the intended Sandbox customer before sending live usage.
+These instructions do not change any live aliases or credentials.
 
 ### Event and pricing
 
@@ -227,7 +260,7 @@ Metronome deduplicates the transaction ID within its 34-day window:
 https://docs.metronome.com/api-reference/idempotency
 
 - Save the event **before** sending and resend exactly the same file. Do not
-  rotate the VK UUID or change its customer/model mapping while replaying events.
+  rotate the VK UUID, reassign its customer alias, or change model mappings while replaying events.
 - Reusing an ID with changed quantities is not a correction: this prototype has
   no durable receipt ledger or payload-conflict detection. Metronome can ignore
   the changed event. Do not use this interface for adjustments.
@@ -243,8 +276,8 @@ https://docs.metronome.com/api-reference/idempotency
 
 ### Local test and Sandbox verification
 
-Build the gateway (see above), configure the explicit Sandbox mapping, and
-restart with the Sandbox key in the process environment.
+Build the gateway (see above), register the reporting VK UUID as a Sandbox
+customer ingest alias, and restart with the Sandbox key in the process environment.
 
 Send a usage report to `POST /v1/fishaudio/usage` using the request format above,
 with `x-bf-vk` and a stable `x-request-id`. Save the payload, including
@@ -254,6 +287,6 @@ After `metronome_status: "sent"`, query `/v1/events/search` with
 `{"transactionIds": ["<returned transaction_id>"]}` using the Sandbox key.
 Check `matched_customer`, `matched_billable_metrics`, and `is_duplicate`, then
 verify that metric/invoice quantities match the submitted report; replay must
-not increase billable quantity. Also test unmapped VK, inactive VK, interrupted
+not increase billable quantity. Also test missing authenticated IDs, inactive VK, interrupted
 outcomes, and delivery failure. Search API reference:
 https://docs.metronome.com/api-reference/usage/search-events

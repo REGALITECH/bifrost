@@ -2329,18 +2329,6 @@
                       "default": "env.METRONOME_API_KEY",
                       "description": "Metronome API key or secret reference, e.g. env.METRONOME_API_KEY"
                     },
-                    "customer_mapping": {
-                      "type": "object",
-                      "additionalProperties": {
-                        "type": "string",
-                        "minLength": 1
-                      },
-                      "description": "Authenticated Bifrost virtual-key UUID to Metronome customer ID or ingest alias"
-                    },
-                    "default_customer_id": {
-                      "type": "string",
-                      "description": "Optional single-customer sandbox fallback; empty means unmapped keys are skipped"
-                    },
                     "model_mapping": {
                       "type": "object",
                       "additionalProperties": {

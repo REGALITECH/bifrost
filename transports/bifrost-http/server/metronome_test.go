@@ -19,4 +19,8 @@ func TestMetronomeBuiltinRegistration(t *testing.T) {
 	require.Equal(t, []schemas.PluginType{schemas.PluginTypeLLM}, InferPluginTypes(plugin))
 	_, err = InstantiatePlugin(context.Background(), metronome.PluginName, nil, map[string]any{"dry_run": false}, &lib.Config{})
 	require.ErrorContains(t, err, "api_key")
+	_, err = InstantiatePlugin(context.Background(), metronome.PluginName, nil, map[string]any{
+		"customer_mapping": map[string]string{"vk": "customer"},
+	}, &lib.Config{})
+	require.ErrorContains(t, err, "ingest aliases")
 }
