@@ -21,10 +21,6 @@ import (
 type Config struct {
 	DryRun bool               `json:"dry_run"`
 	APIKey *schemas.SecretVar `json:"api_key,omitempty"`
-	// Keys are authenticated governance virtual-key UUIDs, never secret VK tokens.
-	CustomerMapping map[string]string `json:"customer_mapping"`
-	// Explicit single-customer sandbox fallback; leave empty for tenant isolation.
-	DefaultCustomerID string `json:"default_customer_id"`
 	// Keys are Bifrost provider/model; values match the Metronome rate card exactly.
 	ModelMapping    map[string]string `json:"model_mapping"`
 	ProviderMapping map[string]string `json:"provider_mapping"`
@@ -79,8 +75,19 @@ func (p *Plugin) GetName() string { return PluginName }
 func (c *Config) UnmarshalJSON(data []byte) error {
 	type plain Config
 	value := plain{DryRun: true}
-	if err := json.Unmarshal(data, &value); err != nil {
+	// Reject old routing configuration instead of silently changing the billing
+	// identity of an existing installation. Register the VK UUID as an ingest
+	// alias on the intended Metronome customer before removing these settings.
+	input := struct {
+		*plain
+		CustomerMapping   json.RawMessage `json:"customer_mapping"`
+		DefaultCustomerID json.RawMessage `json:"default_customer_id"`
+	}{plain: &value}
+	if err := json.Unmarshal(data, &input); err != nil {
 		return err
+	}
+	if len(input.CustomerMapping) != 0 || len(input.DefaultCustomerID) != 0 {
+		return fmt.Errorf("metronome customer_mapping and default_customer_id are no longer supported: register authenticated virtual-key UUIDs as Metronome ingest aliases and remove both settings")
 	}
 	*c = Config(value)
 	return nil
@@ -91,7 +98,6 @@ func Init(config *Config, logger schemas.Logger) (*Plugin, error) {
 	if config != nil {
 		cfg = *config
 	}
-	cfg.CustomerMapping = maps.Clone(cfg.CustomerMapping)
 	cfg.ModelMapping = maps.Clone(cfg.ModelMapping)
 	cfg.ProviderMapping = maps.Clone(cfg.ProviderMapping)
 	key := strings.TrimSpace(cfg.APIKey.GetValue())
@@ -147,13 +153,9 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 	if usage.InputTokens+usage.OutputTokens+usage.CachedInputTokens+usage.CachedWriteTokens == 0 {
 		return resp, upstreamErr, nil
 	}
-	vkID, _ := ctx.Value(schemas.BifrostContextKeyGovernanceVirtualKeyID).(string)
-	customer := p.config.CustomerMapping[vkID]
-	if customer == "" {
-		customer = p.config.DefaultCustomerID
-	}
-	if customer == "" {
-		p.logger.Warn("[metronome] skipped usage: configure customer_mapping for the authenticated virtual-key ID")
+	customer, _ := ctx.Value(schemas.BifrostContextKeyGovernanceVirtualKeyID).(string)
+	if strings.TrimSpace(customer) == "" {
+		p.logger.Warn("[metronome] skipped usage: missing authenticated virtual-key ID")
 		return resp, upstreamErr, nil
 	}
 	provider, model := string(extra.RoutingInfo.Provider), extra.RoutingInfo.Model

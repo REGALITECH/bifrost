@@ -41,14 +41,8 @@ func (p *Plugin) fishAudioEvent(ctx *schemas.BifrostContext, usage *FishAudioUsa
 	}
 	vkID, _ := ctx.Value(schemas.BifrostContextKeyGovernanceVirtualKeyID).(string)
 	requestID, _ := ctx.Value(schemas.BifrostContextKeyRequestID).(string)
-	if vkID == "" || strings.TrimSpace(requestID) == "" {
+	if strings.TrimSpace(vkID) == "" || strings.TrimSpace(requestID) == "" {
 		return event, fmt.Errorf("external usage requires an authenticated virtual-key ID and request ID")
-	}
-	// External reports require an explicit mapping, even when token usage has a
-	// default sandbox customer. A reporting identity must not silently change.
-	customer := p.config.CustomerMapping[vkID]
-	if strings.TrimSpace(customer) == "" {
-		return event, fmt.Errorf("configure customer_mapping for the authenticated virtual-key ID")
 	}
 	provider, model, err := usage.Validate()
 	if err != nil {
@@ -76,7 +70,7 @@ func (p *Plugin) fishAudioEvent(ctx *schemas.BifrostContext, usage *FishAudioUsa
 	} else if !strings.Contains(model, "/") {
 		props.Model = props.Provider + "/" + model
 	}
-	return Event[fishAudioProperties]{TransactionID: fmt.Sprintf("bf-fishaudio-%x", id), CustomerID: customer,
+	return Event[fishAudioProperties]{TransactionID: fmt.Sprintf("bf-fishaudio-%x", id), CustomerID: vkID,
 		EventType: "fishaudio-usage", Timestamp: usage.OccurredAt, Properties: props}, nil
 }
 
