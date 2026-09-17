@@ -53,6 +53,8 @@ const attemptKey requestKey = "metronome-attempt-id"
 
 const PluginName = "metronome"
 
+const defaultIngestURL = "https://api.metronome.com/v1/ingest"
+
 var _ schemas.LLMPlugin = (*Plugin)(nil)
 
 type Plugin struct {
@@ -66,6 +68,9 @@ type Plugin struct {
 	wg     sync.WaitGroup
 	mu     sync.RWMutex
 	closed bool
+
+	// Fixed by Init; package tests can point at a local server. Not a config option.
+	ingestURL string
 }
 
 func (p *Plugin) GetName() string { return PluginName }
@@ -94,7 +99,7 @@ func Init(config *Config, logger schemas.Logger) (*Plugin, error) {
 		return nil, fmt.Errorf("metronome api_key is required for live delivery")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	p := &Plugin{config: cfg, logger: logger, apiKey: key, queue: make(chan Event[TokenUsage], 1000), ctx: ctx, cancel: cancel,
+	p := &Plugin{ingestURL: defaultIngestURL, config: cfg, logger: logger, apiKey: key, queue: make(chan Event[TokenUsage], 1000), ctx: ctx, cancel: cancel,
 		client: &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	p.wg.Add(1)
 	go p.run()
@@ -264,7 +269,7 @@ func (p *Plugin) send(ctx context.Context, id string, payload []byte) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.metronome.com/v1/ingest", bytes.NewReader(payload))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.ingestURL, bytes.NewReader(payload))
 		if err != nil {
 			return fmt.Errorf("create ingest request: %w", err)
 		}

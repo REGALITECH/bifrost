@@ -110,14 +110,12 @@ func TestFishAudioHTTPDelivery(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	defer server.Close()
-	p := &Plugin{logger: testLogger{}, config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1"}}, apiKey: "sandbox-test-key", ctx: context.Background()}
-	p.client = &http.Client{Timeout: time.Second, Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		// Only tests reroute the production URL; configuration cannot redirect credentials.
-		clone := r.Clone(r.Context())
-		clone.URL.Scheme = "http"
-		clone.URL.Host = strings.TrimPrefix(server.URL, "http://")
-		return http.DefaultTransport.RoundTrip(clone)
-	})}
+	p, err := Init(&Config{APIKey: schemas.NewSecretVar("sandbox-test-key"), CustomerMapping: map[string]string{"vk-1": "customer-1"}}, testLogger{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Cleanup() })
+	p.ingestURL = server.URL + "/v1/ingest"
 	usage := audioUsage(t, audioBody)
 	for range 2 {
 		receipt, err := p.ReportFishAudio(audioContext("vk-1", "event-1"), usage)
@@ -143,7 +141,7 @@ func TestFishAudioHTTPDelivery(t *testing.T) {
 }
 
 func TestFishAudioHTTPFailureAndDryRun(t *testing.T) {
-	p := &Plugin{logger: testLogger{}, config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1"}}, ctx: context.Background()}
+	p := &Plugin{logger: testLogger{}, config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1"}}, ingestURL: defaultIngestURL, ctx: context.Background()}
 	usage := audioUsage(t, audioBody)
 	calls := 0
 	p.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -183,7 +181,7 @@ func TestFishAudioDeliveryRetryExhaustion(t *testing.T) {
 	for _, status := range []int{0, 503} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			calls := 0
-			p := &Plugin{logger: testLogger{}, config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1"}}, ctx: context.Background()}
+			p := &Plugin{logger: testLogger{}, config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1"}}, ingestURL: defaultIngestURL, ctx: context.Background()}
 			p.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 				calls++
 				if status == 0 {

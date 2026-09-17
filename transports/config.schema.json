@@ -2316,6 +2316,7 @@
               "properties": {
                 "config": {
                   "type": "object",
+                  "description": "Configuration for the builtin Metronome usage exporter",
                   "properties": {
                     "dry_run": {
                       "type": "boolean",
