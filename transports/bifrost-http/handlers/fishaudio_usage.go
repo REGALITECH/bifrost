@@ -6,46 +6,35 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"math"
 	"strconv"
 	"strings"
 
 	"github.com/fasthttp/router"
 	"github.com/maximhq/bifrost/core/schemas"
+	"github.com/maximhq/bifrost/plugins/metronome"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 )
 
 const fishAudioUsagePath = "/v1/fishaudio/usage"
 
-var fishAudioUsageOutcomes = map[string]struct{}{
-	"completed": {},
-	"barged_in": {},
-	"failed":    {},
-	"cache_hit": {},
-}
-
 // FishAudioUsageHandler records Fish Audio usage that occurred outside Bifrost,
 // such as playback of a cached TTS clip. Callers must reuse x-request-id when
-// retrying; the existing logging and governance hooks use it for deduplication.
+// retrying. Logging deduplicates by ID; governance only deduplicates briefly
+// in memory. Metronome uses a separate stable transaction ID for delivery.
 type FishAudioUsageHandler struct {
 	config               *lib.Config
 	loggingPluginName    string
 	governancePluginName string
 }
 
-type fishAudioUsageRequest struct {
-	BillableBytes *int64 `json:"billable_bytes"`
-	AudioMS       *int64 `json:"audio_ms"`
-	Outcome       string `json:"outcome"`
-	TurnID        string `json:"turn_id"`
-	SubID         string `json:"sub_id"`
-	Model         string `json:"model"`
-}
+type fishAudioUsageRequest = metronome.FishAudioUsage
 
 type fishAudioUsageResponse struct {
-	ID     string `json:"id"`
-	Status string `json:"status"`
+	ID              string `json:"id"`
+	Status          string `json:"status"`
+	MetronomeStatus string `json:"metronome_status,omitempty"`
+	TransactionID   string `json:"transaction_id,omitempty"`
 }
 
 func NewFishAudioUsageHandler(config *lib.Config, loggingPluginName, governancePluginName string) *FishAudioUsageHandler {
@@ -73,7 +62,7 @@ func (h *FishAudioUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
 		return
 	}
-	provider, model, err := validateFishAudioUsageRequest(payload)
+	provider, model, err := payload.Validate()
 	if err != nil {
 		SendError(ctx, fasthttp.StatusBadRequest, err.Error())
 		return
@@ -85,6 +74,24 @@ func (h *FishAudioUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 	if strings.TrimSpace(virtualKey) == "" {
 		SendError(ctx, fasthttp.StatusUnauthorized, "virtual key is required. Provide a virtual key via the x-bf-vk header.")
 		return
+	}
+	var exporter *metronome.Plugin
+	if status, configured := h.config.GetPluginStatusByName(metronome.PluginName); configured && status.Status != schemas.PluginStatusDisabled {
+		exporter, err = lib.FindPluginAs[*metronome.Plugin](h.config, metronome.PluginName)
+		if err != nil || status.Status != schemas.PluginStatusActive {
+			SendError(ctx, fasthttp.StatusServiceUnavailable, "Metronome usage reporting is unavailable")
+			return
+		}
+	}
+	if exporter != nil {
+		if strings.TrimSpace(string(ctx.Request.Header.Peek("x-request-id"))) == "" {
+			SendError(ctx, fasthttp.StatusBadRequest, "x-request-id is required for Metronome; reuse the same ID and payload when retrying")
+			return
+		}
+		if payload.OccurredAt == "" {
+			SendError(ctx, fasthttp.StatusBadRequest, "occurred_at in RFC3339 format is required for Metronome; preserve it when retrying")
+			return
+		}
 	}
 
 	requestID, _ := bifrostCtx.Value(schemas.BifrostContextKeyRequestID).(string)
@@ -151,7 +158,18 @@ func (h *FishAudioUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusInternalServerError, "Fish Audio usage recording failed")
 		return
 	}
-	SendJSONWithStatus(ctx, fishAudioUsageResponse{ID: requestID, Status: "accepted"}, fasthttp.StatusAccepted)
+	receipt := fishAudioUsageResponse{ID: requestID, Status: "accepted"}
+	if exporter != nil {
+		delivered, err := exporter.ReportFishAudio(bifrostCtx, payload)
+		if err != nil {
+			logger.Warn("Fish Audio Metronome delivery failed: %v", err)
+			SendError(ctx, fasthttp.StatusServiceUnavailable, "Metronome delivery failed; retry with the same x-request-id and payload")
+			return
+		}
+		receipt.MetronomeStatus, receipt.TransactionID = delivered.Status, delivered.TransactionID
+	}
+
+	SendJSONWithStatus(ctx, receipt, fasthttp.StatusAccepted)
 }
 
 func (h *FishAudioUsageHandler) runPostHooks(ctx *schemas.BifrostContext, loggingPlugin, governancePlugin schemas.LLMPlugin, response *schemas.BifrostResponse, bifrostErr *schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError) {
@@ -178,37 +196,4 @@ func decodeFishAudioUsageRequest(body []byte) (*fishAudioUsageRequest, error) {
 		return nil, fmt.Errorf("invalid request format: multiple JSON values")
 	}
 	return &payload, nil
-}
-
-func validateFishAudioUsageRequest(payload *fishAudioUsageRequest) (schemas.ModelProvider, string, error) {
-	if payload.BillableBytes == nil || *payload.BillableBytes < 0 {
-		return "", "", fmt.Errorf("billable_bytes is required and must be non-negative")
-	}
-	if *payload.BillableBytes > int64(math.MaxInt) {
-		return "", "", fmt.Errorf("billable_bytes is too large")
-	}
-	if payload.AudioMS == nil || *payload.AudioMS < 0 {
-		return "", "", fmt.Errorf("audio_ms is required and must be non-negative")
-	}
-	if _, ok := fishAudioUsageOutcomes[payload.Outcome]; !ok {
-		return "", "", fmt.Errorf("outcome must be one of completed, barged_in, failed, or cache_hit")
-	}
-	if strings.TrimSpace(payload.TurnID) == "" {
-		return "", "", fmt.Errorf("turn_id is required")
-	}
-	if strings.TrimSpace(payload.SubID) == "" {
-		return "", "", fmt.Errorf("sub_id is required")
-	}
-	payload.Model = strings.TrimSpace(payload.Model)
-	if payload.Model == "" {
-		return "", "", fmt.Errorf("model is required")
-	}
-	provider, model := schemas.ParseModelString(payload.Model, schemas.FishAudio)
-	if provider != schemas.FishAudio {
-		return "", "", fmt.Errorf("model must use the fishaudio provider")
-	}
-	if strings.TrimSpace(model) == "" {
-		return "", "", fmt.Errorf("model is required")
-	}
-	return provider, model, nil
 }

@@ -60,6 +60,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Build release image for verification
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: transports/Dockerfile.local
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.version }}
+          load: true
+          tags: bifrost-release-test:${{ github.sha }}
+          provenance: false
+
+      - name: Verify bundled Metronome plugin loads
+        run: bash .github/workflows/scripts/test-metronome-image.sh "bifrost-release-test:${GITHUB_SHA}"
+
+      # Reuse the verified build from the same builder's cache for publication.
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v6
