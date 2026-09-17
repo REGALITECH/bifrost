@@ -29,7 +29,7 @@ func TestConfigCredentialAndIndependentInstances(t *testing.T) {
 	if !cfg.DryRun || cfg.APIKey.GetValue() != "test-secret" {
 		t.Fatal("default or credential resolution failed")
 	}
-	cfg.CustomerMapping = map[string]string{"vk-1": "customer"}
+	cfg.ModelMapping = map[string]string{"fishaudio/s2-pro": "fish-test-model"}
 	first, err := Init(&cfg, testLogger{})
 	if err != nil {
 		t.Fatal(err)
@@ -40,12 +40,12 @@ func TestConfigCredentialAndIndependentInstances(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer second.Cleanup()
-	cfg.CustomerMapping["vk-1"] = "mutated"
+	cfg.ModelMapping["fishaudio/s2-pro"] = "mutated"
 	if err := first.Cleanup(); err != nil {
 		t.Fatal(err)
 	}
 	receipt, err := second.ReportFishAudio(audioContext("vk-1", "event"), audioUsage(t, audioBody))
-	if err != nil || receipt.Status != "dry_run" || second.config.CustomerMapping["vk-1"] != "customer" {
+	if err != nil || receipt.Status != "dry_run" || second.config.ModelMapping["fishaudio/s2-pro"] != "fish-test-model" {
 		t.Fatalf("reload/ownership failure: %v", err)
 	}
 	if _, err := Init(&Config{DryRun: false}, testLogger{}); err == nil {

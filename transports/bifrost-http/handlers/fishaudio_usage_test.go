@@ -238,9 +238,9 @@ func TestValidateFishAudioUsageRequest(t *testing.T) {
 
 const fishAudioReportBody = `{"billable_bytes":54,"audio_ms":2500,"outcome":"completed","turn_id":"turn-1","sub_id":"sub-1","model":"s2-pro","occurred_at":"2026-09-15T15:00:00+09:00"}`
 
-func installMetronome(t *testing.T, h *FishAudioUsageHandler, customer string) *metronome.Plugin {
+func installMetronome(t *testing.T, h *FishAudioUsageHandler) *metronome.Plugin {
 	t.Helper()
-	p, err := metronome.Init(&metronome.Config{DryRun: true, CustomerMapping: map[string]string{"vk-uuid": customer}}, &mockLogger{})
+	p, err := metronome.Init(&metronome.Config{DryRun: true}, &mockLogger{})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, p.Cleanup()) })
 	require.NoError(t, h.config.ReloadPlugin(p))
@@ -253,7 +253,7 @@ func TestFishAudioUsageBuiltinMetronome(t *testing.T) {
 	events := []string{}
 	h, _, gov := newFishAudioUsageTestHandler(&events)
 	gov.authenticatedVKID = "vk-uuid"
-	installMetronome(t, h, "customer-1")
+	installMetronome(t, h)
 	var first fishAudioUsageResponse
 	for range 2 {
 		ctx := newFishAudioUsageTestContext(fishAudioReportBody, "secret-vk", "source-event")
@@ -269,8 +269,9 @@ func TestFishAudioUsageBuiltinMetronome(t *testing.T) {
 		first = receipt
 	}
 	assert.Equal(t, []string{"logging.pre", "governance.pre", "governance.post", "logging.post", "logging.pre", "governance.pre", "governance.post", "logging.post"}, events)
-	// Reload is observed by the same handler: missing mapping fails delivery.
-	installMetronome(t, h, "")
+	// Reload is observed by the same handler: a closed replacement fails delivery.
+	replacement := installMetronome(t, h)
+	require.NoError(t, replacement.Cleanup())
 	ctx := newFishAudioUsageTestContext(fishAudioReportBody, "secret-vk", "source-event")
 	h.recordUsage(ctx)
 	assert.Equal(t, fasthttp.StatusServiceUnavailable, ctx.Response.StatusCode())
@@ -296,7 +297,7 @@ func TestFishAudioUsageMetronomeRequiresReplayIdentity(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			events := []string{}
 			h, _, _ := newFishAudioUsageTestHandler(&events)
-			installMetronome(t, h, "customer")
+			installMetronome(t, h)
 			ctx := newFishAudioUsageTestContext(tc.body, "secret-vk", tc.id)
 			h.recordUsage(ctx)
 			assert.Equal(t, fasthttp.StatusBadRequest, ctx.Response.StatusCode())
@@ -308,7 +309,7 @@ func TestFishAudioUsageMetronomeRequiresReplayIdentity(t *testing.T) {
 func TestFishAudioUsageMetronomeHonorsGovernance(t *testing.T) {
 	events := []string{}
 	h, _, gov := newFishAudioUsageTestHandler(&events)
-	p := installMetronome(t, h, "customer")
+	p := installMetronome(t, h)
 	require.NoError(t, p.Cleanup()) // would fail if delivery is attempted
 	gov.shortCircuit = &schemas.LLMPluginShortCircuit{Error: &schemas.BifrostError{StatusCode: schemas.Ptr(fasthttp.StatusForbidden), Error: &schemas.ErrorField{Message: "inactive"}}}
 	ctx := newFishAudioUsageTestContext(fishAudioReportBody, "secret-vk", "id")

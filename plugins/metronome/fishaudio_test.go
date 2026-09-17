@@ -24,13 +24,13 @@ func audioContext(vk, id string) *schemas.BifrostContext {
 }
 
 func TestFishAudioEvent(t *testing.T) {
-	p := &Plugin{logger: testLogger{}, config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1", "vk-2": "customer-1"}}}
+	p := &Plugin{logger: testLogger{}, config: Config{}}
 	ctx := audioContext("vk-1", "source-event-1")
 	event, err := p.fishAudioEvent(ctx, audioUsage(t, audioBody))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if event.CustomerID != "customer-1" || event.EventType != "fishaudio-usage" || event.Timestamp != "2026-09-15T06:00:00Z" {
+	if event.CustomerID != "vk-1" || event.EventType != "fishaudio-usage" || event.Timestamp != "2026-09-15T06:00:00Z" {
 		t.Fatalf("unexpected event: %+v", event)
 	}
 	if event.Properties.BillableBytes != 54 || event.Properties.AudioMS != 2500 || event.Properties.Model != "fishaudio/s2-pro" {
@@ -69,10 +69,10 @@ func TestFishAudioEvent(t *testing.T) {
 }
 
 func TestFishAudioEventRejectsInvalidReports(t *testing.T) {
-	p := &Plugin{logger: testLogger{}, config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1"}, DefaultCustomerID: "must-not-be-used"}}
+	p := &Plugin{logger: testLogger{}, config: Config{}}
 	cases := []struct{ name, vk, id, body string }{
 		{"unauthenticated", "", "req", audioBody},
-		{"unmapped", "other", "req", audioBody},
+		{"blank authenticated ID", "   ", "req", audioBody},
 		{"missing id", "vk-1", "", audioBody},
 		{"timestamp", "vk-1", "req", strings.ReplaceAll(audioBody, "2026-09-15T15:00:00+09:00", "invalid")},
 		{"negative", "vk-1", "req", strings.ReplaceAll(audioBody, `"billable_bytes":54`, `"billable_bytes":-1`)},
@@ -110,7 +110,7 @@ func TestFishAudioHTTPDelivery(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	defer server.Close()
-	p, err := Init(&Config{APIKey: schemas.NewSecretVar("sandbox-test-key"), CustomerMapping: map[string]string{"vk-1": "customer-1"}}, testLogger{})
+	p, err := Init(&Config{APIKey: schemas.NewSecretVar("sandbox-test-key")}, testLogger{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,9 @@ func TestFishAudioHTTPDelivery(t *testing.T) {
 	p.ingestURL = server.URL + "/v1/ingest"
 	usage := audioUsage(t, audioBody)
 	for range 2 {
-		receipt, err := p.ReportFishAudio(audioContext("vk-1", "event-1"), usage)
+		ctx := audioContext("vk-1", "event-1")
+		ctx.SetValue(schemas.BifrostContextKeyVirtualKey, "sk-bf-secret")
+		receipt, err := p.ReportFishAudio(ctx, usage)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -130,10 +132,10 @@ func TestFishAudioHTTPDelivery(t *testing.T) {
 		t.Fatalf("retry changed payload: %q", received)
 	}
 	var events []Event[fishAudioProperties]
-	if err := json.Unmarshal(received[0], &events); err != nil || len(events) != 1 || events[0].Properties.BillableBytes != 54 {
+	if err := json.Unmarshal(received[0], &events); err != nil || len(events) != 1 || events[0].Properties.BillableBytes != 54 || events[0].CustomerID != "vk-1" {
 		t.Fatalf("invalid wire event: %s", received[0])
 	}
-	for _, secret := range []string{"sandbox-test-key", "vk-1", "input_tokens"} {
+	for _, secret := range []string{"sandbox-test-key", "sk-bf-secret", "input_tokens"} {
 		if strings.Contains(string(received[0]), secret) {
 			t.Fatalf("unexpected field: %s", secret)
 		}
@@ -141,7 +143,7 @@ func TestFishAudioHTTPDelivery(t *testing.T) {
 }
 
 func TestFishAudioHTTPFailureAndDryRun(t *testing.T) {
-	p := &Plugin{logger: testLogger{}, config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1"}}, ingestURL: defaultIngestURL, ctx: context.Background()}
+	p := &Plugin{logger: testLogger{}, config: Config{}, ingestURL: defaultIngestURL, ctx: context.Background()}
 	usage := audioUsage(t, audioBody)
 	calls := 0
 	p.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -181,7 +183,7 @@ func TestFishAudioDeliveryRetryExhaustion(t *testing.T) {
 	for _, status := range []int{0, 503} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
 			calls := 0
-			p := &Plugin{logger: testLogger{}, config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1"}}, ingestURL: defaultIngestURL, ctx: context.Background()}
+			p := &Plugin{logger: testLogger{}, config: Config{}, ingestURL: defaultIngestURL, ctx: context.Background()}
 			p.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 				calls++
 				if status == 0 {

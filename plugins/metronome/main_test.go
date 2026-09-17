@@ -8,7 +8,7 @@ import (
 )
 
 func TestTokenUsageStillUsesLLMQueue(t *testing.T) {
-	p := &Plugin{logger: testLogger{}, config: Config{CustomerMapping: map[string]string{"vk-1": "customer-1"}}, queue: make(chan Event[TokenUsage], 4), ctx: context.Background()}
+	p := &Plugin{logger: testLogger{}, queue: make(chan Event[TokenUsage], 4), ctx: context.Background()}
 	ctx := audioContext("vk-1", "request")
 	p.PreLLMHook(ctx, nil)
 	response := &schemas.BifrostResponse{ChatResponse: &schemas.BifrostChatResponse{Usage: &schemas.BifrostLLMUsage{
@@ -21,7 +21,7 @@ func TestTokenUsageStillUsesLLMQueue(t *testing.T) {
 	}
 	select {
 	case event := <-p.queue:
-		if event.EventType != "token-billing" || event.Properties.InputTokens != 75 || event.Properties.OutputTokens != 10 || event.Properties.CachedInputTokens != 20 || event.Properties.CachedWriteTokens != 5 {
+		if event.CustomerID != "vk-1" || event.EventType != "token-billing" || event.Properties.InputTokens != 75 || event.Properties.OutputTokens != 10 || event.Properties.CachedInputTokens != 20 || event.Properties.CachedWriteTokens != 5 {
 			t.Fatalf("changed token accounting: %+v", event)
 		}
 	default:

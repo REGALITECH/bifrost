@@ -6,10 +6,6 @@
       "version": 1,
       "config": {
         "dry_run": true,
-        "customer_mapping": {
-          "BIFROST_VIRTUAL_KEY_UUID": "METRONOME_SANDBOX_CUSTOMER_ID"
-        },
-        "default_customer_id": "",
         "model_mapping": {},
         "provider_mapping": {},
         "api_key": "env.METRONOME_API_KEY"

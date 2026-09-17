@@ -19,4 +19,9 @@ func TestSchemaMetronomeBuiltin(t *testing.T) {
 	if err := validateConfig(t, schema, `{"plugins":[{"name":"metronome","enabled":true}]}`); err == nil {
 		t.Fatal("missing builtin config accepted")
 	}
+	for _, config := range []string{`{"customer_mapping":{"vk":"customer"}}`, `{"default_customer_id":"customer"}`} {
+		if err := validateConfig(t, schema, `{"plugins":[{"name":"metronome","enabled":true,"config":`+config+`}]}`); err == nil {
+			t.Fatalf("legacy customer routing accepted: %s", config)
+		}
+	}
 }
