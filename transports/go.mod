@@ -21,6 +21,7 @@ require (
 	github.com/maximhq/bifrost/plugins/governance v1.8.4
 	github.com/maximhq/bifrost/plugins/logging v1.8.4
 	github.com/maximhq/bifrost/plugins/maxim v1.7.7
+	github.com/maximhq/bifrost/plugins/metronome v0.1.0
 	github.com/maximhq/bifrost/plugins/modelcatalogresolver v1.1.7
 	github.com/maximhq/bifrost/plugins/otel v1.5.7
 	github.com/maximhq/bifrost/plugins/prompts v1.1.7
@@ -241,3 +242,6 @@ require (
 	gorm.io/driver/clickhouse v0.7.0 // indirect
 	gorm.io/driver/postgres v1.6.0 // indirect
 )
+
+// Regali-only module; not published under the upstream module namespace.
+replace github.com/maximhq/bifrost/plugins/metronome => ../plugins/metronome
