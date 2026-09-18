@@ -41,13 +41,9 @@ Plugin:
       description: Display name of the plugin (from config)
     actualName:
       type: string
-      description: Actual plugin name from GetName() when known (used as map key in plugin status); otherwise the configured name.
+      description: Actual plugin name from GetName() (used as map key in plugin status). Only populated for active plugins.
     enabled:
       type: boolean
-      description: Saved desired state. Check status and loaded for runtime state after initialization or reload.
-    loaded:
-      type: boolean
-      description: Whether an instance is loaded in this process. A failed reload can leave the previous instance running.
     config:
       type: object
       additionalProperties: true
@@ -57,7 +53,7 @@ Plugin:
       type: string
     status:
       $ref: '#/PluginStatus'
-      description: Current initialization or reload status, including errors. Active means initialized, not confirmed event delivery.
+      description: Current plugin status including types array (only populated for active plugins)
     created_at:
       type: string
       format: date-time
@@ -122,10 +118,6 @@ UpdatePluginRequest:
     config:
       type: object
       additionalProperties: true
-    replace_config:
-      type: boolean
-      default: false
-      description: Replace the complete config object instead of merging its keys. Requires config. Omitted fields are removed; redacted secret placeholders retain existing references.
     path:
       type: string
 

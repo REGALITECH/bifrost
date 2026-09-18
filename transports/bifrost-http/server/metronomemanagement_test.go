@@ -10,7 +10,6 @@ import (
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
-	"github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/transports/bifrost-http/handlers"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/stretchr/testify/require"
@@ -49,37 +48,24 @@ func TestMetronomeManagementAPI(t *testing.T) {
 		require.Contains(t, string(res.Body()), `"name":"metronome"`)
 		res = call("GET", "/api/plugins/metronome", "")
 		require.Equal(t, 200, res.StatusCode())
-		// Validation precedes both initial creation paths, even for disabled saves.
-		res = call("PUT", "/api/plugins/metronome", `{"enabled":false,"config":{"api_key":"test-literal-secret"}}`)
-		require.Equal(t, 400, res.StatusCode())
-		_, err := store.GetPlugin(ctx, "metronome")
-		require.ErrorIs(t, err, configstore.ErrNotFound)
-		res = call("POST", "/api/plugins", `{"name":"metronome","enabled":false,"config":{"api_key":"test-literal-secret"}}`)
-		require.Equal(t, 400, res.StatusCode())
-		_, err = store.GetPlugin(ctx, "metronome")
-		require.ErrorIs(t, err, configstore.ErrNotFound)
+		var plugin handlers.PluginResponse
+		require.NoError(t, json.Unmarshal(res.Body(), &plugin))
+		require.False(t, plugin.IsCustom)
+		require.False(t, plugin.Enabled)
 	})
-	// Seed a persisted v2 entry, as produced by the previous startup file.
-	require.NoError(t, store.CreatePlugin(ctx, &tables.TablePlugin{Name: "metronome", Version: 2, Config: map[string]any{
-		"api_key": "env.METRONOME_MANAGEMENT_TEST_KEY", "dry_run": false,
-		"customer_mapping": map[string]any{}, "default_customer_id": "",
-		"model_mapping": map[string]any{"provider/model": "billing-model"},
-	}}))
 	t.Setenv("METRONOME_MANAGEMENT_TEST_KEY", "")
-	t.Run("disabled save migrates without resolving a key", func(t *testing.T) {
-		res := call("PUT", "/api/plugins/metronome", `{"enabled":false,"config":{"dry_run":false}}`)
+	t.Run("disabled save preserves the environment reference", func(t *testing.T) {
+		res := call("PUT", "/api/plugins/metronome", `{"enabled":false,"config":{"api_key":"env.METRONOME_MANAGEMENT_TEST_KEY","dry_run":false}}`)
 		require.Equal(t, 200, res.StatusCode(), string(res.Body()))
 		stored, err := store.GetPlugin(ctx, "metronome")
 		require.NoError(t, err)
-		require.NotContains(t, stored.Config, "customer_mapping")
-		require.NotContains(t, stored.Config, "default_customer_id")
-		require.Equal(t, int16(2), stored.Version)
+		require.Equal(t, "env.METRONOME_MANAGEMENT_TEST_KEY", stored.Config.(map[string]any)["api_key"])
 		require.False(t, stored.IsCustom)
 	})
 	t.Run("missing process environment is an error", func(t *testing.T) {
 		res := call("PUT", "/api/plugins/metronome", `{"enabled":true}`)
 		require.Equal(t, 500, res.StatusCode())
-		require.Contains(t, string(res.Body()), "METRONOME_MANAGEMENT_TEST_KEY")
+		require.Contains(t, string(res.Body()), "metronome api_key is required for live delivery")
 		res = call("GET", "/api/plugins/metronome", "")
 		var plugin handlers.PluginResponse
 		require.NoError(t, json.Unmarshal(res.Body(), &plugin))
@@ -121,7 +107,6 @@ func TestMetronomeManagementAPI(t *testing.T) {
 		var plugin handlers.PluginResponse
 		require.NoError(t, json.Unmarshal(res.Body(), &plugin))
 		require.Equal(t, "active", plugin.Status.Status)
-		require.True(t, plugin.Loaded)
 		require.False(t, plugin.IsCustom)
 		require.NotContains(t, string(res.Body()), "test-memory-only-key")
 		stored, err := store.GetPlugin(ctx, "metronome")
@@ -136,7 +121,6 @@ func TestMetronomeManagementAPI(t *testing.T) {
 		res = call("GET", "/api/plugins/metronome", "")
 		require.NoError(t, json.Unmarshal(res.Body(), &plugin))
 		require.Equal(t, "error", plugin.Status.Status)
-		require.True(t, plugin.Loaded)
 		require.Contains(t, plugin.Status.Logs, "the previous plugin instance is still running with its previous configuration")
 		t.Setenv("METRONOME_MANAGEMENT_TEST_KEY", "test-memory-only-key")
 		res = call("PUT", "/api/plugins/metronome", `{"enabled":true}`)
@@ -147,26 +131,7 @@ func TestMetronomeManagementAPI(t *testing.T) {
 		res = call("GET", "/api/plugins/metronome", "")
 		require.NoError(t, json.Unmarshal(res.Body(), &plugin))
 		require.False(t, plugin.Enabled)
-		require.False(t, plugin.Loaded)
 		require.Equal(t, "disabled", plugin.Status.Status)
-	})
-	t.Run("populated legacy mapping requires explicit removal", func(t *testing.T) {
-		res := call("PUT", "/api/plugins/metronome", `{"enabled":false,"config":{"customer_mapping":{"vk":"customer"},"default_customer_id":"customer"}}`)
-		require.Equal(t, 200, res.StatusCode(), string(res.Body()))
-		res = call("PUT", "/api/plugins/metronome", `{"enabled":true,"config":{"dry_run":true}}`)
-		require.Equal(t, 500, res.StatusCode())
-		require.Contains(t, string(res.Body()), "ingest aliases")
-		stored, err := store.GetPlugin(ctx, "metronome")
-		require.NoError(t, err)
-		require.Contains(t, stored.Config, "customer_mapping")
-		res = call("GET", "/api/plugins/metronome", "")
-		require.Contains(t, string(res.Body()), `"vk":"customer"`)
-		res = call("PUT", "/api/plugins/metronome", `{"enabled":false,"replace_config":true,"config":{"dry_run":true,"api_key":"env.METRONOME_MANAGEMENT_TEST_KEY"}}`)
-		require.Equal(t, 200, res.StatusCode(), string(res.Body()))
-		stored, err = store.GetPlugin(ctx, "metronome")
-		require.NoError(t, err)
-		require.NotContains(t, stored.Config, "customer_mapping")
-		require.NotContains(t, stored.Config, "default_customer_id")
 	})
 }
 
@@ -177,9 +142,11 @@ func TestMetronomeManagementMarshallerBeforeLoading(t *testing.T) {
 	stored, err := s.NormalizePluginConfig("metronome", raw)
 	require.NoError(t, err)
 	require.Equal(t, "env.METRONOME_MANAGEMENT_TEST_KEY", stored["api_key"])
+	raw["API_KEY"] = "test-uppercase-secret"
 	redacted, err := s.ExpandPluginConfigForAPI("metronome", raw)
 	require.NoError(t, err)
 	data, err := json.Marshal(redacted)
 	require.NoError(t, err)
 	require.NotContains(t, string(data), "test-memory-only-key")
+	require.NotContains(t, string(data), "test-uppercase-secret")
 }

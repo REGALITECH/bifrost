@@ -1,6 +1,5 @@
 import { Button } from "@/components/ui/button";
 import { setSelectedPlugin, useAppDispatch, useAppSelector, useGetPluginsQuery } from "@/lib/store";
-import { METRONOME_PLUGIN } from "@/lib/types/plugins";
 import { cn } from "@/lib/utils";
 import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
 import { ListOrdered, PlusIcon, Puzzle } from "lucide-react";
@@ -18,7 +17,7 @@ export default function PluginsPage() {
 	const { data: plugins, isLoading } = useGetPluginsQuery();
 	const selectedPlugin = useAppSelector((state) => state.plugin.selectedPlugin);
 	const [selectedPluginId, setSelectedPluginId] = useQueryState("plugin");
-	const managedPlugins = useMemo(() => plugins?.filter((plugin) => plugin.isCustom || plugin.name === METRONOME_PLUGIN), [plugins]);
+	const customPlugins = useMemo(() => plugins?.filter((plugin) => plugin.isCustom || plugin.name === "metronome"), [plugins]);
 	const [isSheetOpen, setIsSheetOpen] = useState(false);
 	const [isSequenceSheetOpen, setIsSequenceSheetOpen] = useState(false);
 
@@ -32,22 +31,22 @@ export default function PluginsPage() {
 
 	useEffect(() => {
 		if (!selectedPluginId) return;
-		const plugin = managedPlugins?.find((plugin) => plugin.name === selectedPluginId);
+		const plugin = customPlugins?.find((plugin) => plugin.name === selectedPluginId);
 		if (plugin) {
 			dispatch(setSelectedPlugin(plugin));
 		}
-	}, [selectedPluginId, managedPlugins]);
+	}, [selectedPluginId, customPlugins]);
 
 	useEffect(() => {
 		if (selectedPluginId) return;
 		if (!selectedPlugin) {
-			setSelectedPluginId(managedPlugins?.[0]?.name ?? "");
+			setSelectedPluginId(customPlugins?.[0]?.name ?? "");
 			return;
 		}
 		setSelectedPluginId(selectedPlugin?.name ?? "");
-	}, [managedPlugins]);
+	}, [customPlugins]);
 
-	if (managedPlugins?.length === 0 && !isLoading) {
+	if (customPlugins?.length === 0 && !isLoading) {
 		return (
 			<div className="mx-auto w-full max-w-7xl">
 				<PluginsEmptyState onCreateClick={handleAddNew} canCreate={hasCreatePluginAccess} />
@@ -69,7 +68,7 @@ export default function PluginsPage() {
 					<div className="rounded-md bg-zinc-50/50 p-4 dark:bg-zinc-800/20">
 						<div className="mb-4">
 							<div className="text-muted-foreground mb-2 text-xs font-medium">Plugins</div>
-							{managedPlugins?.map((plugin) => (
+							{customPlugins?.map((plugin) => (
 								<button
 									type="button"
 									key={plugin.name}
@@ -132,7 +131,7 @@ export default function PluginsPage() {
 				</div>
 				<PluginsView
 					onDelete={() => {
-						setSelectedPluginId(managedPlugins?.[0]?.name ?? "");
+						setSelectedPluginId(customPlugins?.[0]?.name ?? "");
 					}}
 					onCreate={(pluginName) => {
 						setSelectedPluginId(pluginName ?? "");

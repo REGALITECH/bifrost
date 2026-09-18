@@ -63,7 +63,9 @@ func TestUsageRequiresAuthenticatedVirtualKeyID(t *testing.T) {
 func TestConfigRejectsLegacyCustomerRouting(t *testing.T) {
 	for _, raw := range []string{
 		`{"customer_mapping":{"vk":"customer"}}`,
+		`{"customer_mapping":{}}`,
 		`{"default_customer_id":"customer"}`,
+		`{"default_customer_id":""}`,
 	} {
 		var cfg Config
 		if err := json.Unmarshal([]byte(raw), &cfg); err == nil {

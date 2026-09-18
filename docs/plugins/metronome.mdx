@@ -21,26 +21,19 @@ make build LOCAL=1
 make test-metronome
 ```
 
-Open **Plugins → metronome** to save configuration and enable or disable the
-plugin. It remains a builtin (`isCustom: false`); no install, path, or shared
-library is needed. If there is no saved entry yet, the page offers a disabled
-configuration with `api_key: "env.METRONOME_API_KEY"` and `dry_run: true`.
+Open **Plugins → metronome** to edit configuration and enable or disable the
+builtin through the existing `/api/plugins` management API. When no DB entry
+exists, the page offers disabled defaults with `api_key: "env.METRONOME_API_KEY"`
+and `dry_run: true`. Check runtime status and error logs after saving: `enabled`
+is the requested state, and initialization can fail after it is saved.
 
-The page uses the common `GET /api/plugins`, `GET /api/plugins/metronome` and
-`PUT /api/plugins/metronome` APIs. Saving the Metronome JSON sends
-`replace_config: true`: the full object replaces the stored config. Other API
-clients retain the existing merge behavior unless they explicitly opt into
-replacement. Omission alone in a merge request does not delete a stored field.
+For UI-managed operation, omit Metronome from the startup file and retain the
+default config-DB merge mode so restarts preserve UI settings. Other plugins
+can remain in the file. API updates keep the existing config-merge behavior.
 
-`enabled` is the saved desired state. Check the runtime status, logs and
-`loaded` flag too: initialization failure returns an error, even though the
-configuration has been saved. A failed reload can leave the previous instance
-running with its old configuration; the page reports this in the logs. Save
-again to retry, or disable the plugin. `active` confirms initialization, not
-successful delivery or matching of billing events.
-
-For a file-managed installation, the example in
-`examples/configs/withmetronome/config.json` can still bootstrap the plugin:
+For a file-managed installation, merge the `plugins` entry from
+`examples/configs/withmetronome/config.json` into your gateway configuration. The builtin entry uses `name: "metronome"`,
+`enabled: true`, and `config`; omit `path`. The example defaults to dry run.
 
 ```json
 {
@@ -54,34 +47,25 @@ For a file-managed installation, the example in
 }
 ```
 
-For UI-managed operation, remove only Metronome's entry from the startup file
-and retain the default config-DB merge mode. Do not select
-`config.source_of_truth: "config.json"`. Other plugin entries can remain.
-UI saves preserve the stored `version`; no Terraform edit or version bump is
-needed for daily operations. File-managed installations still need a higher
-`version` to overwrite stored settings, including enable/disable.
+Increase the plugin's `version` on every startup configuration change, including
+activation or deactivation: the default merge preserves stored configuration
+unless the file has a higher version. When migrating a previous dynamic-plugin
+configuration, remove `path` and increment `version` before restarting.
 
-For ETLA, `etla_infra_tf/stack/modules/bifrost` supplies credentials independently
-of runtime enablement and no longer renders Metronome into the startup file.
-Set `bifrost_metronome_secret_enabled = true` once when adopting UI management.
-The existing API key is plaintext in AWS Secrets Manager at
+For ETLA, set `bifrost_metronome_secret_enabled = true` in
+`etla_infra_tf` to supply the existing Secret independently of UI enablement.
+The updated module omits Metronome from the startup file.
+The API key is plaintext in AWS Secrets Manager at
 `etla/metronome/api_key`. External Secrets syncs it to Kubernetes Secret
 `bifrost-metronome` / `api-key`, injected as `METRONOME_API_KEY`.
-Only an `env.NAME` reference is accepted for `api_key`; literal keys are rejected
-before a config-DB write. Resolution through `SecretVar` happens during plugin
-initialization and keeps the value in process memory. The config DB and management
-responses retain only the environment reference. Disabled saves do not require
-the environment variable to be populated. Terraform does not read or store the
-key value. Live deployment waits for the ExternalSecret to become ready; dry run
-needs no key.
-
-Secret registration does not prove that a running process received the key.
-When live initialization reports an unset or empty variable, check the selected
-deployment revision, Pod `secretKeyRef` name/key, ExternalSecret `Ready` status,
-and whether the variable is nonempty in the Bifrost process, without displaying
-its value. After Secret rotation or adding env injection, restart the Pods through
-the normal deployment process; an in-process plugin reload cannot refresh a Pod's
-environment from Kubernetes.
+Only an `env.NAME` reference is accepted and stored for `api_key`. The plugin
+resolves it during initialization and holds the key in process memory.
+Secret registration and process injection are separate: if the key is missing,
+check the Pod's `secretKeyRef` and whether the process variable is populated,
+without printing its value. Restart Pods after changing their environment.
+Terraform does not read or store the key value. Live deployment waits for the
+ExternalSecret to become ready; dry run needs no key. Select an image containing
+the builtin before enabling it.
 
 To verify a locally built release image:
 
@@ -125,15 +109,11 @@ This changes the usage event's customer identifier. Before enabling the new vers
 1. Register each existing VK UUID as an ingest alias on its existing Metronome
    customer, preserving other aliases. Check keys previously using the token-only
    fallback individually so usage stays with the intended tenant.
-2. Empty `customer_mapping` (`{}` or `null`) and `default_customer_id` (`""` or
-   `null`) are accepted at initialization and removed on the next configuration
-   save. Populated or malformed values remain stored and block initialization;
-   they are never silently discarded.
-3. After migrating populated mappings, explicitly remove those fields in the
-   Plugins JSON editor and save. API clients must send the full desired config
-   with `replace_config: true`. A normal merge request retains omitted fields.
-   File-managed installations instead need a higher configuration `version`
-   and a restart. Select an image containing this management support first.
+2. Remove `customer_mapping` and `default_customer_id` from the plugin config,
+   including empty values. The plugin rejects these legacy settings to avoid
+   silently changing an existing installation's billing identity.
+3. Increase the plugin configuration's `version` above the stored version and
+   restart using an image with this change.
 4. Send fresh usage from two tenant keys and inspect each event's matched customer
    and billable metrics, then verify each customer's draft invoice.
 
@@ -156,7 +136,7 @@ Do not regenerate IDs or timestamps when replaying a saved report during migrati
    `METRONOME_API_KEY`, referenced by `api_key: "env.METRONOME_API_KEY"`. For Docker, pass
    the environment variable into the container. Do not put secrets in config JSON.
 6. Set `dry_run: false`, enable the plugin and save in the Plugins page. Missing
-   credentials cause initialization to fail visibly with the environment name.
+   credentials cause initialization to fail visibly in the status and error logs.
 7. When ready for a later integration check, make a normal gateway request using
    the virtual key whose UUID was registered as an alias, then inspect Metronome
    Events and the draft invoice.

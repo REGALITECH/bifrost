@@ -60,8 +60,8 @@ func TestConfigCredentialAndIndependentInstances(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := redacted["api_key"]
-	if key != "env.METRONOME_TEST_KEY" || raw["api_key"] != "env.METRONOME_TEST_KEY" {
+	key := redacted["api_key"].(*schemas.SecretVar)
+	if key.GetValue() == "test-secret" || raw["api_key"] != "env.METRONOME_TEST_KEY" {
 		t.Fatal("credential exposed or source mutated")
 	}
 }

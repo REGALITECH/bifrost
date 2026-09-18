@@ -110,8 +110,7 @@ func TestFishAudioHTTPDelivery(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	defer server.Close()
-	t.Setenv("METRONOME_FISH_TEST_KEY", "sandbox-test-key")
-	p, err := Init(&Config{APIKey: schemas.NewSecretVar("env.METRONOME_FISH_TEST_KEY")}, testLogger{})
+	p, err := Init(&Config{APIKey: schemas.NewSecretVar("sandbox-test-key")}, testLogger{})
 	if err != nil {
 		t.Fatal(err)
 	}
