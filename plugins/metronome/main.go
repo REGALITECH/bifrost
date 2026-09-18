@@ -19,7 +19,6 @@ import (
 )
 
 type Config struct {
-	DryRun bool               `json:"dry_run"`
 	APIKey *schemas.SecretVar `json:"api_key,omitempty"`
 	// Keys are Bifrost provider/model; values match the Metronome rate card exactly.
 	ModelMapping    map[string]string `json:"model_mapping"`
@@ -71,20 +70,22 @@ type Plugin struct {
 
 func (p *Plugin) GetName() string { return PluginName }
 
-// Omitted dry_run defaults to true, including configs decoded by the server.
 func (c *Config) UnmarshalJSON(data []byte) error {
 	type plain Config
-	value := plain{DryRun: true}
-	// Reject old routing configuration instead of silently changing the billing
-	// identity of an existing installation. Register the VK UUID as an ingest
-	// alias on the intended Metronome customer before removing these settings.
+	value := plain{}
+	// Reject removed settings instead of silently changing an existing
+	// installation's delivery behavior or billing identity.
 	input := struct {
 		*plain
+		DryRun            json.RawMessage `json:"dry_run"`
 		CustomerMapping   json.RawMessage `json:"customer_mapping"`
 		DefaultCustomerID json.RawMessage `json:"default_customer_id"`
 	}{plain: &value}
 	if err := json.Unmarshal(data, &input); err != nil {
 		return err
+	}
+	if len(input.DryRun) != 0 {
+		return fmt.Errorf("metronome dry_run is no longer supported: remove it and set enabled to false to stop delivery or true to send usage")
 	}
 	if len(input.CustomerMapping) != 0 || len(input.DefaultCustomerID) != 0 {
 		return fmt.Errorf("metronome customer_mapping and default_customer_id are no longer supported: register authenticated virtual-key UUIDs as Metronome ingest aliases and remove both settings")
@@ -94,15 +95,18 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 }
 
 func Init(config *Config, logger schemas.Logger) (*Plugin, error) {
-	cfg := Config{DryRun: true}
+	cfg := Config{}
 	if config != nil {
 		cfg = *config
 	}
 	cfg.ModelMapping = maps.Clone(cfg.ModelMapping)
 	cfg.ProviderMapping = maps.Clone(cfg.ProviderMapping)
+	if cfg.APIKey != nil && (!cfg.APIKey.IsFromEnv() || !strings.HasPrefix(cfg.APIKey.GetRawRef(), "env.")) {
+		return nil, fmt.Errorf("metronome api_key must be an env.VARIABLE_NAME reference")
+	}
 	key := strings.TrimSpace(cfg.APIKey.GetValue())
-	if !cfg.DryRun && key == "" {
-		return nil, fmt.Errorf("metronome api_key is required for live delivery")
+	if key == "" {
+		return nil, fmt.Errorf("metronome api_key is required")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &Plugin{ingestURL: defaultIngestURL, config: cfg, logger: logger, apiKey: key, queue: make(chan Event[TokenUsage], 1000), ctx: ctx, cancel: cancel,
@@ -246,16 +250,12 @@ func (p *Plugin) run() {
 	defer p.wg.Done()
 	for event := range p.queue {
 		if p.ctx.Err() != nil {
-			p.logger.Warn("[metronome] shutdown deadline reached; pending sandbox events dropped")
+			p.logger.Warn("[metronome] shutdown deadline reached; pending events dropped")
 			return
 		}
 		payload, err := schemas.MarshalSorted([]Event[TokenUsage]{event})
 		if err != nil {
 			p.logger.Warn("[metronome] unable to encode event")
-			continue
-		}
-		if p.config.DryRun {
-			p.logger.Info("[metronome] dry_run %s", payload)
 			continue
 		}
 		if err := p.send(p.ctx, event.TransactionID, payload); err != nil {

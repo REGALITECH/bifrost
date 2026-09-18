@@ -110,7 +110,8 @@ func TestFishAudioHTTPDelivery(t *testing.T) {
 		w.WriteHeader(200)
 	}))
 	defer server.Close()
-	p, err := Init(&Config{APIKey: schemas.NewSecretVar("sandbox-test-key")}, testLogger{})
+	t.Setenv("METRONOME_FISHAUDIO_TEST_KEY", "sandbox-test-key")
+	p, err := Init(&Config{APIKey: schemas.NewSecretVar("env.METRONOME_FISHAUDIO_TEST_KEY")}, testLogger{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +143,7 @@ func TestFishAudioHTTPDelivery(t *testing.T) {
 	}
 }
 
-func TestFishAudioHTTPFailureAndDryRun(t *testing.T) {
+func TestFishAudioHTTPFailure(t *testing.T) {
 	p := &Plugin{logger: testLogger{}, config: Config{}, ingestURL: defaultIngestURL, ctx: context.Background()}
 	usage := audioUsage(t, audioBody)
 	calls := 0
@@ -168,10 +169,6 @@ func TestFishAudioHTTPFailureAndDryRun(t *testing.T) {
 	ctx.SetValue(schemas.BifrostContextKeyRequestID, "event")
 	if _, err := p.ReportFishAudio(ctx, usage); err == nil || calls != 1 {
 		t.Fatal("cancelled request sent")
-	}
-	p.config.DryRun = true
-	if receipt, err := p.ReportFishAudio(audioContext("vk-1", "event"), usage); err != nil || calls != 1 || receipt.Status != "dry_run" {
-		t.Fatalf("dry run failed: %v", err)
 	}
 	p.closed = true
 	if _, err := p.ReportFishAudio(audioContext("vk-1", "event"), usage); err == nil {

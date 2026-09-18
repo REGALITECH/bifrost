@@ -5,7 +5,6 @@
       "enabled": true,
       "version": 1,
       "config": {
-        "dry_run": true,
         "model_mapping": {},
         "provider_mapping": {},
         "api_key": "env.METRONOME_API_KEY"

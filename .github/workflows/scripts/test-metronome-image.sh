@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run the actual release binary and initialize its builtin plugin without credentials
-# or outbound network access. Usage: bash test-metronome-image.sh IMAGE
+# Initialize the real builtin using a fake test key with network access disabled.
+# This startup check sends no usage events. Usage: bash test-metronome-image.sh IMAGE
 image=${1:?Usage: test-metronome-image.sh IMAGE}
 repo_root=$(cd "$(dirname "$0")/../../.." && pwd)
 test_dir=$(mktemp -d)
@@ -35,6 +35,7 @@ printf '[]\n' > "$test_dir/mcp-library.json"
 chmod 755 "$test_dir"
 chmod 644 "$test_dir/"*.json
 container_id=$(docker create --network none --read-only \
+  --env METRONOME_API_KEY=bifrost-release-smoke-test-key \
   --tmpfs /app/data:rw,uid=1000,gid=0,mode=0770 \
   --tmpfs /tmp:rw,mode=1777 \
   --mount "type=bind,src=$test_dir,dst=/bifrost-test,readonly" \

@@ -74,7 +74,7 @@ func (p *Plugin) fishAudioEvent(ctx *schemas.BifrostContext, usage *FishAudioUsa
 		EventType: "fishaudio-usage", Timestamp: usage.OccurredAt, Properties: props}, nil
 }
 
-// Receipt is returned only after successful ingestion or an explicit dry run.
+// Receipt is returned only after successful ingestion.
 type Receipt struct {
 	Status        string
 	TransactionID string
@@ -97,20 +97,14 @@ func (p *Plugin) ReportFishAudio(ctx *schemas.BifrostContext, usage *FishAudioUs
 	if err != nil {
 		return Receipt{}, err
 	}
-	status := "sent"
-	if p.config.DryRun {
-		p.logger.Info("[metronome] dry_run %s", payload)
-		status = "dry_run"
-	} else {
-		sendCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
-		stop := context.AfterFunc(p.ctx, cancel)
-		defer stop()
-		defer cancel()
-		if err := p.send(sendCtx, event.TransactionID, payload); err != nil {
-			return Receipt{}, err
-		}
+	sendCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	stop := context.AfterFunc(p.ctx, cancel)
+	defer stop()
+	defer cancel()
+	if err := p.send(sendCtx, event.TransactionID, payload); err != nil {
+		return Receipt{}, err
 	}
-	return Receipt{Status: status, TransactionID: event.TransactionID}, nil
+	return Receipt{Status: "sent", TransactionID: event.TransactionID}, nil
 }
 
 func (payload *FishAudioUsage) Validate() (schemas.ModelProvider, string, error) {

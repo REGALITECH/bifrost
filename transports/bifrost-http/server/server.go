@@ -33,6 +33,7 @@ import (
 	"github.com/maximhq/bifrost/plugins/governance"
 	"github.com/maximhq/bifrost/plugins/governance/complexity"
 	"github.com/maximhq/bifrost/plugins/logging"
+	"github.com/maximhq/bifrost/plugins/metronome"
 	"github.com/maximhq/bifrost/plugins/otel"
 	"github.com/maximhq/bifrost/plugins/prompts"
 	"github.com/maximhq/bifrost/plugins/semanticcache"
@@ -1689,6 +1690,9 @@ func (s *BifrostHTTPServer) GetLoadedPluginNames() []string {
 // by name in the ConfigMarshallers cache and calls MarshalConfigForStorage if found.
 // Returns nil, nil when the plugin is not loaded or does not implement ConfigMarshallerPlugin.
 func (s *BifrostHTTPServer) NormalizePluginConfig(name string, config map[string]any) (map[string]any, error) {
+	if name == metronome.PluginName {
+		return (&metronome.Plugin{}).MarshalConfigForStorage(config)
+	}
 	if m := s.Config.ConfigMarshallers.Load(); m != nil {
 		if cm, ok := (*m)[name]; ok {
 			return cm.MarshalConfigForStorage(config)
@@ -1701,6 +1705,9 @@ func (s *BifrostHTTPServer) NormalizePluginConfig(name string, config map[string
 // by name in the ConfigMarshallers cache and calls RedactConfig if found.
 // Returns nil, nil when the plugin is not loaded or does not implement ConfigMarshallerPlugin.
 func (s *BifrostHTTPServer) ExpandPluginConfigForAPI(name string, config map[string]any) (map[string]any, error) {
+	if name == metronome.PluginName {
+		return (&metronome.Plugin{}).RedactConfig(config)
+	}
 	if m := s.Config.ConfigMarshallers.Load(); m != nil {
 		if cm, ok := (*m)[name]; ok {
 			return cm.RedactConfig(config)
