@@ -33,6 +33,7 @@ func (s *capturePluginsStore) UpdatePlugin(_ context.Context, plugin *configstor
 		s.capturedConfig = cfg
 	}
 	s.capturedEnabled = plugin.Enabled
+	s.existingPlugin = plugin
 	return nil
 }
 
@@ -321,7 +322,7 @@ func TestUpdatePlugin_ConfigMerge_NewPlugin(t *testing.T) {
 	ctx := buildUpdateRequest(t, reqBody)
 	h.updatePlugin(ctx)
 
-	// Should succeed even when no existing plugin is found (creates then updates).
+	// Should succeed even when no existing plugin is found (upserts after validation).
 	if ctx.Response.StatusCode() != 200 {
 		t.Fatalf("expected 200, got %d: %s", ctx.Response.StatusCode(), ctx.Response.Body())
 	}
@@ -365,6 +366,27 @@ func TestGetLoadedPlugins(t *testing.T) {
 	for i, name := range want {
 		if response.Plugins[i] != name {
 			t.Errorf("plugins[%d] = %q, want %q", i, response.Plugins[i], name)
+		}
+	}
+}
+
+// Config display names and trace names can differ for custom plugins. Runtime
+// state must use the actual loaded name, not infer success from desired state.
+type managementStatusLoader struct{ noopPluginsLoader }
+
+func (managementStatusLoader) GetLoadedPluginNames() []string {
+	return []string{schemas.SanitizePluginSpanName("Actual_Custom_Plugin")}
+}
+
+func TestMetronomeManagementRuntimeStatusName(t *testing.T) {
+	h := NewPluginsHandler(managementStatusLoader{}, nil)
+	statuses := map[string]schemas.PluginStatus{
+		"Actual_Custom_Plugin": {Name: "custom-display-name", Status: schemas.PluginStatusActive},
+	}
+	for _, enabled := range []bool{true, false} {
+		response := h.buildPluginResponseWithStatuses(&configstoreTables.TablePlugin{Name: "custom-display-name", Enabled: enabled}, statuses)
+		if !response.Loaded || response.ActualName != "Actual_Custom_Plugin" {
+			t.Fatalf("expected actual runtime name and loaded instance, got %+v", response)
 		}
 	}
 }

@@ -3873,6 +3873,7 @@ func loadPlugins(ctx context.Context, config *Config, configData *ConfigData) {
 			for i, plugin := range plugins {
 				pluginConfig := &schemas.PluginConfig{
 					Name:      plugin.Name,
+					Version:   schemas.Ptr(plugin.Version),
 					Enabled:   plugin.Enabled,
 					Config:    plugin.Config,
 					Path:      plugin.Path,
@@ -3923,6 +3924,19 @@ func orderEqual(a, b *int) bool {
 	return *a == *b
 }
 
+// Normalize Metronome before any startup-file write as well as API writes.
+// Resolving a SecretVar is a runtime concern; the DB only receives env references.
+func pluginConfigForStorage(plugin *schemas.PluginConfig) (any, error) {
+	if plugin.Name == metronome.PluginName {
+		raw, ok := plugin.Config.(map[string]any)
+		if plugin.Config != nil && !ok {
+			return nil, fmt.Errorf("metronome config must be an object")
+		}
+		return (&metronome.Plugin{}).MarshalConfigForStorage(raw)
+	}
+	return DeepCopy(plugin.Config)
+}
+
 // mergePlugins merges plugins from config file with existing config
 func mergePlugins(ctx context.Context, config *Config, configData *ConfigData) {
 	logger.Debug("processing plugins from config file")
@@ -3960,9 +3974,9 @@ func mergePlugins(ctx context.Context, config *Config, configData *ConfigData) {
 	if config.ConfigStore != nil {
 		logger.Debug("updating plugins in store")
 		for _, plugin := range config.PluginConfigs {
-			pluginConfigCopy, err := DeepCopy(plugin.Config)
+			pluginConfigCopy, err := pluginConfigForStorage(plugin)
 			if err != nil {
-				logger.Warn("failed to deep copy plugin config, skipping database update: %v", err)
+				logger.Warn("failed to normalize plugin config, skipping database update: %v", err)
 				continue
 			}
 			if plugin.Version == nil {
@@ -4015,9 +4029,9 @@ func syncPluginsFromFile(ctx context.Context, config *Config, configData *Config
 			if plugin == nil {
 				continue
 			}
-			pluginConfigCopy, err := DeepCopy(plugin.Config)
+			pluginConfigCopy, err := pluginConfigForStorage(plugin)
 			if err != nil {
-				return fmt.Errorf("failed to deep copy plugin config for %s: %w", plugin.Name, err)
+				return fmt.Errorf("failed to normalize plugin config for %s: %w", plugin.Name, err)
 			}
 			if plugin.Version == nil {
 				plugin.Version = bifrost.Ptr(int16(1))

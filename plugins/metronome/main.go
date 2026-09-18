@@ -80,14 +80,22 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 	// alias on the intended Metronome customer before removing these settings.
 	input := struct {
 		*plain
+		APIKey            json.RawMessage `json:"api_key"`
 		CustomerMapping   json.RawMessage `json:"customer_mapping"`
 		DefaultCustomerID json.RawMessage `json:"default_customer_id"`
 	}{plain: &value}
 	if err := json.Unmarshal(data, &input); err != nil {
 		return err
 	}
-	if len(input.CustomerMapping) != 0 || len(input.DefaultCustomerID) != 0 {
+	if !emptyLegacyField("customer_mapping", input.CustomerMapping) || !emptyLegacyField("default_customer_id", input.DefaultCustomerID) {
 		return fmt.Errorf("metronome customer_mapping and default_customer_id are no longer supported: register authenticated virtual-key UUIDs as Metronome ingest aliases and remove both settings")
+	}
+	ref, err := apiKeyReference(input.APIKey)
+	if err != nil {
+		return err
+	}
+	if ref != "" {
+		value.APIKey = schemas.NewSecretVar(ref)
 	}
 	*c = Config(value)
 	return nil
@@ -100,9 +108,15 @@ func Init(config *Config, logger schemas.Logger) (*Plugin, error) {
 	}
 	cfg.ModelMapping = maps.Clone(cfg.ModelMapping)
 	cfg.ProviderMapping = maps.Clone(cfg.ProviderMapping)
+	if cfg.APIKey != nil && (!cfg.APIKey.IsFromEnv() || !envReference.MatchString(cfg.APIKey.GetRawRef())) {
+		return nil, fmt.Errorf("metronome api_key must be an env.VARIABLE_NAME reference")
+	}
 	key := strings.TrimSpace(cfg.APIKey.GetValue())
 	if !cfg.DryRun && key == "" {
-		return nil, fmt.Errorf("metronome api_key is required for live delivery")
+		if cfg.APIKey != nil && cfg.APIKey.IsFromEnv() {
+			return nil, fmt.Errorf("metronome environment variable %s is unset or empty in the Bifrost process; check the Pod secretKeyRef and restart Pods after Secret injection", cfg.APIKey.EnvKey())
+		}
+		return nil, fmt.Errorf("metronome api_key is required for live delivery; configure an env.VARIABLE_NAME reference")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &Plugin{ingestURL: defaultIngestURL, config: cfg, logger: logger, apiKey: key, queue: make(chan Event[TokenUsage], 1000), ctx: ctx, cancel: cancel,

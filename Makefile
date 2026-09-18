@@ -2866,5 +2866,6 @@ run-provider-harness-test: $(if $(HELP),,install-newman) ## Run the Bifrost prov
 .PHONY: test-metronome
 test-metronome: ## Test Metronome and its Fish Audio HTTP integration (no credentials needed)
 	go test -race ./plugins/metronome -count=1
+	go test ./transports/bifrost-http/lib -run TestMetronomeManagement -count=1
 	go test -race ./transports/bifrost-http/handlers ./transports/bifrost-http/server -run 'Test(FishAudioUsage|Metronome)' -count=1
 	go test ./transports/schema_test -run TestSchemaMetronomeBuiltin -count=1

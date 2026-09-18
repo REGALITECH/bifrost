@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 
 	"github.com/fasthttp/router"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/plugins"
+	"github.com/maximhq/bifrost/plugins/metronome"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 )
@@ -57,11 +59,13 @@ type CreatePluginRequest struct {
 
 // UpdatePluginRequest is the request body for updating a plugin
 type UpdatePluginRequest struct {
-	Enabled   bool                     `json:"enabled"`
-	Path      *string                  `json:"path"`
-	Config    map[string]any           `json:"config"`
-	Placement *schemas.PluginPlacement `json:"placement,omitempty"`
-	Order     *int                     `json:"order,omitempty"`
+	// Explicit full replacement is required to remove populated legacy fields.
+	ReplaceConfig bool                     `json:"replace_config,omitempty"`
+	Enabled       bool                     `json:"enabled"`
+	Path          *string                  `json:"path"`
+	Config        map[string]any           `json:"config"`
+	Placement     *schemas.PluginPlacement `json:"placement,omitempty"`
+	Order         *int                     `json:"order,omitempty"`
 }
 
 // normalizePluginConfig calls the loaded plugin's MarshalConfigForStorage if it
@@ -104,6 +108,7 @@ func (h *PluginsHandler) RegisterRoutes(r *router.Router, middlewares ...schemas
 }
 
 type PluginResponse struct {
+	Loaded     bool                     `json:"loaded"`
 	Name       string                   `json:"name"`
 	ActualName string                   `json:"actualName"`
 	Enabled    bool                     `json:"enabled"`
@@ -128,15 +133,18 @@ func (h *PluginsHandler) buildPluginResponseWithStatuses(plugin *configstoreTabl
 		Status: schemas.PluginStatusUninitialized,
 		Logs:   []string{},
 	}
+	actualName := plugin.Name
+	for name, status := range pluginStatuses {
+		if plugin.Name == status.Name {
+			actualName = name
+			if plugin.Enabled {
+				pluginStatus = status
+			}
+			break
+		}
+	}
 	if !plugin.Enabled {
 		pluginStatus.Status = schemas.PluginStatusDisabled
-	} else {
-		for _, status := range pluginStatuses {
-			if plugin.Name == status.Name {
-				pluginStatus = status
-				break
-			}
-		}
 	}
 	config := plugin.Config
 	if configMap, ok := plugin.Config.(map[string]any); ok {
@@ -149,8 +157,9 @@ func (h *PluginsHandler) buildPluginResponseWithStatuses(plugin *configstoreTabl
 		}
 	}
 	return PluginResponse{
+		Loaded:     slices.Contains(h.pluginsLoader.GetLoadedPluginNames(), schemas.SanitizePluginSpanName(actualName)),
 		Name:       plugin.Name,
-		ActualName: pluginStatus.Name,
+		ActualName: actualName,
 		Enabled:    plugin.Enabled,
 		Config:     config,
 		IsCustom:   plugin.IsCustom,
@@ -176,6 +185,15 @@ func (h *PluginsHandler) getLoadedPlugins(ctx *fasthttp.RequestCtx) {
 	})
 }
 
+// defaultMetronomePlugin makes this opt-in builtin discoverable before its
+// first save, without creating a DB row or loading it as a custom plugin.
+func defaultMetronomePlugin() *configstoreTables.TablePlugin {
+	return &configstoreTables.TablePlugin{
+		Name:   metronome.PluginName,
+		Config: map[string]any{"api_key": "env.METRONOME_API_KEY", "dry_run": true},
+	}
+}
+
 // getPlugins gets all plugins
 func (h *PluginsHandler) getPlugins(ctx *fasthttp.RequestCtx) {
 	if h.configStore == nil {
@@ -183,11 +201,12 @@ func (h *PluginsHandler) getPlugins(ctx *fasthttp.RequestCtx) {
 		finalPlugins := []PluginResponse{}
 		for name, pluginStatus := range pluginStatus {
 			finalPlugins = append(finalPlugins, PluginResponse{
+				Loaded:     slices.Contains(h.pluginsLoader.GetLoadedPluginNames(), schemas.SanitizePluginSpanName(name)),
 				Name:       pluginStatus.Name,
 				ActualName: name,
 				Enabled:    true,
 				Config:     map[string]any{},
-				IsCustom:   true,
+				IsCustom:   !lib.IsBuiltinPlugin(pluginStatus.Name),
 				Path:       nil,
 				Status:     pluginStatus,
 			})
@@ -203,6 +222,9 @@ func (h *PluginsHandler) getPlugins(ctx *fasthttp.RequestCtx) {
 		logger.Error("failed to get plugins: %v", err)
 		SendError(ctx, 500, "Failed to retrieve plugins")
 		return
+	}
+	if !slices.ContainsFunc(plugins, func(p *configstoreTables.TablePlugin) bool { return p.Name == metronome.PluginName }) {
+		plugins = append(plugins, defaultMetronomePlugin())
 	}
 	pluginStatuses := h.pluginsLoader.GetPluginStatus(ctx)
 	finalPlugins := []PluginResponse{}
@@ -224,11 +246,12 @@ func (h *PluginsHandler) getPlugin(ctx *fasthttp.RequestCtx) {
 		for name, pluginStatus := range pluginStatus {
 			if pluginStatus.Name == ctx.UserValue("name") {
 				pluginInfo = PluginResponse{
+					Loaded:     slices.Contains(h.pluginsLoader.GetLoadedPluginNames(), schemas.SanitizePluginSpanName(name)),
 					Name:       pluginStatus.Name,
 					ActualName: name,
 					Enabled:    true,
 					Config:     map[string]any{},
-					IsCustom:   true,
+					IsCustom:   !lib.IsBuiltinPlugin(pluginStatus.Name),
 					Path:       nil,
 					Status:     pluginStatus,
 				}
@@ -260,6 +283,10 @@ func (h *PluginsHandler) getPlugin(ctx *fasthttp.RequestCtx) {
 	}
 
 	plugin, err := h.configStore.GetPlugin(ctx, name)
+	if errors.Is(err, configstore.ErrNotFound) && name == metronome.PluginName {
+		SendJSON(ctx, h.buildPluginResponse(ctx, defaultMetronomePlugin()))
+		return
+	}
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "Plugin not found")
@@ -392,30 +419,10 @@ func (h *PluginsHandler) updatePlugin(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	var plugin *configstoreTables.TablePlugin
-	var err error
-	// Fetch the existing plugin to enable config merging below.
-	var existingPlugin *configstoreTables.TablePlugin
-	existingPlugin, err = h.configStore.GetPlugin(ctx, name)
-	if err != nil {
-		// If doesn't exist, create it
-		if errors.Is(err, configstore.ErrNotFound) {
-			plugin = &configstoreTables.TablePlugin{
-				Name:     name,
-				Enabled:  false,
-				Config:   map[string]any{},
-				Path:     nil,
-				IsCustom: false,
-			}
-			if err := h.configStore.CreatePlugin(ctx, plugin); err != nil {
-				logger.Error("failed to create plugin: %v", err)
-				SendError(ctx, 500, "Failed to create plugin")
-				return
-			}
-		} else {
-			logger.Error("failed to get plugin: %v", err)
-			SendError(ctx, 500, "Failed to update plugin")
-			return
-		}
+	existingPlugin, err := h.configStore.GetPlugin(ctx, name)
+	if err != nil && !errors.Is(err, configstore.ErrNotFound) {
+		SendError(ctx, 500, "Failed to retrieve plugin")
+		return
 	}
 
 	// Unmarshalling the request body
@@ -445,13 +452,19 @@ func (h *PluginsHandler) updatePlugin(ctx *fasthttp.RequestCtx) {
 	if isBuiltin && request.Path != nil {
 		request.Path = nil
 	}
+	if request.ReplaceConfig && request.Config == nil {
+		SendError(ctx, 400, "replace_config requires a configuration object")
+		return
+	}
 	// Merge incoming config over the existing DB config so fields unknown to the
 	// calling form (e.g. plugin_span_filter set by a separate UI sheet) are not wiped.
 	mergedConfig := request.Config
 	if existingPlugin != nil {
 		if existingCfg, ok := existingPlugin.Config.(map[string]any); ok && len(existingCfg) > 0 {
 			mergedConfig = make(map[string]any, len(existingCfg)+len(request.Config))
-			maps.Copy(mergedConfig, existingCfg)
+			if !request.ReplaceConfig {
+				maps.Copy(mergedConfig, existingCfg)
+			}
 			// Before overwriting, substitute any redacted SecretVar placeholders in the
 			// incoming config with the existing stored value so credentials are not
 			// replaced by "***" or similar client-side redaction markers.
@@ -465,15 +478,28 @@ func (h *PluginsHandler) updatePlugin(ctx *fasthttp.RequestCtx) {
 		SendError(ctx, fasthttp.StatusBadRequest, fmt.Sprintf("Invalid plugin configuration: %v", err))
 		return
 	}
+	version := int16(1)
+	configHash := ""
+	if existingPlugin != nil {
+		version, configHash = existingPlugin.Version, existingPlugin.ConfigHash
+		if request.Placement == nil {
+			request.Placement = existingPlugin.Placement
+		}
+		if request.Order == nil {
+			request.Order = existingPlugin.Order
+		}
+	}
 	// Updating the plugin
 	if err := h.configStore.UpdatePlugin(ctx, &configstoreTables.TablePlugin{
-		Name:      name,
-		Enabled:   request.Enabled,
-		Config:    mergedConfig,
-		Path:      request.Path,
-		IsCustom:  !isBuiltin,
-		Placement: request.Placement,
-		Order:     request.Order,
+		Version:    version,
+		ConfigHash: configHash,
+		Name:       name,
+		Enabled:    request.Enabled,
+		Config:     mergedConfig,
+		Path:       request.Path,
+		IsCustom:   !isBuiltin,
+		Placement:  request.Placement,
+		Order:      request.Order,
 	}); err != nil {
 		logger.Error("failed to update plugin: %v", err)
 		SendError(ctx, 500, "Failed to update plugin")

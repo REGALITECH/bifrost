@@ -5,8 +5,8 @@ import { CodeEditor } from "@/components/ui/codeEditor";
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { setPluginFormDirtyState, useAppDispatch, useAppSelector, useUpdatePluginMutation } from "@/lib/store";
-import { PluginType } from "@/lib/types/plugins";
+import { getErrorMessage, setPluginFormDirtyState, useAppDispatch, useAppSelector, useUpdatePluginMutation } from "@/lib/store";
+import { METRONOME_PLUGIN, PluginType } from "@/lib/types/plugins";
 import { cn } from "@/lib/utils";
 import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -50,6 +50,9 @@ export default function PluginsView(props: Props) {
 	const hasDeletePluginAccess = useRbac(RbacResource.Plugins, RbacOperation.Delete);
 	const [updatePlugin, { isLoading }] = useUpdatePluginMutation();
 	const selectedPlugin = useAppSelector((state) => state.plugin.selectedPlugin);
+	const [saveError, setSaveError] = useState<string | null>(null);
+	const isMetronome = selectedPlugin?.name === METRONOME_PLUGIN;
+	const canRetry = selectedPlugin?.enabled && selectedPlugin.status?.status !== "active";
 	const [showConfig, setShowConfig] = useState(false);
 	const [showDeleteDialog, setShowDeleteDialog] = useState(false);
 
@@ -79,6 +82,8 @@ export default function PluginsView(props: Props) {
 		}
 	}, [selectedPlugin]);
 
+	useEffect(() => setSaveError(null), [selectedPlugin?.name]);
+
 	// Track form dirty state
 	useEffect(() => {
 		const isDirty = form.formState.isDirty;
@@ -88,6 +93,7 @@ export default function PluginsView(props: Props) {
 	const onSubmit = async (values: PluginFormValues) => {
 		if (!selectedPlugin) return;
 
+		setSaveError(null);
 		try {
 			let config;
 			if (values.hasConfig && values.config) {
@@ -99,18 +105,25 @@ export default function PluginsView(props: Props) {
 				}
 			}
 
-			await updatePlugin({
+			const updated = await updatePlugin({
 				name: selectedPlugin.name,
 				data: {
 					enabled: values.enabled,
 					path: values.path ?? undefined,
-					...(config !== undefined && { config }),
+					...(config !== undefined && { config, ...(isMetronome && { replace_config: true }) }),
 				},
 			}).unwrap();
+			if (updated.enabled && updated.status?.status !== "active") {
+				const message = updated.status?.logs?.join("; ") || "Configuration saved, but the plugin is not active";
+				setSaveError(message);
+				toast.error(message);
+				return;
+			}
 			toast.success("Plugin updated successfully");
-			form.reset(values);
-		} catch {
-			toast.error("Failed to update plugin");
+		} catch (error) {
+			const message = getErrorMessage(error);
+			setSaveError(message);
+			toast.error(message);
 		}
 	};
 
@@ -151,6 +164,25 @@ export default function PluginsView(props: Props) {
 				<form onSubmit={form.handleSubmit(onSubmit, onError)} className="space-y-6">
 					<div className="">
 						<h3 className="mb-4 text-lg font-semibold">Plugin Configuration</h3>
+						<div className="mb-4 flex items-center gap-2" data-testid="plugin-runtime-status">
+							{!selectedPlugin.isCustom && <Badge variant="outline">Built-in</Badge>}
+							<span>Runtime status: {selectedPlugin.status?.status ?? "uninitialized"}</span>
+							{selectedPlugin.loaded !== undefined && (
+								<span className="text-muted-foreground text-sm">({selectedPlugin.loaded ? "Instance loaded" : "No instance loaded"})</span>
+							)}
+						</div>
+						{saveError && (
+							<p role="alert" className="text-destructive mb-4 text-sm" data-testid="plugin-save-error">
+								{saveError}
+							</p>
+						)}
+						{isMetronome && (
+							<p className="text-muted-foreground mb-4 text-sm">
+								Use an environment reference such as env.METRONOME_API_KEY for api_key. The Enabled setting is saved separately from runtime
+								status. Saving replaces this JSON configuration. Empty legacy customer fields are removed automatically; before removing
+								populated customer_mapping or default_customer_id, register the authenticated virtual-key UUIDs as Metronome ingest aliases.
+							</p>
+						)}
 						<div className="space-y-6">
 							<FormField
 								control={form.control}
@@ -196,26 +228,33 @@ export default function PluginsView(props: Props) {
 											<FormDescription>Enable or disable this plugin</FormDescription>
 										</div>
 										<FormControl>
-											<Switch checked={field.value} onCheckedChange={field.onChange} />
+											<Switch
+												data-testid="plugin-enabled-switch"
+												checked={field.value}
+												onCheckedChange={field.onChange}
+												disabled={!hasUpdatePluginAccess || isLoading}
+											/>
 										</FormControl>
 									</FormItem>
 								)}
 							/>
 
-							<FormField
-								control={form.control}
-								name="path"
-								render={({ field }) => (
-									<FormItem>
-										<FormLabel>Path</FormLabel>
-										<FormControl>
-											<Input placeholder="Plugin path" {...field} value={field.value || ""} />
-										</FormControl>
-										<FormDescription>The file system path to the plugin</FormDescription>
-										<FormMessage />
-									</FormItem>
-								)}
-							/>
+							{selectedPlugin.isCustom && (
+								<FormField
+									control={form.control}
+									name="path"
+									render={({ field }) => (
+										<FormItem>
+											<FormLabel>Path</FormLabel>
+											<FormControl>
+												<Input placeholder="Plugin path" {...field} value={field.value || ""} />
+											</FormControl>
+											<FormDescription>The file system path to the plugin</FormDescription>
+											<FormMessage />
+										</FormItem>
+									)}
+								/>
+							)}
 
 							{!showConfig ? (
 								<Button
@@ -242,19 +281,21 @@ export default function PluginsView(props: Props) {
 										<FormItem>
 											<div className="flex items-center justify-between">
 												<FormLabel>Configuration (JSON)</FormLabel>
-												<Button
-													type="button"
-													variant="ghost"
-													size="sm"
-													onClick={() => {
-														setShowConfig(false);
-														form.setValue("hasConfig", false);
-														form.setValue("config", undefined);
-													}}
-													className="h-auto p-1 text-xs"
-												>
-													Remove
-												</Button>
+												{!isMetronome && (
+													<Button
+														type="button"
+														variant="ghost"
+														size="sm"
+														onClick={() => {
+															setShowConfig(false);
+															form.setValue("hasConfig", false);
+															form.setValue("config", undefined);
+														}}
+														className="h-auto p-1 text-xs"
+													>
+														Remove
+													</Button>
+												)}
 											</div>
 											<FormControl>
 												<div className="rounded-sm border">
@@ -263,7 +304,7 @@ export default function PluginsView(props: Props) {
 														minHeight={200}
 														maxHeight={400}
 														wrap={true}
-														code={field.value || "{}"}
+														code={field.value ?? "{}"}
 														lang="json"
 														onChange={field.onChange}
 														options={{
@@ -289,7 +330,7 @@ export default function PluginsView(props: Props) {
 									{selectedPlugin.status?.logs && selectedPlugin.status.logs.length > 0 && (
 										<div className="grid gap-2">
 											<label className="text-sm font-medium">Logs</label>
-											<div className="rounded-md border px-4 py-2 font-mono text-xs">
+											<div data-testid="plugin-logs" className="rounded-md border px-4 py-2 font-mono text-xs">
 												<div className="flex flex-row items-center gap-2">
 													{selectedPlugin.status.logs.map((log, index) => (
 														<div key={index} className={isErrorLog(log) ? "text-red-400" : "text-green-600"}>
@@ -306,16 +347,18 @@ export default function PluginsView(props: Props) {
 					</div>
 
 					<div className="flex flex-wrap justify-end gap-2">
-						<Button
-							className="border-destructive text-destructive hover:bg-destructive/10 hover:text-destructive"
-							type="button"
-							variant="outline"
-							onClick={handleDeleteClick}
-							disabled={!hasDeletePluginAccess}
-						>
-							<Trash2Icon className="h-4 w-4" />
-							Delete Plugin
-						</Button>
+						{selectedPlugin.isCustom && (
+							<Button
+								className="border-destructive text-destructive hover:bg-destructive/10 hover:text-destructive"
+								type="button"
+								variant="outline"
+								onClick={handleDeleteClick}
+								disabled={!hasDeletePluginAccess}
+							>
+								<Trash2Icon className="h-4 w-4" />
+								Delete Plugin
+							</Button>
+						)}
 						<Button
 							type="button"
 							variant="outline"
@@ -324,7 +367,11 @@ export default function PluginsView(props: Props) {
 						>
 							Reset
 						</Button>
-						<Button type="submit" disabled={isLoading || !form.formState.isDirty || !hasUpdatePluginAccess}>
+						<Button
+							data-testid="plugin-save-button"
+							type="submit"
+							disabled={isLoading || (!form.formState.isDirty && !canRetry) || !hasUpdatePluginAccess}
+						>
 							<SaveIcon className="h-4 w-4" />
 							{isLoading ? "Saving..." : "Save Changes"}
 						</Button>

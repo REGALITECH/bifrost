@@ -2327,7 +2327,19 @@
                       "type": "string",
                       "minLength": 1,
                       "default": "env.METRONOME_API_KEY",
-                      "description": "Metronome API key or secret reference, e.g. env.METRONOME_API_KEY"
+                      "pattern": "^env\\.[A-Za-z_][A-Za-z0-9_]*$",
+                      "description": "Environment variable reference only, e.g. env.METRONOME_API_KEY. The resolved value is never stored."
+                    },
+                    "customer_mapping": {
+                      "type": ["object", "null"],
+                      "maxProperties": 0,
+                      "deprecated": true,
+                      "description": "Only empty legacy values are accepted for migration; populated mappings require ingest-alias migration."
+                    },
+                    "default_customer_id": {
+                      "enum": ["", null],
+                      "deprecated": true,
+                      "description": "An empty legacy value is removed on save."
                     },
                     "model_mapping": {
                       "type": "object",

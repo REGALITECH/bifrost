@@ -22,7 +22,10 @@ export const pluginsApi = baseApi.injectEndpoints({
 		// Get all plugins
 		getPlugins: builder.query<Plugin[], void>({
 			query: () => "/plugins",
-			providesTags: ["Plugins"],
+			providesTags: (result) => [
+				{ type: "Plugins", id: "LIST" },
+				...(result ?? []).map((plugin) => ({ type: "Plugins" as const, id: plugin.name })),
+			],
 			transformResponse: (response: PluginsResponse) => response.plugins || [],
 		}),
 
@@ -77,7 +80,15 @@ export const pluginsApi = baseApi.injectEndpoints({
 					);
 					// Also update the individual plugin cache
 					dispatch(pluginsApi.util.updateQueryData("getPlugin", arg.name, () => updatedPlugin));
-				} catch {}
+				} catch {
+					// A failed load can still persist configuration and an error status.
+					dispatch(
+						pluginsApi.util.invalidateTags([
+							{ type: "Plugins", id: arg.name },
+							{ type: "Plugins", id: "LIST" },
+						]),
+					);
+				}
 			},
 		}),
 

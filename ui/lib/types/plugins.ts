@@ -1,6 +1,7 @@
 // Plugins types that match the Go backend structures
 
 export const SEMANTIC_CACHE_PLUGIN = "semantic_cache";
+export const METRONOME_PLUGIN = "metronome";
 export const MAXIM_PLUGIN = "maxim";
 
 export type PluginType = "llm" | "mcp" | "http";
@@ -13,6 +14,7 @@ export interface PluginStatus {
 }
 
 export interface Plugin {
+	loaded?: boolean;
 	name: string;
 	actualName?: string;
 	enabled: boolean;
@@ -39,6 +41,7 @@ export interface CreatePluginRequest {
 }
 
 export interface UpdatePluginRequest {
+	replace_config?: boolean;
 	enabled: boolean;
 	path?: string;
 	config?: any;

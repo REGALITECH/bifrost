@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { setSelectedPlugin, useAppDispatch, useAppSelector, useGetPluginsQuery } from "@/lib/store";
+import { METRONOME_PLUGIN } from "@/lib/types/plugins";
 import { cn } from "@/lib/utils";
 import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
 import { ListOrdered, PlusIcon, Puzzle } from "lucide-react";
@@ -17,7 +18,7 @@ export default function PluginsPage() {
 	const { data: plugins, isLoading } = useGetPluginsQuery();
 	const selectedPlugin = useAppSelector((state) => state.plugin.selectedPlugin);
 	const [selectedPluginId, setSelectedPluginId] = useQueryState("plugin");
-	const customPlugins = useMemo(() => plugins?.filter((plugin) => plugin.isCustom), [plugins]);
+	const managedPlugins = useMemo(() => plugins?.filter((plugin) => plugin.isCustom || plugin.name === METRONOME_PLUGIN), [plugins]);
 	const [isSheetOpen, setIsSheetOpen] = useState(false);
 	const [isSequenceSheetOpen, setIsSequenceSheetOpen] = useState(false);
 
@@ -31,22 +32,22 @@ export default function PluginsPage() {
 
 	useEffect(() => {
 		if (!selectedPluginId) return;
-		const plugin = customPlugins?.find((plugin) => plugin.name === selectedPluginId);
+		const plugin = managedPlugins?.find((plugin) => plugin.name === selectedPluginId);
 		if (plugin) {
 			dispatch(setSelectedPlugin(plugin));
 		}
-	}, [selectedPluginId, customPlugins]);
+	}, [selectedPluginId, managedPlugins]);
 
 	useEffect(() => {
 		if (selectedPluginId) return;
 		if (!selectedPlugin) {
-			setSelectedPluginId(customPlugins?.[0]?.name ?? "");
+			setSelectedPluginId(managedPlugins?.[0]?.name ?? "");
 			return;
 		}
 		setSelectedPluginId(selectedPlugin?.name ?? "");
-	}, [customPlugins]);
+	}, [managedPlugins]);
 
-	if (customPlugins?.length === 0 && !isLoading) {
+	if (managedPlugins?.length === 0 && !isLoading) {
 		return (
 			<div className="mx-auto w-full max-w-7xl">
 				<PluginsEmptyState onCreateClick={handleAddNew} canCreate={hasCreatePluginAccess} />
@@ -68,7 +69,7 @@ export default function PluginsPage() {
 					<div className="rounded-md bg-zinc-50/50 p-4 dark:bg-zinc-800/20">
 						<div className="mb-4">
 							<div className="text-muted-foreground mb-2 text-xs font-medium">Plugins</div>
-							{customPlugins?.map((plugin) => (
+							{managedPlugins?.map((plugin) => (
 								<button
 									type="button"
 									key={plugin.name}
@@ -112,7 +113,7 @@ export default function PluginsPage() {
 									<PlusIcon className="h-4 w-4" />
 									<div className="text-xs">Install New Plugin</div>
 								</Button>
-								{customPlugins && customPlugins.length > 0 && (
+								{plugins?.some((plugin) => plugin.isCustom) && (
 									<Button
 										variant="outline"
 										size="sm"
@@ -131,7 +132,7 @@ export default function PluginsPage() {
 				</div>
 				<PluginsView
 					onDelete={() => {
-						setSelectedPluginId(customPlugins?.[0]?.name ?? "");
+						setSelectedPluginId(managedPlugins?.[0]?.name ?? "");
 					}}
 					onCreate={(pluginName) => {
 						setSelectedPluginId(pluginName ?? "");
