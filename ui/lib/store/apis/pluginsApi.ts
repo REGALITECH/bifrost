@@ -77,10 +77,7 @@ export const pluginsApi = baseApi.injectEndpoints({
 					);
 					// Also update the individual plugin cache
 					dispatch(pluginsApi.util.updateQueryData("getPlugin", arg.name, () => updatedPlugin));
-				} catch {
-					// Initialization can fail after the requested config and error status are saved.
-					dispatch(pluginsApi.util.invalidateTags(["Plugins"]));
-				}
+				} catch {}
 			},
 		}),
 

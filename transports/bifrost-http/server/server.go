@@ -1690,7 +1690,6 @@ func (s *BifrostHTTPServer) GetLoadedPluginNames() []string {
 // by name in the ConfigMarshallers cache and calls MarshalConfigForStorage if found.
 // Returns nil, nil when the plugin is not loaded or does not implement ConfigMarshallerPlugin.
 func (s *BifrostHTTPServer) NormalizePluginConfig(name string, config map[string]any) (map[string]any, error) {
-	// Builtin credential validation must also run before the first successful load.
 	if name == metronome.PluginName {
 		return (&metronome.Plugin{}).MarshalConfigForStorage(config)
 	}
@@ -1723,9 +1722,6 @@ func (s *BifrostHTTPServer) ExpandPluginConfigForAPI(name string, config map[str
 // Always returns the original error so the actual failure reason is surfaced to the user.
 func (s *BifrostHTTPServer) updatePluginErrorStatus(name, step string, originalErr error) error {
 	logs := []string{fmt.Sprintf("error %s plugin %s: %v", step, name, originalErr)}
-	if step == "loading" && s.Config.IsPluginLoaded(name) {
-		logs = append(logs, "the previous plugin instance is still running with its previous configuration")
-	}
 	s.Config.UpdatePluginOverallStatus(name, name, schemas.PluginStatusError, logs, []schemas.PluginType{})
 	return originalErr
 }
@@ -1764,10 +1760,6 @@ func (s *BifrostHTTPServer) ReloadPlugin(ctx context.Context, name string, path 
 	plugin, err := InstantiatePlugin(ctx, name, path, pluginConfig, s.Config)
 	if err != nil {
 		return s.updatePluginErrorStatus(name, "loading", err)
-	}
-	// Metronome stays in the same builtin slot on API reload as at startup.
-	if name == metronome.PluginName {
-		placement, order = schemas.Ptr(schemas.PluginPlacementBuiltin), schemas.Ptr(9)
 	}
 	// Wire the embedding executor on the new instance before syncing.
 	if semanticCachePlugin, ok := plugin.(*semanticcache.Plugin); ok {

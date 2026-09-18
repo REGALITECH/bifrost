@@ -6,14 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"slices"
 
 	"github.com/fasthttp/router"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/plugins"
-	"github.com/maximhq/bifrost/plugins/metronome"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
 )
@@ -178,14 +176,6 @@ func (h *PluginsHandler) getLoadedPlugins(ctx *fasthttp.RequestCtx) {
 	})
 }
 
-// Show the opt-in builtin before its first save without creating a DB row.
-func defaultMetronomePlugin() *configstoreTables.TablePlugin {
-	return &configstoreTables.TablePlugin{
-		Name:   metronome.PluginName,
-		Config: map[string]any{"api_key": "env.METRONOME_API_KEY", "dry_run": true},
-	}
-}
-
 // getPlugins gets all plugins
 func (h *PluginsHandler) getPlugins(ctx *fasthttp.RequestCtx) {
 	if h.configStore == nil {
@@ -215,9 +205,6 @@ func (h *PluginsHandler) getPlugins(ctx *fasthttp.RequestCtx) {
 		return
 	}
 	pluginStatuses := h.pluginsLoader.GetPluginStatus(ctx)
-	if !slices.ContainsFunc(plugins, func(p *configstoreTables.TablePlugin) bool { return p.Name == metronome.PluginName }) {
-		plugins = append(plugins, defaultMetronomePlugin())
-	}
 	finalPlugins := []PluginResponse{}
 	for _, plugin := range plugins {
 		finalPlugins = append(finalPlugins, h.buildPluginResponseWithStatuses(plugin, pluginStatuses))
@@ -273,10 +260,6 @@ func (h *PluginsHandler) getPlugin(ctx *fasthttp.RequestCtx) {
 	}
 
 	plugin, err := h.configStore.GetPlugin(ctx, name)
-	if errors.Is(err, configstore.ErrNotFound) && name == metronome.PluginName {
-		SendJSON(ctx, h.buildPluginResponse(ctx, defaultMetronomePlugin()))
-		return
-	}
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotFound) {
 			SendError(ctx, fasthttp.StatusNotFound, "Plugin not found")

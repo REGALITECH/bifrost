@@ -5,7 +5,7 @@ import { CodeEditor } from "@/components/ui/codeEditor";
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { getErrorMessage, setPluginFormDirtyState, useAppDispatch, useAppSelector, useUpdatePluginMutation } from "@/lib/store";
+import { setPluginFormDirtyState, useAppDispatch, useAppSelector, useUpdatePluginMutation } from "@/lib/store";
 import { PluginType } from "@/lib/types/plugins";
 import { cn } from "@/lib/utils";
 import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
@@ -50,7 +50,6 @@ export default function PluginsView(props: Props) {
 	const hasDeletePluginAccess = useRbac(RbacResource.Plugins, RbacOperation.Delete);
 	const [updatePlugin, { isLoading }] = useUpdatePluginMutation();
 	const selectedPlugin = useAppSelector((state) => state.plugin.selectedPlugin);
-	const canRetry = selectedPlugin?.enabled && selectedPlugin.status?.status === "error";
 	const [showConfig, setShowConfig] = useState(false);
 	const [showDeleteDialog, setShowDeleteDialog] = useState(false);
 
@@ -73,7 +72,7 @@ export default function PluginsView(props: Props) {
 			form.reset({
 				name: selectedPlugin.name,
 				enabled: selectedPlugin.enabled,
-				path: selectedPlugin.path ?? undefined,
+				path: selectedPlugin.path,
 				config: hasConfig ? JSON.stringify(selectedPlugin.config, null, 2) : undefined,
 				hasConfig,
 			});
@@ -110,8 +109,8 @@ export default function PluginsView(props: Props) {
 			}).unwrap();
 			toast.success("Plugin updated successfully");
 			form.reset(values);
-		} catch (error) {
-			toast.error(getErrorMessage(error));
+		} catch {
+			toast.error("Failed to update plugin");
 		}
 	};
 
@@ -152,9 +151,6 @@ export default function PluginsView(props: Props) {
 				<form onSubmit={form.handleSubmit(onSubmit, onError)} className="space-y-6">
 					<div className="">
 						<h3 className="mb-4 text-lg font-semibold">Plugin Configuration</h3>
-						<p className="text-muted-foreground mb-4 text-sm" data-testid="plugin-runtime-status">
-							Runtime status: {selectedPlugin.status?.status ?? "uninitialized"}
-						</p>
 						<div className="space-y-6">
 							<FormField
 								control={form.control}
@@ -200,7 +196,7 @@ export default function PluginsView(props: Props) {
 											<FormDescription>Enable or disable this plugin</FormDescription>
 										</div>
 										<FormControl>
-											<Switch data-testid="plugin-enabled-switch" checked={field.value} onCheckedChange={field.onChange} />
+											<Switch checked={field.value} onCheckedChange={field.onChange} />
 										</FormControl>
 									</FormItem>
 								)}
@@ -210,7 +206,7 @@ export default function PluginsView(props: Props) {
 								control={form.control}
 								name="path"
 								render={({ field }) => (
-									<FormItem className={selectedPlugin.isCustom ? undefined : "hidden"}>
+									<FormItem>
 										<FormLabel>Path</FormLabel>
 										<FormControl>
 											<Input placeholder="Plugin path" {...field} value={field.value || ""} />
@@ -267,7 +263,7 @@ export default function PluginsView(props: Props) {
 														minHeight={200}
 														maxHeight={400}
 														wrap={true}
-														code={field.value ?? "{}"}
+														code={field.value || "{}"}
 														lang="json"
 														onChange={field.onChange}
 														options={{
@@ -293,7 +289,7 @@ export default function PluginsView(props: Props) {
 									{selectedPlugin.status?.logs && selectedPlugin.status.logs.length > 0 && (
 										<div className="grid gap-2">
 											<label className="text-sm font-medium">Logs</label>
-											<div data-testid="plugin-logs" className="rounded-md border px-4 py-2 font-mono text-xs">
+											<div className="rounded-md border px-4 py-2 font-mono text-xs">
 												<div className="flex flex-row items-center gap-2">
 													{selectedPlugin.status.logs.map((log, index) => (
 														<div key={index} className={isErrorLog(log) ? "text-red-400" : "text-green-600"}>
@@ -311,10 +307,7 @@ export default function PluginsView(props: Props) {
 
 					<div className="flex flex-wrap justify-end gap-2">
 						<Button
-							className={cn(
-								"border-destructive text-destructive hover:bg-destructive/10 hover:text-destructive",
-								!selectedPlugin.isCustom && "hidden",
-							)}
+							className="border-destructive text-destructive hover:bg-destructive/10 hover:text-destructive"
 							type="button"
 							variant="outline"
 							onClick={handleDeleteClick}
@@ -331,11 +324,7 @@ export default function PluginsView(props: Props) {
 						>
 							Reset
 						</Button>
-						<Button
-							data-testid="plugin-save-button"
-							type="submit"
-							disabled={isLoading || (!form.formState.isDirty && !canRetry) || !hasUpdatePluginAccess}
-						>
+						<Button type="submit" disabled={isLoading || !form.formState.isDirty || !hasUpdatePluginAccess}>
 							<SaveIcon className="h-4 w-4" />
 							{isLoading ? "Saving..." : "Save Changes"}
 						</Button>

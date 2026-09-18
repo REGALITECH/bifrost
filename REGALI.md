@@ -191,7 +191,7 @@ tests with the race detector and no live credentials. The dedicated
 `metronome-tests.yml` runs this on every PR to main, independently of the
 secret-bearing test approval environment. An unrelated green workflow is not
 evidence that these tests ran. The release job also boots each static image
-with the documented dry-run config and verifies `metronome` is loaded.
+with an environment-backed test key and verifies `metronome` is loaded without sending usage.
 
 The module is fork-only: `transports/go.mod` uses a local replacement until a
 separate module publication strategy is adopted. Keep this workspace/replacement

@@ -19,7 +19,6 @@ import (
 )
 
 type Config struct {
-	DryRun bool               `json:"dry_run"`
 	APIKey *schemas.SecretVar `json:"api_key,omitempty"`
 	// Keys are Bifrost provider/model; values match the Metronome rate card exactly.
 	ModelMapping    map[string]string `json:"model_mapping"`
@@ -71,10 +70,9 @@ type Plugin struct {
 
 func (p *Plugin) GetName() string { return PluginName }
 
-// Omitted dry_run defaults to true, including configs decoded by the server.
 func (c *Config) UnmarshalJSON(data []byte) error {
 	type plain Config
-	value := plain{DryRun: true}
+	value := plain{}
 	// Reject old routing configuration instead of silently changing the billing
 	// identity of an existing installation. Register the VK UUID as an ingest
 	// alias on the intended Metronome customer before removing these settings.
@@ -94,15 +92,18 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 }
 
 func Init(config *Config, logger schemas.Logger) (*Plugin, error) {
-	cfg := Config{DryRun: true}
+	cfg := Config{}
 	if config != nil {
 		cfg = *config
 	}
 	cfg.ModelMapping = maps.Clone(cfg.ModelMapping)
 	cfg.ProviderMapping = maps.Clone(cfg.ProviderMapping)
+	if cfg.APIKey != nil && (!cfg.APIKey.IsFromEnv() || !strings.HasPrefix(cfg.APIKey.GetRawRef(), "env.")) {
+		return nil, fmt.Errorf("metronome api_key must be an env.VARIABLE_NAME reference")
+	}
 	key := strings.TrimSpace(cfg.APIKey.GetValue())
-	if !cfg.DryRun && key == "" {
-		return nil, fmt.Errorf("metronome api_key is required for live delivery")
+	if key == "" {
+		return nil, fmt.Errorf("metronome api_key is required")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &Plugin{ingestURL: defaultIngestURL, config: cfg, logger: logger, apiKey: key, queue: make(chan Event[TokenUsage], 1000), ctx: ctx, cancel: cancel,
@@ -246,16 +247,12 @@ func (p *Plugin) run() {
 	defer p.wg.Done()
 	for event := range p.queue {
 		if p.ctx.Err() != nil {
-			p.logger.Warn("[metronome] shutdown deadline reached; pending sandbox events dropped")
+			p.logger.Warn("[metronome] shutdown deadline reached; pending events dropped")
 			return
 		}
 		payload, err := schemas.MarshalSorted([]Event[TokenUsage]{event})
 		if err != nil {
 			p.logger.Warn("[metronome] unable to encode event")
-			continue
-		}
-		if p.config.DryRun {
-			p.logger.Info("[metronome] dry_run %s", payload)
 			continue
 		}
 		if err := p.send(p.ctx, event.TransactionID, payload); err != nil {

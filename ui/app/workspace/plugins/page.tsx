@@ -17,7 +17,7 @@ export default function PluginsPage() {
 	const { data: plugins, isLoading } = useGetPluginsQuery();
 	const selectedPlugin = useAppSelector((state) => state.plugin.selectedPlugin);
 	const [selectedPluginId, setSelectedPluginId] = useQueryState("plugin");
-	const customPlugins = useMemo(() => plugins?.filter((plugin) => plugin.isCustom || plugin.name === "metronome"), [plugins]);
+	const customPlugins = useMemo(() => plugins?.filter((plugin) => plugin.isCustom), [plugins]);
 	const [isSheetOpen, setIsSheetOpen] = useState(false);
 	const [isSequenceSheetOpen, setIsSequenceSheetOpen] = useState(false);
 
@@ -112,7 +112,7 @@ export default function PluginsPage() {
 									<PlusIcon className="h-4 w-4" />
 									<div className="text-xs">Install New Plugin</div>
 								</Button>
-								{plugins?.some((plugin) => plugin.isCustom) && (
+								{customPlugins && customPlugins.length > 0 && (
 									<Button
 										variant="outline"
 										size="sm"

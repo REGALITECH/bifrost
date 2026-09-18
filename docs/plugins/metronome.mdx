@@ -13,7 +13,9 @@ reports produce `fishaudio-usage` events.
 The normal gateway build includes the plugin. `transports/Dockerfile.local`
 continues to build a statically linked gateway; no shared library or separate
 plugin build is required. The release workflow starts each architecture's image
-in dry run and checks `/api/plugins/loaded` before publication.
+with a fake test key and network access disabled, then checks
+`/api/plugins/loaded` before publication.
+This startup check sends no usage events.
 
 ```sh
 make setup-workspace
@@ -21,19 +23,11 @@ make build LOCAL=1
 make test-metronome
 ```
 
-Open **Plugins → metronome** to edit configuration and enable or disable the
-builtin through the existing `/api/plugins` management API. When no DB entry
-exists, the page offers disabled defaults with `api_key: "env.METRONOME_API_KEY"`
-and `dry_run: true`. Check runtime status and error logs after saving: `enabled`
-is the requested state, and initialization can fail after it is saved.
-
-For UI-managed operation, omit Metronome from the startup file and retain the
-default config-DB merge mode so restarts preserve UI settings. Other plugins
-can remain in the file. API updates keep the existing config-merge behavior.
-
-For a file-managed installation, merge the `plugins` entry from
-`examples/configs/withmetronome/config.json` into your gateway configuration. The builtin entry uses `name: "metronome"`,
-`enabled: true`, and `config`; omit `path`. The example defaults to dry run.
+Merge the `plugins` entry from `examples/configs/withmetronome/config.json` into
+your gateway configuration. The builtin entry uses `name: "metronome"`,
+`enabled: true`, and `config`; omit `path`. When enabled, the plugin sends usage
+to Metronome and requires `METRONOME_API_KEY` in the Bifrost process environment.
+Set `enabled: false` to stop delivery.
 
 ```json
 {
@@ -41,7 +35,6 @@ For a file-managed installation, merge the `plugins` entry from
   "enabled": true,
   "version": 1,
   "config": {
-    "dry_run": true,
     "api_key": "env.METRONOME_API_KEY"
   }
 }
@@ -52,20 +45,17 @@ activation or deactivation: the default merge preserves stored configuration
 unless the file has a higher version. When migrating a previous dynamic-plugin
 configuration, remove `path` and increment `version` before restarting.
 
-For ETLA, set `bifrost_metronome_secret_enabled = true` in
-`etla_infra_tf` to supply the existing Secret independently of UI enablement.
-The updated module omits Metronome from the startup file.
-The API key is plaintext in AWS Secrets Manager at
+For ETLA, `etla_infra_tf/stack/modules/bifrost` supplies this entry through the
+upstream chart's `bifrost.plugins.custom` list (the list also accepts builtin
+entries without a path). The API key is plaintext in AWS Secrets Manager at
 `etla/metronome/api_key`. External Secrets syncs it to Kubernetes Secret
 `bifrost-metronome` / `api-key`, injected as `METRONOME_API_KEY`.
-Only an `env.NAME` reference is accepted and stored for `api_key`. The plugin
-resolves it during initialization and holds the key in process memory.
-Secret registration and process injection are separate: if the key is missing,
-check the Pod's `secretKeyRef` and whether the process variable is populated,
-without printing its value. Restart Pods after changing their environment.
-Terraform does not read or store the key value. Live deployment waits for the
-ExternalSecret to become ready; dry run needs no key. Select an image containing
-the builtin before enabling it.
+The plugin resolves `api_key` through Bifrost's standard `SecretVar` mechanism.
+Terraform does not read or store the key value. Deployment waits for the
+ExternalSecret to become ready. Secret registration and process injection are
+separate: verify the Pod's `secretKeyRef` and that the process variable is populated
+without displaying its value. Missing credentials cause initialization to fail.
+Select an image containing the builtin before enabling it.
 
 To verify a locally built release image:
 
@@ -135,8 +125,8 @@ Do not regenerate IDs or timestamps when replaying a saved report during migrati
 5. Put a **sandbox** API key in the Bifrost process environment as
    `METRONOME_API_KEY`, referenced by `api_key: "env.METRONOME_API_KEY"`. For Docker, pass
    the environment variable into the container. Do not put secrets in config JSON.
-6. Set `dry_run: false`, enable the plugin and save in the Plugins page. Missing
-   credentials cause initialization to fail visibly in the status and error logs.
+6. Set `enabled: true` and restart. Missing credentials cause plugin initialization
+   to fail visibly; the gateway's existing plugin loader reports that status.
 7. When ready for a later integration check, make a normal gateway request using
    the virtual key whose UUID was registered as an alias, then inspect Metronome
    Events and the draft invoice.
@@ -162,7 +152,7 @@ Model aliases and server-side fallback metadata are resolved before mapping.
 Bifrost's input count includes cached tokens; the exporter subtracts cache reads
 and writes from ordinary input tokens and emits them as separate properties.
 Prompt, response text, raw virtual keys and provider/API secrets are never part
-of an event. Dry-run logs include the customer ID and usage metadata.
+of an event.
 
 ## Prototype boundaries
 
@@ -228,15 +218,14 @@ failed to initialize returns 503. The caller must retain and retry its event.
 There is no server-side background retry after a failed external report.
 
 A successful response includes `metronome_status: "sent"` and `transaction_id`.
-Dry run returns `metronome_status: "dry_run"`; it does not contact Metronome.
 When the plugin is absent or disabled the endpoint retains its logging-only
 behavior and omits these fields. **202 without `metronome_status: "sent"` does
 not confirm Metronome delivery.** Ingest acceptance also does not prove that a
 customer, billable metric, or invoice matched; verify those in Sandbox.
 
 The Metronome plugin uses the authenticated governance VK UUID as the customer
-ingest alias, including for audio dry run. Do not use a caller header, secret VK
-value, or submitted customer field as the billing identity. Register the reporting
+ingest alias. Do not use a caller header, secret VK value, or submitted customer
+field as the billing identity. Register the reporting
 key's UUID as an alias on the intended Sandbox customer before sending live usage.
 These instructions do not change any live aliases or credentials.
 
