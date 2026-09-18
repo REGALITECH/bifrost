@@ -45,6 +45,14 @@ activation or deactivation: the default merge preserves stored configuration
 unless the file has a higher version. When migrating a previous dynamic-plugin
 configuration, remove `path` and increment `version` before restarting.
 
+Legacy `dry_run` settings are rejected, including `false` and `null`, so an
+upgrade cannot silently start sending usage. To migrate, remove `dry_run` from
+the plugin configuration, explicitly set `enabled: false` to keep delivery off
+or `enabled: true` to send usage, and increment `version` above the stored value.
+Enabled instances require an `api_key` environment reference such as
+`env.METRONOME_API_KEY`; literal keys and `vault.*` references are rejected.
+Disabled instances may omit `api_key`.
+
 For ETLA, `etla_infra_tf/stack/modules/bifrost` supplies this entry through the
 upstream chart's `bifrost.plugins.custom` list (the list also accepts builtin
 entries without a path). The API key is plaintext in AWS Secrets Manager at

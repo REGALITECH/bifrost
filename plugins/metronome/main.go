@@ -73,16 +73,19 @@ func (p *Plugin) GetName() string { return PluginName }
 func (c *Config) UnmarshalJSON(data []byte) error {
 	type plain Config
 	value := plain{}
-	// Reject old routing configuration instead of silently changing the billing
-	// identity of an existing installation. Register the VK UUID as an ingest
-	// alias on the intended Metronome customer before removing these settings.
+	// Reject removed settings instead of silently changing an existing
+	// installation's delivery behavior or billing identity.
 	input := struct {
 		*plain
+		DryRun            json.RawMessage `json:"dry_run"`
 		CustomerMapping   json.RawMessage `json:"customer_mapping"`
 		DefaultCustomerID json.RawMessage `json:"default_customer_id"`
 	}{plain: &value}
 	if err := json.Unmarshal(data, &input); err != nil {
 		return err
+	}
+	if len(input.DryRun) != 0 {
+		return fmt.Errorf("metronome dry_run is no longer supported: remove it and set enabled to false to stop delivery or true to send usage")
 	}
 	if len(input.CustomerMapping) != 0 || len(input.DefaultCustomerID) != 0 {
 		return fmt.Errorf("metronome customer_mapping and default_customer_id are no longer supported: register authenticated virtual-key UUIDs as Metronome ingest aliases and remove both settings")

@@ -42,6 +42,26 @@ func TestInitRequiresEnvironmentKey(t *testing.T) {
 	}
 }
 
+func TestConfigRejectsLegacyDryRun(t *testing.T) {
+	t.Setenv("METRONOME_TEST_KEY", "test-memory-only-key")
+	for _, value := range []string{"true", "false", "null"} {
+		t.Run(value, func(t *testing.T) {
+			data := []byte(`{"api_key":"env.METRONOME_TEST_KEY","dry_run":` + value + `}`)
+			var cfg Config
+			if err := json.Unmarshal(data, &cfg); err == nil || !strings.Contains(err.Error(), "dry_run") {
+				t.Errorf("expected legacy dry_run rejection when loading config, got %v", err)
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(data, &raw); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := (&Plugin{}).MarshalConfigForStorage(raw); err == nil || !strings.Contains(err.Error(), "dry_run") {
+				t.Errorf("expected legacy dry_run rejection when saving config, got %v", err)
+			}
+		})
+	}
+}
+
 func TestDeliverTokenAndFishAudio(t *testing.T) {
 	t.Setenv("METRONOME_TEST_KEY", "test-memory-only-key")
 	var cfg Config

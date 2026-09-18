@@ -2320,9 +2320,9 @@
                   "properties": {
                     "api_key": {
                       "type": "string",
-                      "minLength": 1,
+                      "pattern": "^env\\..+$",
                       "default": "env.METRONOME_API_KEY",
-                      "description": "Metronome API key or secret reference, e.g. env.METRONOME_API_KEY"
+                      "description": "Environment variable reference for the Metronome API key, e.g. env.METRONOME_API_KEY. Required when enabled; the variable must be nonempty in the Bifrost process. Literal keys and vault references are not supported."
                     },
                     "model_mapping": {
                       "type": "object",
@@ -2342,6 +2342,16 @@
                     }
                   },
                   "additionalProperties": false
+                }
+              },
+              "if": {
+                "properties": {
+                  "enabled": { "const": true }
+                }
+              },
+              "then": {
+                "properties": {
+                  "config": { "required": ["api_key"] }
                 }
               }
             }
