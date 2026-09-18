@@ -2,7 +2,10 @@ package handlers
 
 import (
 	"encoding/json"
+	"io"
 	"net"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/fasthttp/router"
@@ -238,9 +241,25 @@ func TestValidateFishAudioUsageRequest(t *testing.T) {
 
 const fishAudioReportBody = `{"billable_bytes":54,"audio_ms":2500,"outcome":"completed","turn_id":"turn-1","sub_id":"sub-1","model":"s2-pro","occurred_at":"2026-09-15T15:00:00+09:00"}`
 
+type metronomeUsageTransport struct {
+	t     *testing.T
+	calls int
+}
+
+func (m *metronomeUsageTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	m.calls++
+	require.Equal(m.t, "https://api.metronome.com/v1/ingest", req.URL.String())
+	require.Equal(m.t, "Bearer test-handler-key", req.Header.Get("Authorization"))
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{}"))}, nil
+}
+
 func installMetronome(t *testing.T, h *FishAudioUsageHandler) *metronome.Plugin {
 	t.Helper()
-	p, err := metronome.Init(&metronome.Config{DryRun: true}, &mockLogger{})
+	previous := http.DefaultTransport
+	http.DefaultTransport = &metronomeUsageTransport{t: t}
+	t.Cleanup(func() { http.DefaultTransport = previous })
+	t.Setenv("METRONOME_HANDLER_TEST_KEY", "test-handler-key")
+	p, err := metronome.Init(&metronome.Config{APIKey: schemas.NewSecretVar("env.METRONOME_HANDLER_TEST_KEY")}, &mockLogger{})
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, p.Cleanup()) })
 	require.NoError(t, h.config.ReloadPlugin(p))
@@ -261,13 +280,14 @@ func TestFishAudioUsageBuiltinMetronome(t *testing.T) {
 		require.Equal(t, fasthttp.StatusAccepted, ctx.Response.StatusCode(), string(ctx.Response.Body()))
 		var receipt fishAudioUsageResponse
 		require.NoError(t, json.Unmarshal(ctx.Response.Body(), &receipt))
-		require.Equal(t, "dry_run", receipt.MetronomeStatus)
+		require.Equal(t, "sent", receipt.MetronomeStatus)
 		require.NotEmpty(t, receipt.TransactionID)
 		if first.TransactionID != "" {
 			assert.Equal(t, first, receipt)
 		}
 		first = receipt
 	}
+	require.Equal(t, 2, http.DefaultTransport.(*metronomeUsageTransport).calls)
 	assert.Equal(t, []string{"logging.pre", "governance.pre", "governance.post", "logging.post", "logging.pre", "governance.pre", "governance.post", "logging.post"}, events)
 	// Reload is observed by the same handler: a closed replacement fails delivery.
 	replacement := installMetronome(t, h)
