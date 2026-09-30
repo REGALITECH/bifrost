@@ -1,10 +1,12 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -31,6 +33,95 @@ func TestShouldUseFilterDataCacheAllowsUnscopedEmptyQuery(t *testing.T) {
 	}
 }
 
+// TestParseComplexityFilters verifies complexity-specific query filters are
+// parsed independently from generic log filters.
+func TestParseComplexityFilters(t *testing.T) {
+	t.Run("parses tier and mechanism", func(t *testing.T) {
+		ctx := &fasthttp.RequestCtx{}
+		ctx.QueryArgs().Set("complexity_tiers", "SIMPLE,COMPLEX")
+		ctx.QueryArgs().Set("complexity_mechanisms", "semantic,lexical")
+		filters := &logstore.SearchFilters{}
+
+		parseComplexityFilters(ctx, filters)
+
+		if got, want := filters.ComplexityTiers, []string{"SIMPLE", "COMPLEX"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("complexity tiers = %#v, want %#v", got, want)
+		}
+		if got, want := filters.ComplexityMechanisms, []string{"semantic", "lexical"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("complexity mechanisms = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("leaves filters unchanged when parameters are absent", func(t *testing.T) {
+		filters := &logstore.SearchFilters{
+			ComplexityTiers:      []string{"MEDIUM"},
+			ComplexityMechanisms: []string{"skipped"},
+		}
+
+		parseComplexityFilters(&fasthttp.RequestCtx{}, filters)
+
+		if got, want := filters.ComplexityTiers, []string{"MEDIUM"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("complexity tiers = %#v, want %#v", got, want)
+		}
+		if got, want := filters.ComplexityMechanisms, []string{"skipped"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("complexity mechanisms = %#v, want %#v", got, want)
+		}
+	})
+}
+
+// TestParseToolCallNamesFilter verifies the tool_call_names query param is
+// parsed as a comma-separated list and left alone when absent.
+func TestParseToolCallNamesFilter(t *testing.T) {
+	t.Run("parses comma-separated names", func(t *testing.T) {
+		ctx := &fasthttp.RequestCtx{}
+		ctx.QueryArgs().Set("tool_call_names", "get_weather,search")
+		filters := &logstore.SearchFilters{}
+
+		parseToolCallNamesFilter(ctx, filters)
+
+		if got, want := filters.ToolCallNames, []string{"get_weather", "search"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("tool call names = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("leaves filters unchanged when parameter is absent", func(t *testing.T) {
+		filters := &logstore.SearchFilters{ToolCallNames: []string{"search"}}
+
+		parseToolCallNamesFilter(&fasthttp.RequestCtx{}, filters)
+
+		if got, want := filters.ToolCallNames, []string{"search"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("tool call names = %#v, want %#v", got, want)
+		}
+	})
+
+	t.Run("histogram filters honour it", func(t *testing.T) {
+		ctx := &fasthttp.RequestCtx{}
+		ctx.QueryArgs().Set("tool_call_names", "search")
+		filters := parseHistogramFilters(ctx)
+		if got, want := filters.ToolCallNames, []string{"search"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("histogram tool call names = %#v, want %#v", got, want)
+		}
+	})
+}
+
+// TestParseParentRequestIDFilter verifies the explicit parent-request filter
+// does not consume the distinct generic session_id query parameter.
+func TestParseParentRequestIDFilter(t *testing.T) {
+	ctx := &fasthttp.RequestCtx{}
+	ctx.QueryArgs().Set("parent_request_id", "parent-abc")
+	ctx.QueryArgs().Set("session_id", "session-abc")
+
+	if got, want := parseParentRequestIDFilter(ctx), "parent-abc"; got != want {
+		t.Fatalf("parent request ID = %q, want %q", got, want)
+	}
+
+	ctx = &fasthttp.RequestCtx{}
+	ctx.QueryArgs().Set("session_id", "session-abc")
+	if got := parseParentRequestIDFilter(ctx); got != "" {
+		t.Fatalf("parent request ID = %q, want empty", got)
+	}
+}
+
 // TestShouldUseFilterDataCacheRejectsSearchQuery verifies search requests are
 // request-specific and must not share the empty-query cache.
 func TestShouldUseFilterDataCacheRejectsSearchQuery(t *testing.T) {
@@ -47,6 +138,63 @@ func TestShouldUseFilterDataCacheRejectsScopedContext(t *testing.T) {
 	})
 	if shouldUseFilterDataCache(ctx, "") {
 		t.Fatal("expected scoped request to bypass filterdata cache")
+	}
+}
+
+// TestGetMCPLogByIDRedactionMapping verifies raw mappings stay hidden and only resolver-approved mappings are returned.
+func TestGetMCPLogByIDRedactionMapping(t *testing.T) {
+	SetLogger(&mockLogger{})
+	revealed := &schemas.RedactionMapsByPhase{
+		Input: map[string]string{"EMAIL-1": "revealed@example.com"},
+	}
+	tests := []struct {
+		name        string
+		resolver    *staticMCPLogRedactionResolver
+		wantMapping bool
+		wantCalls   int
+	}{
+		{name: "no resolver"},
+		{name: "authorized mapping", resolver: &staticMCPLogRedactionResolver{mapping: revealed}, wantMapping: true, wantCalls: 1},
+		{name: "resolver error", resolver: &staticMCPLogRedactionResolver{err: errors.New("decode failed")}, wantCalls: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := &dashboardLogManager{mcpLog: &logstore.MCPToolLog{
+				ID:               "mcp-1",
+				RedactionMapping: `plain:{"input":{"EMAIL-1":"private@example.com"}}`,
+			}}
+			handler := &LoggingHandler{logManager: manager}
+			if tt.resolver != nil {
+				handler.SetMCPLogRedactionMappingResolver(tt.resolver)
+			}
+			ctx := &fasthttp.RequestCtx{}
+			ctx.SetUserValue("id", "mcp-1")
+
+			handler.getMCPLogByID(ctx)
+
+			if ctx.Response.StatusCode() != fasthttp.StatusOK {
+				t.Fatalf("status = %d, want %d", ctx.Response.StatusCode(), fasthttp.StatusOK)
+			}
+			var response struct {
+				RedactionMapping *schemas.RedactionMapsByPhase `json:"redaction_mapping"`
+			}
+			if err := json.Unmarshal(ctx.Response.Body(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if bytes.Contains(ctx.Response.Body(), []byte("private@example.com")) {
+				t.Fatalf("raw persisted mapping leaked in response: %s", ctx.Response.Body())
+			}
+			if tt.wantMapping != (response.RedactionMapping != nil) {
+				t.Fatalf("redaction mapping present = %t, want %t", response.RedactionMapping != nil, tt.wantMapping)
+			}
+			if tt.wantMapping && response.RedactionMapping.Input["EMAIL-1"] != "revealed@example.com" {
+				t.Fatalf("revealed mapping = %#v", response.RedactionMapping)
+			}
+			if tt.resolver != nil && tt.resolver.calls != tt.wantCalls {
+				t.Fatalf("resolver calls = %d, want %d", tt.resolver.calls, tt.wantCalls)
+			}
+		})
 	}
 }
 
@@ -126,6 +274,7 @@ func TestFilterDataCacheIdentity_PartitionsPerCaller(t *testing.T) {
 	}
 }
 
+// TestGetDashboard verifies get dashboard.
 func TestGetDashboard(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -230,6 +379,7 @@ func TestGetDashboard(t *testing.T) {
 	}
 }
 
+// TestRecalculateLogCostsResolvesPeriodFilter verifies recalculate log costs resolves period filter.
 func TestRecalculateLogCostsResolvesPeriodFilter(t *testing.T) {
 	SetLogger(&mockLogger{})
 
@@ -267,6 +417,7 @@ func TestRecalculateLogCostsResolvesPeriodFilter(t *testing.T) {
 	}
 }
 
+// TestRecalculateLogCostsRejectsDuplicateJob verifies recalculate log costs rejects duplicate job.
 func TestRecalculateLogCostsRejectsDuplicateJob(t *testing.T) {
 	SetLogger(&mockLogger{})
 
@@ -302,6 +453,125 @@ func TestRecalculateLogCostsRejectsDuplicateJob(t *testing.T) {
 	}
 }
 
+// TestCancelRecalculateCost verifies cancel recalculate cost.
+func TestCancelRecalculateCost(t *testing.T) {
+	SetLogger(&mockLogger{})
+
+	// newHandler wires a handler over a store seeded with one recalculation job.
+	newHandler := func(job *tables.TableSidekiqJob) (*LoggingHandler, *fakeSidekiqStore) {
+		store := newFakeSidekiqStore()
+		if job != nil {
+			store.jobs[job.ID] = job
+			if !tables.IsSidekiqTerminalStatus(job.Status) {
+				store.inFlight = job
+			}
+		}
+		h := &LoggingHandler{logManager: &dashboardLogManager{}}
+		h.SetSidekiqBackend(sidekiq.New(store, &mockLogger{}, 1, ""), store)
+		return h, store
+	}
+
+	call := func(h *LoggingHandler, uri string) *fasthttp.RequestCtx {
+		var req fasthttp.Request
+		req.Header.SetMethod(fasthttp.MethodPost)
+		req.SetRequestURI(uri)
+		ctx := &fasthttp.RequestCtx{}
+		ctx.Init(&req, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345}, nil)
+		h.cancelRecalculateCost(ctx)
+		return ctx
+	}
+
+	runningJob := func() *tables.TableSidekiqJob {
+		return &tables.TableSidekiqJob{
+			ID:       "job-1",
+			Kind:     loggingplugin.CostRecalcJobKind,
+			Status:   tables.SidekiqStatusRunning,
+			Metadata: `{"total":10,"processed":4,"updated":3,"skipped":1}`,
+		}
+	}
+
+	t.Run("cancels the in-flight job when no id is given", func(t *testing.T) {
+		h, store := newHandler(runningJob())
+		ctx := call(h, "/api/logs/recalculate-cost/cancel")
+
+		if got := ctx.Response.StatusCode(); got != fasthttp.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", got, ctx.Response.Body())
+		}
+		if got := store.jobs["job-1"].Status; got != tables.SidekiqStatusCancelled {
+			t.Fatalf("job status = %q, want cancelled", got)
+		}
+		var body recalcJobStatus
+		if err := json.Unmarshal(ctx.Response.Body(), &body); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if body.Status != tables.SidekiqStatusCancelled {
+			t.Fatalf("response status = %q, want cancelled", body.Status)
+		}
+		// The counters committed before the stop must survive for the UI to report.
+		if body.Updated != 3 || body.Skipped != 1 || body.Processed != 4 {
+			t.Fatalf("partial progress lost: %+v", body)
+		}
+	})
+
+	t.Run("cancels the job named by id", func(t *testing.T) {
+		h, store := newHandler(runningJob())
+		ctx := call(h, "/api/logs/recalculate-cost/cancel?id=job-1")
+
+		if got := ctx.Response.StatusCode(); got != fasthttp.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", got, ctx.Response.Body())
+		}
+		if got := store.jobs["job-1"].Status; got != tables.SidekiqStatusCancelled {
+			t.Fatalf("job status = %q, want cancelled", got)
+		}
+	})
+
+	t.Run("an already-terminal job is returned unchanged", func(t *testing.T) {
+		done := runningJob()
+		done.Status = tables.SidekiqStatusCompleted
+		h, store := newHandler(done)
+		ctx := call(h, "/api/logs/recalculate-cost/cancel?id=job-1")
+
+		if got := ctx.Response.StatusCode(); got != fasthttp.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", got, ctx.Response.Body())
+		}
+		if got := store.jobs["job-1"].Status; got != tables.SidekiqStatusCompleted {
+			t.Fatalf("a completed job must not be rewritten, got %q", got)
+		}
+	})
+
+	t.Run("refuses to cancel a job of another kind", func(t *testing.T) {
+		other := runningJob()
+		other.Kind = "some_other_job"
+		h, store := newHandler(other)
+		ctx := call(h, "/api/logs/recalculate-cost/cancel?id=job-1")
+
+		if got := ctx.Response.StatusCode(); got != fasthttp.StatusBadRequest {
+			t.Fatalf("expected 400, got %d: %s", got, ctx.Response.Body())
+		}
+		if got := store.jobs["job-1"].Status; got != tables.SidekiqStatusRunning {
+			t.Fatalf("unrelated job must be untouched, got %q", got)
+		}
+	})
+
+	t.Run("404 when there is nothing to cancel", func(t *testing.T) {
+		h, _ := newHandler(nil)
+		ctx := call(h, "/api/logs/recalculate-cost/cancel")
+
+		if got := ctx.Response.StatusCode(); got != fasthttp.StatusNotFound {
+			t.Fatalf("expected 404, got %d: %s", got, ctx.Response.Body())
+		}
+	})
+
+	t.Run("503 when the background runner is not wired", func(t *testing.T) {
+		h := &LoggingHandler{logManager: &dashboardLogManager{}}
+		ctx := call(h, "/api/logs/recalculate-cost/cancel")
+
+		if got := ctx.Response.StatusCode(); got != fasthttp.StatusServiceUnavailable {
+			t.Fatalf("expected 503, got %d: %s", got, ctx.Response.Body())
+		}
+	})
+}
+
 // fakeSidekiqStore implements both sidekiq.Store (for the runner) and
 // handlers.SidekiqJobStore (for the endpoints), backed by an in-memory map.
 type fakeSidekiqStore struct {
@@ -311,16 +581,19 @@ type fakeSidekiqStore struct {
 	inFlight *tables.TableSidekiqJob
 }
 
+// newFakeSidekiqStore verifies new fake sidekiq store.
 func newFakeSidekiqStore() *fakeSidekiqStore {
 	return &fakeSidekiqStore{jobs: make(map[string]*tables.TableSidekiqJob)}
 }
 
+// createdCount implements the test double used by logging handler tests.
 func (s *fakeSidekiqStore) createdCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.created
 }
 
+// CreateSidekiqJob implements the test double used by logging handler tests.
 func (s *fakeSidekiqStore) CreateSidekiqJob(ctx context.Context, job *tables.TableSidekiqJob) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -330,6 +603,7 @@ func (s *fakeSidekiqStore) CreateSidekiqJob(ctx context.Context, job *tables.Tab
 	return nil
 }
 
+// GetSidekiqJob implements the test double used by logging handler tests.
 func (s *fakeSidekiqStore) GetSidekiqJob(ctx context.Context, id string) (*tables.TableSidekiqJob, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -340,6 +614,7 @@ func (s *fakeSidekiqStore) GetSidekiqJob(ctx context.Context, id string) (*table
 	return nil, nil
 }
 
+// GetInFlightSidekiqJobByKind implements the test double used by logging handler tests.
 func (s *fakeSidekiqStore) GetInFlightSidekiqJobByKind(ctx context.Context, kind string) (*tables.TableSidekiqJob, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -350,143 +625,278 @@ func (s *fakeSidekiqStore) GetInFlightSidekiqJobByKind(ctx context.Context, kind
 	return nil, nil
 }
 
+// ClaimSidekiqJob implements the test double used by logging handler tests.
 func (s *fakeSidekiqStore) ClaimSidekiqJob(ctx context.Context, id, runnerID string, staleBefore time.Time) (bool, error) {
 	return true, nil
 }
+
+// ClaimPartitionedSidekiqJob implements the test double used by logging handler tests.
 func (s *fakeSidekiqStore) ClaimPartitionedSidekiqJob(ctx context.Context, id, runnerID string, staleBefore time.Time, partitioningKey string, createdAt time.Time) (bool, error) {
 	return true, nil
 }
+
+// HeartbeatSidekiqJob implements the test double used by logging handler tests.
 func (s *fakeSidekiqStore) HeartbeatSidekiqJob(ctx context.Context, id, runnerID string) (bool, error) {
 	return true, nil
 }
+
+// UpdateSidekiqJobProgress implements the test double used by logging handler tests.
 func (s *fakeSidekiqStore) UpdateSidekiqJobProgress(ctx context.Context, id, runnerID, metadata string) error {
 	return nil
 }
+
+// CompleteSidekiqJob implements the test double used by logging handler tests.
 func (s *fakeSidekiqStore) CompleteSidekiqJob(ctx context.Context, id, runnerID, metadata string) error {
 	return nil
 }
+
+// FailSidekiqJob implements the test double used by logging handler tests.
 func (s *fakeSidekiqStore) FailSidekiqJob(ctx context.Context, id, runnerID, metadata, lastErr string) error {
 	return nil
 }
+
+// ListClaimableSidekiqJobs implements the test double used by logging handler tests.
 func (s *fakeSidekiqStore) ListClaimableSidekiqJobs(ctx context.Context, staleBefore time.Time) ([]tables.TableSidekiqJob, error) {
 	return nil, nil
 }
 
+// CancelSidekiqJob implements the test double used by logging handler tests.
+func (s *fakeSidekiqStore) CancelSidekiqJob(ctx context.Context, id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job, ok := s.jobs[id]
+	if !ok || tables.IsSidekiqTerminalStatus(job.Status) {
+		return false, nil
+	}
+	job.Status = tables.SidekiqStatusCancelled
+	if s.inFlight != nil && s.inFlight.ID == id {
+		s.inFlight = nil
+	}
+	return true, nil
+}
+
+// FinalizeCancelledSidekiqJob implements the test double used by logging handler tests.
+func (s *fakeSidekiqStore) FinalizeCancelledSidekiqJob(ctx context.Context, id, runnerID, metadata string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if job, ok := s.jobs[id]; ok && job.Status == tables.SidekiqStatusCancelled && metadata != "" {
+		job.Metadata = metadata
+	}
+	return nil
+}
+
 type dashboardLogManager struct {
-	failStats              bool
+	failStats bool
+	// statsCalls records every GetStats filter in call order, so tests that
+	// trigger more than one stats query (compare_to_previous) can assert on both
+	// windows rather than just the last one.
+	statsCalls []logstore.SearchFilters
+	// statsFunc, when set, supplies the SearchStats for each GetStats call so a
+	// test can tell the current and previous periods apart.
+	statsFunc              func(filters *logstore.SearchFilters) (*logstore.SearchStats, error)
+	projects               []loggingplugin.KeyPair
+	mcpLog                 *logstore.MCPToolLog
 	lastLLMFilters         logstore.SearchFilters
 	lastMCPFilters         logstore.MCPToolLogSearchFilters
 	lastRecalculateFilters logstore.SearchFilters
 	lastRecalculateContext chan context.Context
 }
 
+// GetLog implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetLog(ctx context.Context, id string) (*logstore.Log, error) {
 	return nil, nil
 }
+
+// Search implements the test double used by logging handler tests.
 func (m *dashboardLogManager) Search(ctx context.Context, filters *logstore.SearchFilters, pagination *logstore.PaginationOptions) (*logstore.SearchResult, error) {
-	return nil, nil
+	m.lastLLMFilters = *filters
+	return &logstore.SearchResult{}, nil
 }
+
+// GetSessionLogs implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetSessionLogs(ctx context.Context, sessionID string, pagination *logstore.PaginationOptions) (*logstore.SessionDetailResult, error) {
 	return nil, nil
 }
+
+// GetSessionSummary implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetSessionSummary(ctx context.Context, sessionID string) (*logstore.SessionSummaryResult, error) {
 	return nil, nil
 }
+
+// GetStats implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetStats(ctx context.Context, filters *logstore.SearchFilters) (*logstore.SearchStats, error) {
 	m.lastLLMFilters = *filters
+	m.statsCalls = append(m.statsCalls, *filters)
 	if m.failStats {
 		return nil, errors.New("stats failed")
 	}
+	if m.statsFunc != nil {
+		return m.statsFunc(filters)
+	}
 	return &logstore.SearchStats{}, nil
 }
+
+// GetHistogram implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.HistogramResult, error) {
 	return &logstore.HistogramResult{}, nil
 }
+
+// GetTokenHistogram implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetTokenHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.TokenHistogramResult, error) {
 	return &logstore.TokenHistogramResult{}, nil
 }
+
+// GetCostHistogram implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetCostHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.CostHistogramResult, error) {
 	return &logstore.CostHistogramResult{}, nil
 }
+
+// GetModelHistogram implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetModelHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.ModelHistogramResult, error) {
 	return &logstore.ModelHistogramResult{}, nil
 }
+
+// GetLatencyHistogram implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetLatencyHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.LatencyHistogramResult, error) {
 	return &logstore.LatencyHistogramResult{}, nil
 }
+
+// GetProviderCostHistogram implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetProviderCostHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.ProviderCostHistogramResult, error) {
 	return &logstore.ProviderCostHistogramResult{}, nil
 }
+
+// GetProviderTokenHistogram implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetProviderTokenHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.ProviderTokenHistogramResult, error) {
 	return &logstore.ProviderTokenHistogramResult{}, nil
 }
+
+// GetProviderLatencyHistogram implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetProviderLatencyHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.ProviderLatencyHistogramResult, error) {
 	return &logstore.ProviderLatencyHistogramResult{}, nil
 }
+
+// GetThroughputHistogram implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetThroughputHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.ThroughputHistogramResult, error) {
 	return &logstore.ThroughputHistogramResult{}, nil
 }
+
+// GetProviderThroughputHistogram implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetProviderThroughputHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64) (*logstore.ProviderThroughputHistogramResult, error) {
 	return &logstore.ProviderThroughputHistogramResult{}, nil
 }
+
+// GetModelRankings implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetModelRankings(ctx context.Context, filters *logstore.SearchFilters) (*logstore.ModelRankingResult, error) {
 	return &logstore.ModelRankingResult{}, nil
 }
+
+// GetDimensionRankings implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetDimensionRankings(ctx context.Context, filters *logstore.SearchFilters, dimension logstore.RankingDimension) (*logstore.DimensionRankingResult, error) {
 	return &logstore.DimensionRankingResult{Dimension: dimension}, nil
 }
+
+// GetDroppedRequests implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetDroppedRequests(ctx context.Context) int64 { return 0 }
+
+// GetAvailableModels implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetAvailableModels(ctx context.Context, limit int, query string) ([]string, error) {
 	return nil, nil
 }
+
+// GetAvailableAliases implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetAvailableAliases(ctx context.Context, limit int, query string) ([]string, error) {
 	return nil, nil
 }
+
+// GetAvailableSelectedKeys implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetAvailableSelectedKeys(ctx context.Context, limit int, query string) ([]loggingplugin.KeyPair, error) {
 	return nil, nil
 }
+
+// GetAvailableVirtualKeys implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetAvailableVirtualKeys(ctx context.Context, limit int, query string) ([]loggingplugin.KeyPair, error) {
 	return nil, nil
 }
+
+// GetAvailableRoutingRules implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetAvailableRoutingRules(ctx context.Context, limit int, query string) ([]loggingplugin.KeyPair, error) {
 	return nil, nil
 }
+
+// GetAvailableRoutingEngines implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetAvailableRoutingEngines(ctx context.Context, limit int, query string) ([]string, error) {
 	return nil, nil
 }
+
+// GetAvailableStopReasons implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetAvailableStopReasons(ctx context.Context, limit int, query string) ([]string, error) {
 	return nil, nil
 }
+
+// GetAvailableToolCallNames implements the test double used by logging handler tests.
+func (m *dashboardLogManager) GetAvailableToolCallNames(ctx context.Context, limit int, query string) ([]string, error) {
+	return nil, nil
+}
+
+// GetAvailableTeams implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetAvailableTeams(ctx context.Context, limit int, query string) ([]loggingplugin.KeyPair, error) {
 	return nil, nil
 }
+
+// GetAvailableCustomers implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetAvailableCustomers(ctx context.Context, limit int, query string) ([]loggingplugin.KeyPair, error) {
 	return nil, nil
 }
+
+// GetAvailableUsers implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetAvailableUsers(ctx context.Context, limit int, query string) ([]loggingplugin.KeyPair, error) {
 	return nil, nil
 }
+
+// GetAvailableBusinessUnits implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetAvailableBusinessUnits(ctx context.Context, limit int, query string) ([]loggingplugin.KeyPair, error) {
 	return nil, nil
 }
+
+// GetAvailableProjects implements the test double used by logging handler tests.
+func (m *dashboardLogManager) GetAvailableProjects(ctx context.Context, limit int, query string) ([]loggingplugin.KeyPair, error) {
+	return m.projects, nil
+}
+
+// GetAvailableMetadataKeys implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetAvailableMetadataKeys(ctx context.Context, limit int, query string) (map[string][]string, error) {
 	return nil, nil
 }
+
+// GetDimensionCostHistogram implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetDimensionCostHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64, dimension logstore.HistogramDimension) (*logstore.DimensionCostHistogramResult, error) {
 	return nil, nil
 }
+
+// GetDimensionTokenHistogram implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetDimensionTokenHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64, dimension logstore.HistogramDimension) (*logstore.DimensionTokenHistogramResult, error) {
 	return nil, nil
 }
+
+// GetDimensionLatencyHistogram implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetDimensionLatencyHistogram(ctx context.Context, filters *logstore.SearchFilters, bucketSizeSeconds int64, dimension logstore.HistogramDimension) (*logstore.DimensionLatencyHistogramResult, error) {
 	return nil, nil
 }
-func (m *dashboardLogManager) DeleteLog(ctx context.Context, id string) error     { return nil }
+
+// DeleteLog implements the test double used by logging handler tests.
+func (m *dashboardLogManager) DeleteLog(ctx context.Context, id string) error { return nil }
+
+// DeleteLogs implements the test double used by logging handler tests.
 func (m *dashboardLogManager) DeleteLogs(ctx context.Context, ids []string) error { return nil }
+
+// RecalculateCosts implements the test double used by logging handler tests.
 func (m *dashboardLogManager) RecalculateCosts(ctx context.Context, filters *logstore.SearchFilters, limit int) (*loggingplugin.RecalculateCostResult, error) {
 	m.lastRecalculateFilters = *filters
 	return &loggingplugin.RecalculateCostResult{}, nil
 }
+
+// RecalculateCostsWithProgress implements the test double used by logging handler tests.
 func (m *dashboardLogManager) RecalculateCostsWithProgress(ctx context.Context, filters *logstore.SearchFilters, limit int, progress func(loggingplugin.RecalculateCostProgress)) (*loggingplugin.RecalculateCostResult, error) {
 	m.lastRecalculateFilters = *filters
 	if m.lastRecalculateContext != nil {
@@ -494,39 +904,223 @@ func (m *dashboardLogManager) RecalculateCostsWithProgress(ctx context.Context, 
 	}
 	return nil, nil
 }
+
+// BuildCostRecalcJobMeta implements the test double used by logging handler tests.
 func (m *dashboardLogManager) BuildCostRecalcJobMeta(ctx context.Context, filters logstore.SearchFilters, missingCostOnly bool) (string, error) {
 	m.lastRecalculateFilters = filters
 	return "{}", nil
 }
+
+// RunCostRecalcJob implements the test double used by logging handler tests.
 func (m *dashboardLogManager) RunCostRecalcJob(ctx context.Context, metaJSON string, checkpoint func(string) error) (string, error) {
 	return metaJSON, nil
 }
+
+// GetMCPToolLog implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetMCPToolLog(ctx context.Context, id string) (*logstore.MCPToolLog, error) {
-	return nil, nil
+	if m.mcpLog == nil {
+		return nil, nil
+	}
+	entry := *m.mcpLog
+	return &entry, nil
 }
+
+// SearchMCPToolLogs implements the test double used by logging handler tests.
 func (m *dashboardLogManager) SearchMCPToolLogs(ctx context.Context, filters *logstore.MCPToolLogSearchFilters, pagination *logstore.PaginationOptions) (*logstore.MCPToolLogSearchResult, error) {
 	return nil, nil
 }
+
+// GetMCPToolLogStats implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetMCPToolLogStats(ctx context.Context, filters *logstore.MCPToolLogSearchFilters) (*logstore.MCPToolLogStats, error) {
 	return nil, nil
 }
+
+// GetAvailableToolNames implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetAvailableToolNames(ctx context.Context, limit int, query string) ([]string, error) {
 	return nil, nil
 }
+
+// GetAvailableServerLabels implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetAvailableServerLabels(ctx context.Context, limit int, query string) ([]string, error) {
 	return nil, nil
 }
+
+// GetAvailableMCPVirtualKeys implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetAvailableMCPVirtualKeys(ctx context.Context, limit int, query string) ([]loggingplugin.KeyPair, error) {
 	return nil, nil
 }
+
+// GetMCPHistogram implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetMCPHistogram(ctx context.Context, filters logstore.MCPToolLogSearchFilters, bucketSizeSeconds int64) (*logstore.MCPHistogramResult, error) {
 	m.lastMCPFilters = filters
 	return &logstore.MCPHistogramResult{}, nil
 }
+
+// GetMCPCostHistogram implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetMCPCostHistogram(ctx context.Context, filters logstore.MCPToolLogSearchFilters, bucketSizeSeconds int64) (*logstore.MCPCostHistogramResult, error) {
 	return &logstore.MCPCostHistogramResult{}, nil
 }
+
+// GetMCPTopTools implements the test double used by logging handler tests.
 func (m *dashboardLogManager) GetMCPTopTools(ctx context.Context, filters logstore.MCPToolLogSearchFilters, limit int) (*logstore.MCPTopToolsResult, error) {
 	return &logstore.MCPTopToolsResult{}, nil
 }
+
+// DeleteMCPToolLogs implements the test double used by logging handler tests.
 func (m *dashboardLogManager) DeleteMCPToolLogs(ctx context.Context, ids []string) error { return nil }
+
+// staticMCPLogRedactionResolver records calls and returns a configured reveal result.
+type staticMCPLogRedactionResolver struct {
+	mapping *schemas.RedactionMapsByPhase
+	err     error
+	calls   int
+}
+
+// ResolveMCPLogRedactionMapping returns the configured test result.
+func (r *staticMCPLogRedactionResolver) ResolveMCPLogRedactionMapping(_ *fasthttp.RequestCtx, _ *logstore.MCPToolLog) (*schemas.RedactionMapsByPhase, error) {
+	r.calls++
+	return r.mapping, r.err
+}
+
+// CreateUserAgentMapping implements the test double used by logging handler tests.
+func (m *dashboardLogManager) CreateUserAgentMapping(ctx context.Context, mapping *logstore.UserAgentMapping) (*logstore.UserAgentMapping, error) {
+	return nil, nil
+}
+
+// DeleteUserAgentMapping implements the test double used by logging handler tests.
+func (m *dashboardLogManager) DeleteUserAgentMapping(ctx context.Context, id string) error {
+	return nil
+}
+
+// UpdateUserAgentMapping implements the test double used by logging handler tests.
+func (m *dashboardLogManager) UpdateUserAgentMapping(ctx context.Context, id string, mapping *logstore.UserAgentMapping) (*logstore.UserAgentMapping, error) {
+	return nil, nil
+}
+
+// ListUserAgentMappings implements the test double used by logging handler tests.
+func (m *dashboardLogManager) ListUserAgentMappings(ctx context.Context) ([]logstore.UserAgentMapping, error) {
+	return nil, nil
+}
+
+// GetAvailableUserAgents implements the test double used by logging handler tests.
+func (m *dashboardLogManager) GetAvailableUserAgents(ctx context.Context, _ int, _ string) ([]string, error) {
+	return nil, nil
+}
+
+// GetAvailableApps implements the test double used by logging handler tests.
+func (m *dashboardLogManager) GetAvailableApps(ctx context.Context, _ int, _ string) ([]string, error) {
+	return nil, nil
+}
+
+// GetAvailableMCPApps implements the test double used by logging handler tests.
+func (m *dashboardLogManager) GetAvailableMCPApps(ctx context.Context, _ int, _ string) ([]string, error) {
+	return nil, nil
+}
+
+// GetAvailableMCPUserAgents implements the test double used by logging handler tests.
+func (m *dashboardLogManager) GetAvailableMCPUserAgents(ctx context.Context, _ int, _ string) ([]string, error) {
+	return nil, nil
+}
+
+// noRedactedKeys is the redaction lookup for a listing that names no keys, which is what an empty
+// search result produces.
+type noRedactedKeys struct{}
+
+// GetAllRedactedKeys implements the test double used by logging handler tests.
+func (noRedactedKeys) GetAllRedactedKeys(ctx context.Context, ids []string) []schemas.Key { return nil }
+
+// GetAllRedactedVirtualKeys implements the test double used by logging handler tests.
+func (noRedactedKeys) GetAllRedactedVirtualKeys(ctx context.Context, ids []string) []tables.TableVirtualKey {
+	return nil
+}
+
+// GetAllRedactedRoutingRules implements the test double used by logging handler tests.
+func (noRedactedKeys) GetAllRedactedRoutingRules(ctx context.Context, ids []string) []tables.TableRoutingRule {
+	return nil
+}
+
+// TestProjectFilterReachesEveryLogQuery pins that project_ids narrows each route that reads logs:
+// the listing, the stats and every histogram, not just one of them. A filter that one route
+// drops returns another project's traffic in a report that claims to be this one's.
+func TestProjectFilterReachesEveryLogQuery(t *testing.T) {
+	SetLogger(&mockLogger{})
+	routes := []struct {
+		name string
+		uri  string
+		call func(h *LoggingHandler, ctx *fasthttp.RequestCtx)
+	}{
+		{"list", "/api/logs?project_ids=proj-a,proj-b", (*LoggingHandler).getLogs},
+		{"stats", "/api/logs/stats?project_ids=proj-a,proj-b", (*LoggingHandler).getLogsStats},
+		{"histograms", "/api/logs/dashboard?project_ids=proj-a,proj-b", (*LoggingHandler).getDashboard},
+	}
+	for _, route := range routes {
+		t.Run(route.name, func(t *testing.T) {
+			mgr := &dashboardLogManager{}
+			h := &LoggingHandler{logManager: mgr, redactedKeysManager: noRedactedKeys{}}
+			var req fasthttp.Request
+			req.SetRequestURI(route.uri)
+			ctx := &fasthttp.RequestCtx{}
+			ctx.Init(&req, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345}, nil)
+
+			route.call(h, ctx)
+
+			if got := ctx.Response.StatusCode(); got != fasthttp.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", got, ctx.Response.Body())
+			}
+			if got := mgr.lastLLMFilters.ProjectIDs; len(got) != 2 || got[0] != "proj-a" || got[1] != "proj-b" {
+				t.Fatalf("expected the project filter to reach the store, got %#v", got)
+			}
+		})
+	}
+}
+
+// TestFilterDataListsProjects pins that the filter dropdowns can offer projects: the dimension is
+// known, served from the log manager, and answered under its own key.
+func TestFilterDataListsProjects(t *testing.T) {
+	SetLogger(&mockLogger{})
+	mgr := &dashboardLogManager{projects: []loggingplugin.KeyPair{{ID: "proj-a", Name: "Atlas"}}}
+	h := &LoggingHandler{logManager: mgr}
+	var req fasthttp.Request
+	// A search query bypasses the response cache, which a bare handler does not carry.
+	req.SetRequestURI("/api/logs/filterdata?dimensions=projects&q=at")
+	ctx := &fasthttp.RequestCtx{}
+	ctx.Init(&req, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345}, nil)
+
+	h.getAvailableFilterData(ctx)
+
+	if got := ctx.Response.StatusCode(); got != fasthttp.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", got, ctx.Response.Body())
+	}
+	var payload struct {
+		Projects []loggingplugin.KeyPair `json:"projects"`
+	}
+	if err := json.Unmarshal(ctx.Response.Body(), &payload); err != nil {
+		t.Fatalf("decode filterdata: %v", err)
+	}
+	if len(payload.Projects) != 1 || payload.Projects[0].ID != "proj-a" || payload.Projects[0].Name != "Atlas" {
+		t.Fatalf("expected the project pair under \"projects\", got %s", ctx.Response.Body())
+	}
+}
+
+// TestMCPAttributionFilterParsing keeps detail-link filters identical across list and analytics endpoints.
+func TestMCPAttributionFilterParsing(t *testing.T) {
+	var ctx fasthttp.RequestCtx
+	ctx.Request.SetRequestURI("/api/mcp-logs?user_ids=u1,u2&team_ids=t1&customer_ids=c1&business_unit_ids=b1&project_ids=p1&device_ids=d1")
+	list, _, err := parseMCPFiltersAndPagination(&ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := parseMCPFilters(&ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	histogram, err := parseMCPHistogramFilters(&ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, filters := range []*logstore.MCPToolLogSearchFilters{list, stats, histogram} {
+		if !reflect.DeepEqual(filters.UserIDs, []string{"u1", "u2"}) || !reflect.DeepEqual(filters.TeamIDs, []string{"t1"}) || !reflect.DeepEqual(filters.CustomerIDs, []string{"c1"}) || !reflect.DeepEqual(filters.BusinessUnitIDs, []string{"b1"}) || !reflect.DeepEqual(filters.ProjectIDs, []string{"p1"}) || !reflect.DeepEqual(filters.DeviceIDs, []string{"d1"}) {
+			t.Fatalf("lost attribution filters: %+v", filters)
+		}
+	}
+}

@@ -1,6 +1,7 @@
 package fishaudio
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -87,11 +88,14 @@ func (provider *FishAudioProvider) buildWSHeaders(key schemas.Key, model string)
 
 // dial opens the tts-live WebSocket, mapping handshake failures to the same
 // error shapes the rest of the provider uses (the upstream status code is
-// preserved, so a 429 maps to RESOURCE_EXHAUSTED downstream).
-func (provider *FishAudioProvider) dial(url string, headers http.Header) (*ws.Conn, *schemas.BifrostError) {
+// preserved, so a 429 maps to RESOURCE_EXHAUSTED downstream). The handshake
+// counts as upstream latency on ctx.
+func (provider *FishAudioProvider) dial(ctx context.Context, url string, headers http.Header) (*ws.Conn, *schemas.BifrostError) {
 	dialer := ws.Dialer{HandshakeTimeout: provider.requestTimeout()}
 
+	dialStart := time.Now()
 	conn, resp, err := dialer.Dial(url, headers)
+	schemas.AddUpstreamLatency(ctx, time.Since(dialStart))
 	if err != nil {
 		if resp != nil {
 			status := resp.StatusCode
@@ -113,8 +117,11 @@ func (provider *FishAudioProvider) dial(url string, headers http.Header) (*ws.Co
 // runSynthesis sends Start+Text+Stop on an already-open connection and invokes
 // onAudio for every audio frame until Fish replies finish(stop). It does NOT
 // open or close the connection — the caller owns its lifecycle. readIdleTimeout
-// bounds the wait for each frame (0 disables it).
+// bounds the wait for each frame (0 disables it). Time blocked on the socket
+// (each write and frame read) counts as upstream latency on ctx; onAudio (the
+// stream's post-hooks) is Bifrost's own time and is left out.
 func runSynthesis(
+	ctx context.Context,
 	conn *ws.Conn,
 	request *FishAudioTTSRequest,
 	text string,
@@ -122,13 +129,13 @@ func runSynthesis(
 	readIdleTimeout time.Duration,
 	onAudio func([]byte) *schemas.BifrostError,
 ) *schemas.BifrostError {
-	if err := writeMsgpack(conn, FishAudioStartEvent{Event: fishEventStart, Request: *request}, writeTimeout); err != nil {
+	if err := writeMsgpack(ctx, conn, FishAudioStartEvent{Event: fishEventStart, Request: *request}, writeTimeout); err != nil {
 		return providerUtils.NewBifrostOperationError("failed to send fish audio start event", err)
 	}
-	if err := writeMsgpack(conn, FishAudioTextEvent{Event: fishEventText, Text: text}, writeTimeout); err != nil {
+	if err := writeMsgpack(ctx, conn, FishAudioTextEvent{Event: fishEventText, Text: text}, writeTimeout); err != nil {
 		return providerUtils.NewBifrostOperationError("failed to send fish audio text event", err)
 	}
-	if err := writeMsgpack(conn, FishAudioControlEvent{Event: fishEventStop}, writeTimeout); err != nil {
+	if err := writeMsgpack(ctx, conn, FishAudioControlEvent{Event: fishEventStop}, writeTimeout); err != nil {
 		return providerUtils.NewBifrostOperationError("failed to send fish audio stop event", err)
 	}
 
@@ -136,7 +143,9 @@ func runSynthesis(
 		if readIdleTimeout > 0 {
 			_ = conn.SetReadDeadline(time.Now().Add(readIdleTimeout))
 		}
+		readStart := time.Now()
 		msgType, data, err := conn.ReadMessage()
+		schemas.AddUpstreamLatency(ctx, time.Since(readStart))
 		if err != nil {
 			return providerUtils.NewBifrostOperationError("fish audio websocket read failed", err)
 		}
@@ -177,8 +186,9 @@ func runSynthesis(
 	}
 }
 
-// writeMsgpack encodes v as MessagePack and writes it as a binary frame.
-func writeMsgpack(conn *ws.Conn, v any, timeout time.Duration) error {
+// writeMsgpack encodes v as MessagePack and writes it as a binary frame. The
+// write counts as upstream latency on ctx.
+func writeMsgpack(ctx context.Context, conn *ws.Conn, v any, timeout time.Duration) error {
 	payload, err := msgpack.Marshal(v)
 	if err != nil {
 		return err
@@ -186,7 +196,10 @@ func writeMsgpack(conn *ws.Conn, v any, timeout time.Duration) error {
 	if timeout > 0 {
 		_ = conn.SetWriteDeadline(time.Now().Add(timeout))
 	}
-	return conn.WriteMessage(ws.BinaryMessage, payload)
+	writeStart := time.Now()
+	err = conn.WriteMessage(ws.BinaryMessage, payload)
+	schemas.AddUpstreamLatency(ctx, time.Since(writeStart))
+	return err
 }
 
 // # ERROR HELPERS

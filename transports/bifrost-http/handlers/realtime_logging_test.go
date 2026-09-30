@@ -10,6 +10,134 @@ import (
 	bfws "github.com/maximhq/bifrost/transports/bifrost-http/websocket"
 )
 
+func TestRealtimeTurnFinalEventUsesTranscriptionCompletionOnlyForTranscriptionSessions(t *testing.T) {
+	t.Parallel()
+
+	provider := &openai.OpenAIProvider{}
+	if got := realtimeTurnFinalEvent(provider, false); got != schemas.RTEventResponseDone {
+		t.Fatalf("normal final event = %q, want %q", got, schemas.RTEventResponseDone)
+	}
+	if got := realtimeTurnFinalEvent(provider, true); got != schemas.RTEventInputAudioTransCompleted {
+		t.Fatalf("transcription final event = %q, want %q", got, schemas.RTEventInputAudioTransCompleted)
+	}
+}
+
+func TestRealtimeTurnCompletionContentModelsTranscriptAsOutputOnlyForTranscriptionSessions(t *testing.T) {
+	t.Parallel()
+
+	event := &schemas.BifrostRealtimeEvent{
+		Type: schemas.RTEventInputAudioTransCompleted,
+		ExtraParams: map[string]json.RawMessage{
+			"item_id":    json.RawMessage(`"item_123"`),
+			"transcript": json.RawMessage(`"spoken user turn"`),
+		},
+	}
+
+	transcriptionSession := bfws.NewSession(nil)
+	inputItemID, inputSummary, output := realtimeTurnCompletionContent(transcriptionSession, event, true)
+	if inputItemID != "" || inputSummary != "" || output != "spoken user turn" {
+		t.Fatalf("transcription completion = (%q, %q, %q), want (empty, empty, transcript)", inputItemID, inputSummary, output)
+	}
+
+	normalSession := bfws.NewSession(nil)
+	normalSession.AppendRealtimeOutputText("assistant response")
+	inputItemID, inputSummary, output = realtimeTurnCompletionContent(normalSession, event, false)
+	if inputItemID != "item_123" || inputSummary != "spoken user turn" || output != "assistant response" {
+		t.Fatalf("normal completion = (%q, %q, %q), want input transcript and assistant output", inputItemID, inputSummary, output)
+	}
+}
+
+func TestBuildRealtimeTurnPostResponseModelsTranscriptionAsOutput(t *testing.T) {
+	t.Parallel()
+
+	rawResponse := []byte(`{"type":"conversation.item.input_audio_transcription.completed","transcript":"spoken user turn","usage":{"total_tokens":11}}`)
+	resp := buildRealtimeTurnPostResponse(&openai.OpenAIProvider{}, schemas.OpenAI, "gpt-4o-transcribe", `{"type":"input_audio_buffer.commit"}`, rawResponse, "spoken user turn", 123, true)
+	if resp == nil || resp.ResponsesResponse == nil || len(resp.ResponsesResponse.Output) != 1 {
+		t.Fatalf("response = %#v, want one transcription output", resp)
+	}
+	if resp.ResponsesResponse.ExtraFields.RequestType != schemas.RealtimeRequest {
+		t.Fatalf("request type = %q, want realtime", resp.ResponsesResponse.ExtraFields.RequestType)
+	}
+	if resp.ResponsesResponse.ExtraFields.PricingRequestType != schemas.TranscriptionRequest {
+		t.Fatalf("pricing request type = %q, want transcription", resp.ResponsesResponse.ExtraFields.PricingRequestType)
+	}
+	output := resp.ResponsesResponse.Output[0]
+	if output.Content == nil || output.Content.ContentStr == nil || *output.Content.ContentStr != "spoken user turn" {
+		t.Fatalf("output content = %#v, want completed transcript", output.Content)
+	}
+}
+
+func TestBuildRealtimeTurnPreRequestIncludesResponseCreateContent(t *testing.T) {
+	t.Parallel()
+
+	event := &schemas.BifrostRealtimeEvent{
+		Type: schemas.RTEventResponseCreate,
+		ExtraParams: map[string]json.RawMessage{
+			"response": json.RawMessage(`{
+				"instructions":"one line on war in english",
+				"input":[{"type":"message","role":"user","content":"inline input"}],
+				"tools":[{"type":"function","name":"lookup","description":"look something up","parameters":{"type":"object"}}]
+			}`),
+		},
+	}
+
+	req := buildRealtimeTurnPreRequest(schemas.OpenAI, "gpt-realtime", nil, nil, event)
+	if req.ResponsesRequest == nil || req.ResponsesRequest.Params == nil {
+		t.Fatal("expected response.create parameters in realtime pre-hook request")
+	}
+	instructions := req.ResponsesRequest.Params.Instructions
+	if instructions == nil || *instructions != "one line on war in english" {
+		t.Fatalf("unexpected instructions: %#v", instructions)
+	}
+	if len(req.ResponsesRequest.Input) != 1 {
+		t.Fatalf("input length = %d, want 1", len(req.ResponsesRequest.Input))
+	}
+	if len(req.ResponsesRequest.Params.Tools) != 1 || req.ResponsesRequest.Params.Tools[0].Name == nil || *req.ResponsesRequest.Params.Tools[0].Name != "lookup" {
+		t.Fatalf("unexpected tools: %#v", req.ResponsesRequest.Params.Tools)
+	}
+}
+
+func TestBuildRealtimeTurnPreRequestCombinesConversationAndResponseInput(t *testing.T) {
+	t.Parallel()
+
+	event := &schemas.BifrostRealtimeEvent{
+		Type: schemas.RTEventResponseCreate,
+		ExtraParams: map[string]json.RawMessage{
+			"response": json.RawMessage(`{"input":[{"type":"message","role":"user","content":"inline input"}]}`),
+		},
+	}
+	turnInputs := []bfws.RealtimeTurnInput{{Role: string(schemas.ChatMessageRoleUser), Summary: "conversation input"}}
+
+	req := buildRealtimeTurnPreRequest(schemas.OpenAI, "gpt-realtime", turnInputs, nil, event)
+	if len(req.ResponsesRequest.Input) != 2 {
+		t.Fatalf("input length = %d, want 2", len(req.ResponsesRequest.Input))
+	}
+}
+
+// TestBuildRealtimeTurnPreRequestPreservesEmptyResponseTools verifies an explicit empty tool list overrides session tools.
+func TestBuildRealtimeTurnPreRequestPreservesEmptyResponseTools(t *testing.T) {
+	t.Parallel()
+
+	event := &schemas.BifrostRealtimeEvent{
+		Type: schemas.RTEventResponseCreate,
+		ExtraParams: map[string]json.RawMessage{
+			"response": json.RawMessage(`{"tools":[]}`),
+		},
+	}
+	sessionTools := json.RawMessage(`[{"type":"function","name":"lookup","parameters":{"type":"object"}}]`)
+
+	req := buildRealtimeTurnPreRequest(schemas.OpenAI, "gpt-realtime", nil, sessionTools, event)
+	if req.ResponsesRequest == nil || req.ResponsesRequest.Params == nil {
+		t.Fatal("expected explicit empty response tools to preserve response parameters")
+	}
+	if req.ResponsesRequest.Params.Tools == nil {
+		t.Fatal("expected explicit empty response tools to remain non-nil")
+	}
+	if len(req.ResponsesRequest.Params.Tools) != 0 {
+		t.Fatalf("tools = %#v, want explicit empty list", req.ResponsesRequest.Params.Tools)
+	}
+}
+
 func TestShouldAccumulateRealtimeOutput(t *testing.T) {
 	provider := &openai.OpenAIProvider{}
 	if !provider.ShouldAccumulateRealtimeOutput(schemas.RTEventResponseTextDelta) {
@@ -311,9 +439,12 @@ func TestBuildRealtimeTurnPostResponseUsesFullResponseDonePayload(t *testing.T) 
 		}
 	}`)
 
-	resp := buildRealtimeTurnPostResponse(&openai.OpenAIProvider{}, schemas.OpenAI, "gpt-4o-realtime-preview-2025-06-03", rawRequest, rawResponse, "", 4321)
+	resp := buildRealtimeTurnPostResponse(&openai.OpenAIProvider{}, schemas.OpenAI, "gpt-4o-realtime-preview-2025-06-03", rawRequest, rawResponse, "", 4321, false)
 	if resp == nil || resp.ResponsesResponse == nil {
 		t.Fatal("expected realtime post response to be built")
+	}
+	if resp.ResponsesResponse.ExtraFields.PricingRequestType != "" {
+		t.Fatalf("PricingRequestType = %q, want empty for normal realtime", resp.ResponsesResponse.ExtraFields.PricingRequestType)
 	}
 	if resp.ResponsesResponse.ExtraFields.Latency != 4321 {
 		t.Fatalf("Latency = %d, want %d", resp.ResponsesResponse.ExtraFields.Latency, 4321)
@@ -356,7 +487,7 @@ func TestBuildRealtimeTurnPostResponseMergesTextAndToolCalls(t *testing.T) {
 		}
 	}`)
 
-	resp := buildRealtimeTurnPostResponse(&openai.OpenAIProvider{}, schemas.OpenAI, "gpt-realtime", "", rawResponse, "", 123)
+	resp := buildRealtimeTurnPostResponse(&openai.OpenAIProvider{}, schemas.OpenAI, "gpt-realtime", "", rawResponse, "", 123, false)
 	if resp == nil || resp.ResponsesResponse == nil {
 		t.Fatal("expected realtime post response")
 	}

@@ -3,12 +3,29 @@
 roles:
   get:
     operationId: listRoles
+    x-mint:
+      metadata:
+        tag: Enterprise
+      content: |
+        <Note>
+          This endpoint is available in [Bifrost Enterprise](https://www.getmaxim.ai/bifrost/enterprise) only.
+        </Note>
+
+        **Required Permissions**
+
+        | Permission | Granted via |
+        | --- | --- |
+        | `RBAC:View` | RBAC role or API key scope |
+
+        [How permissions work](/api/procuring-api-keys#required-permissions)
     summary: List roles
-    description: Returns all roles visible to the caller, scoped by data access control.
+    description: |
+      Returns all roles visible to the caller, scoped by data access control.
     tags:
       - RBAC
     security:
       - ManagementBearerAuth: []
+      - BasicAuth: []
     responses:
       '200':
         description: Successful response
@@ -21,6 +38,21 @@ roles:
 
   post:
     operationId: createRole
+    x-mint:
+      metadata:
+        tag: Enterprise
+      content: |
+        <Note>
+          This endpoint is available in [Bifrost Enterprise](https://www.getmaxim.ai/bifrost/enterprise) only.
+        </Note>
+
+        **Required Permissions**
+
+        | Permission | Granted via |
+        | --- | --- |
+        | `RBAC:Create` | RBAC role or API key scope |
+
+        [How permissions work](/api/procuring-api-keys#required-permissions)
     summary: Create role
     description: |
       Creates a custom role with the specified data access control scope.
@@ -35,6 +67,7 @@ roles:
             $ref: '../../schemas/management/rbac.yaml#/CreateRoleRequest'
     security:
       - ManagementBearerAuth: []
+      - BasicAuth: []
     responses:
       '200':
         description: Role created
@@ -50,17 +83,33 @@ roles:
 roles-by-id:
   get:
     operationId: getRole
+    x-mint:
+      metadata:
+        tag: Enterprise
+      content: |
+        <Note>
+          This endpoint is available in [Bifrost Enterprise](https://www.getmaxim.ai/bifrost/enterprise) only.
+        </Note>
+
+        **Required Permissions**
+
+        | Permission | Granted via |
+        | --- | --- |
+        | `RBAC:View` | RBAC role or API key scope |
+
+        [How permissions work](/api/procuring-api-keys#required-permissions)
     summary: Get role by ID
     tags:
       - RBAC
     parameters:
-      - name: id
+      - name: role_id
         in: path
         required: true
         schema:
           type: integer
     security:
       - ManagementBearerAuth: []
+      - BasicAuth: []
     responses:
       '200':
         description: Successful response
@@ -75,6 +124,21 @@ roles-by-id:
 
   put:
     operationId: updateRole
+    x-mint:
+      metadata:
+        tag: Enterprise
+      content: |
+        <Note>
+          This endpoint is available in [Bifrost Enterprise](https://www.getmaxim.ai/bifrost/enterprise) only.
+        </Note>
+
+        **Required Permissions**
+
+        | Permission | Granted via |
+        | --- | --- |
+        | `RBAC:Update` | RBAC role or API key scope |
+
+        [How permissions work](/api/procuring-api-keys#required-permissions)
     summary: Update role
     description: |
       Partial update. Omitted fields preserve the current value.
@@ -82,7 +146,7 @@ roles-by-id:
     tags:
       - RBAC
     parameters:
-      - name: id
+      - name: role_id
         in: path
         required: true
         schema:
@@ -95,6 +159,7 @@ roles-by-id:
             $ref: '../../schemas/management/rbac.yaml#/UpdateRoleRequest'
     security:
       - ManagementBearerAuth: []
+      - BasicAuth: []
     responses:
       '200':
         description: Role updated
@@ -111,19 +176,35 @@ roles-by-id:
 
   delete:
     operationId: deleteRole
+    x-mint:
+      metadata:
+        tag: Enterprise
+      content: |
+        <Note>
+          This endpoint is available in [Bifrost Enterprise](https://www.getmaxim.ai/bifrost/enterprise) only.
+        </Note>
+
+        **Required Permissions**
+
+        | Permission | Granted via |
+        | --- | --- |
+        | `RBAC:Delete` | RBAC role or API key scope |
+
+        [How permissions work](/api/procuring-api-keys#required-permissions)
     summary: Delete role
     description: |
       Deletes a custom role. Built-in system roles cannot be deleted and return 403.
     tags:
       - RBAC
     parameters:
-      - name: id
+      - name: role_id
         in: path
         required: true
         schema:
           type: integer
     security:
       - ManagementBearerAuth: []
+      - BasicAuth: []
     responses:
       '200':
         description: Role deleted
@@ -149,17 +230,33 @@ roles-by-id:
 roles-permissions:
   get:
     operationId: getRolePermissions
+    x-mint:
+      metadata:
+        tag: Enterprise
+      content: |
+        <Note>
+          This endpoint is available in [Bifrost Enterprise](https://www.getmaxim.ai/bifrost/enterprise) only.
+        </Note>
+
+        **Required Permissions**
+
+        | Permission | Granted via |
+        | --- | --- |
+        | `RBAC:View` | RBAC role or API key scope |
+
+        [How permissions work](/api/procuring-api-keys#required-permissions)
     summary: List permissions assigned to a role
     tags:
       - RBAC
     parameters:
-      - name: id
+      - name: role_id
         in: path
         required: true
         schema:
           type: integer
     security:
       - ManagementBearerAuth: []
+      - BasicAuth: []
     responses:
       '200':
         description: Successful response
@@ -174,6 +271,21 @@ roles-permissions:
 
   put:
     operationId: updateRolePermissions
+    x-mint:
+      metadata:
+        tag: Enterprise
+      content: |
+        <Note>
+          This endpoint is available in [Bifrost Enterprise](https://www.getmaxim.ai/bifrost/enterprise) only.
+        </Note>
+
+        **Required Permissions**
+
+        | Permission | Granted via |
+        | --- | --- |
+        | `RBAC:Update` | RBAC role or API key scope |
+
+        [How permissions work](/api/procuring-api-keys#required-permissions)
     summary: Replace the permission set on a role
     description: |
       Replaces the permission set assigned to the role.
@@ -181,7 +293,7 @@ roles-permissions:
     tags:
       - RBAC
     parameters:
-      - name: id
+      - name: role_id
         in: path
         required: true
         schema:
@@ -194,6 +306,7 @@ roles-permissions:
             $ref: '../../schemas/management/rbac.yaml#/UpdateRolePermissionsRequest'
     security:
       - ManagementBearerAuth: []
+      - BasicAuth: []
     responses:
       '200':
         description: Permissions updated
@@ -211,12 +324,29 @@ roles-permissions:
 resources:
   get:
     operationId: listResources
+    x-mint:
+      metadata:
+        tag: Enterprise
+      content: |
+        <Note>
+          This endpoint is available in [Bifrost Enterprise](https://www.getmaxim.ai/bifrost/enterprise) only.
+        </Note>
+
+        **Required Permissions**
+
+        | Permission | Granted via |
+        | --- | --- |
+        | `Settings:View` | RBAC role or API key scope |
+
+        [How permissions work](/api/procuring-api-keys#required-permissions)
     summary: List RBAC resources
-    description: Returns the set of resource names that permissions can target.
+    description: |
+      Returns the set of resource names that permissions can target.
     tags:
       - RBAC
     security:
       - ManagementBearerAuth: []
+      - BasicAuth: []
     responses:
       '200':
         description: Successful response
@@ -230,12 +360,29 @@ resources:
 operations:
   get:
     operationId: listOperations
+    x-mint:
+      metadata:
+        tag: Enterprise
+      content: |
+        <Note>
+          This endpoint is available in [Bifrost Enterprise](https://www.getmaxim.ai/bifrost/enterprise) only.
+        </Note>
+
+        **Required Permissions**
+
+        | Permission | Granted via |
+        | --- | --- |
+        | `Settings:View` | RBAC role or API key scope |
+
+        [How permissions work](/api/procuring-api-keys#required-permissions)
     summary: List RBAC operations
-    description: Returns the set of operation names that permissions can grant.
+    description: |
+      Returns the set of operation names that permissions can grant.
     tags:
       - RBAC
     security:
       - ManagementBearerAuth: []
+      - BasicAuth: []
     responses:
       '200':
         description: Successful response
@@ -249,12 +396,29 @@ operations:
 permissions:
   get:
     operationId: listPermissions
+    x-mint:
+      metadata:
+        tag: Enterprise
+      content: |
+        <Note>
+          This endpoint is available in [Bifrost Enterprise](https://www.getmaxim.ai/bifrost/enterprise) only.
+        </Note>
+
+        **Required Permissions**
+
+        | Permission | Granted via |
+        | --- | --- |
+        | `Settings:View` | RBAC role or API key scope |
+
+        [How permissions work](/api/procuring-api-keys#required-permissions)
     summary: List all RBAC permissions
-    description: Returns every (resource, operation) pair that can be granted to a role.
+    description: |
+      Returns every (resource, operation) pair that can be granted to a role.
     tags:
       - RBAC
     security:
       - ManagementBearerAuth: []
+      - BasicAuth: []
     responses:
       '200':
         description: Successful response
@@ -262,41 +426,5 @@ permissions:
           application/json:
             schema:
               $ref: '../../schemas/management/rbac.yaml#/PermissionsListResponse'
-      '500':
-        $ref: '../../openapi.yaml#/components/responses/InternalError'
-
-users-assign-role:
-  put:
-    operationId: assignUserRole
-    summary: Assign a role to a user
-    description: |
-      Assigns a role to a user, including the role's data access scope.
-      Triggers a per-user governance reload so the new scope takes effect on the next request.
-    tags:
-      - RBAC
-    parameters:
-      - name: id
-        in: path
-        required: true
-        description: User ID.
-        schema:
-          type: string
-    requestBody:
-      required: true
-      content:
-        application/json:
-          schema:
-            $ref: '../../schemas/management/rbac.yaml#/AssignUserRoleRequest'
-    responses:
-      '200':
-        description: Role assigned
-        content:
-          application/json:
-            schema:
-              $ref: '../../schemas/management/rbac.yaml#/MessageResponse'
-      '400':
-        $ref: '../../openapi.yaml#/components/responses/BadRequest'
-      '404':
-        description: Role not found
       '500':
         $ref: '../../openapi.yaml#/components/responses/InternalError'

@@ -402,8 +402,10 @@ func (cm *ChatMessage) ToResponsesMessages() []ResponsesMessage {
 		am := cm.ChatAssistantMessage
 		if len(am.ReasoningDetails) > 0 {
 			var contentBlocks []ResponsesMessageContentBlock
-			var summaries []ResponsesReasoningSummary
 			var encryptedContent *string
+			// Non-nil: the Responses schema requires summary to be an array, and a nil
+			// slice marshals to null, which upstreams reject for the whole input item.
+			summaries := []ResponsesReasoningSummary{}
 			for _, d := range am.ReasoningDetails {
 				switch d.Type {
 				case BifrostReasoningDetailsTypeText:
@@ -583,8 +585,12 @@ func (cm *ChatMessage) ToResponsesMessages() []ResponsesMessage {
 		if messageType == ResponsesMessageTypeFunctionCallOutput {
 			// Don't set content for function_call_output - it will be set in ResponsesToolMessage.Output
 		} else {
-			responseBlocks := make([]ResponsesMessageContentBlock, len(cm.Content.ContentBlocks))
-			for i, block := range cm.Content.ContentBlocks {
+			responseBlocks := make([]ResponsesMessageContentBlock, 0, len(cm.Content.ContentBlocks))
+			for _, block := range cm.Content.ContentBlocks {
+				// Responses blocks have no cachePoint equivalent; a standalone marker would serialize as an empty-type block.
+				if block.Type == "" && block.CachePoint != nil {
+					continue
+				}
 				blockType := ResponsesMessageContentBlockType(block.Type)
 
 				switch block.Type {
@@ -602,33 +608,34 @@ func (cm *ChatMessage) ToResponsesMessages() []ResponsesMessage {
 					blockType = ResponsesInputMessageContentBlockTypeAudio
 				}
 
-				responseBlocks[i] = ResponsesMessageContentBlock{
+				responseBlocks = append(responseBlocks, ResponsesMessageContentBlock{
 					Type: blockType,
 					Text: block.Text,
-				}
+				})
+				rb := &responseBlocks[len(responseBlocks)-1]
 
 				// Convert specific block types
 				if block.ImageURLStruct != nil {
-					responseBlocks[i].ResponsesInputMessageContentBlockImage = &ResponsesInputMessageContentBlockImage{
+					rb.ResponsesInputMessageContentBlockImage = &ResponsesInputMessageContentBlockImage{
 						ImageURL: &block.ImageURLStruct.URL,
 						Detail:   block.ImageURLStruct.Detail,
 					}
 				}
 				if block.File != nil {
-					responseBlocks[i].ResponsesInputMessageContentBlockFile = &ResponsesInputMessageContentBlockFile{
+					rb.ResponsesInputMessageContentBlockFile = &ResponsesInputMessageContentBlockFile{
 						FileData: block.File.FileData,
 						FileURL:  block.File.FileURL,
 						Filename: block.File.Filename,
 						FileType: block.File.FileType,
 					}
-					responseBlocks[i].FileID = block.File.FileID
+					rb.FileID = block.File.FileID
 				}
 				if block.InputAudio != nil {
 					format := ""
 					if block.InputAudio.Format != nil {
 						format = *block.InputAudio.Format
 					}
-					responseBlocks[i].Audio = &ResponsesInputMessageContentBlockAudio{
+					rb.Audio = &ResponsesInputMessageContentBlockAudio{
 						Data:   block.InputAudio.Data,
 						Format: format,
 					}
@@ -852,7 +859,7 @@ func ToChatMessages(rms []ResponsesMessage) []ChatMessage {
 					// result collapse to the chat surface's single bool. Mirrors
 					// the same pair the Anthropic Responses converter treats as
 					// is_error (providers/anthropic/responses.go).
-					if (rm.ResponsesToolMessage.Error != nil && *rm.ResponsesToolMessage.Error != "") ||
+					if rm.ResponsesToolMessage.Error.IsError() ||
 						(rm.Status != nil && *rm.Status == "incomplete") {
 						cm.ChatToolMessage.IsError = Ptr(true)
 					}
@@ -975,6 +982,26 @@ func ToChatMessages(rms []ResponsesMessage) []ChatMessage {
 			attachPendingReasoning(cm.ChatAssistantMessage)
 		}
 
+		// A role:"tool" message carries a tool's result, so unlike an assistant
+		// message it has no meaning without content -- OpenAI's Chat Completions API
+		// requires the field. A function_call_output can legitimately carry no body
+		// though: Anthropic marks `content` optional on a tool_result block, so a void
+		// tool, an errored tool with no body, and an explicit empty content array all
+		// arrive here with nothing to convert. Left alone, ChatMessageContent's
+		// omitempty then drops the key entirely and the tool message goes out as
+		// {"role":"tool","tool_call_id":"..."}.
+		//
+		// Backfilled here, after the content conversion above, rather than at any one
+		// ingress: this is the layer that owns the chat wire contract, so it covers
+		// every producer of an empty tool output at once. Seeding the empty string
+		// further upstream would also rewrite the Bedrock Converse wire from
+		// `"content":[]` to `"content":[{"text":""}]`, and an empty text block is a
+		// shape Anthropic rejects.
+		if cm.Role == ChatMessageRoleTool &&
+			(cm.Content == nil || (cm.Content.ContentStr == nil && len(cm.Content.ContentBlocks) == 0)) {
+			cm.Content = &ChatMessageContent{ContentStr: Ptr("")}
+		}
+
 		chatMessages = append(chatMessages, cm)
 	}
 
@@ -1001,10 +1028,11 @@ func (cu *BifrostLLMUsage) ToResponsesResponseUsage() *ResponsesResponseUsage {
 	}
 
 	usage := &ResponsesResponseUsage{
-		InputTokens:  cu.PromptTokens,
-		OutputTokens: cu.CompletionTokens,
-		TotalTokens:  cu.TotalTokens,
-		Cost:         cu.Cost,
+		InputTokens:    cu.PromptTokens,
+		OutputTokens:   cu.CompletionTokens,
+		TotalTokens:    cu.TotalTokens,
+		Cost:           cu.Cost,
+		CostInUsdTicks: cu.CostInUsdTicks,
 	}
 
 	if cu.PromptTokensDetails != nil {
@@ -1042,6 +1070,7 @@ func (ru *ResponsesResponseUsage) ToBifrostLLMUsage() *BifrostLLMUsage {
 		CompletionTokens: ru.OutputTokens,
 		TotalTokens:      ru.TotalTokens,
 		Cost:             ru.Cost,
+		CostInUsdTicks:   ru.CostInUsdTicks,
 	}
 
 	if ru.InputTokensDetails != nil {
@@ -1139,45 +1168,19 @@ func (cr *BifrostChatRequest) ToResponsesRequest() *BifrostResponsesRequest {
 		}
 
 		// Handle Reasoning from reasoning_effort
-		if cr.Params.Reasoning != nil && (cr.Params.Reasoning.Enabled != nil || cr.Params.Reasoning.Effort != nil || cr.Params.Reasoning.MaxTokens != nil) {
+		if cr.Params.Reasoning != nil && (cr.Params.Reasoning.Enabled != nil || cr.Params.Reasoning.Effort != nil || cr.Params.Reasoning.MaxTokens != nil || cr.Params.Reasoning.Type != nil) {
 			brr.Params.Reasoning = &ResponsesParametersReasoning{
 				Effort:    cr.Params.Reasoning.Effort,
 				MaxTokens: cr.Params.Reasoning.MaxTokens,
+				Type:      cr.Params.Reasoning.Type,
 			}
 		}
 
-		if cr.Params.ResponseFormat != nil {
-			if rfMap, ok := (*cr.Params.ResponseFormat).(map[string]interface{}); ok {
-				if fmtType, ok := rfMap["type"].(string); ok {
-					if brr.Params.Text == nil {
-						brr.Params.Text = &ResponsesTextConfig{}
-					}
-					format := &ResponsesTextConfigFormat{Type: fmtType}
-					validFormat := true
-					if fmtType == "json_schema" {
-						jsObj, ok := rfMap["json_schema"].(map[string]interface{})
-						if !ok {
-							validFormat = false
-						} else {
-							if name, ok := jsObj["name"].(string); ok {
-								format.Name = &name
-							}
-							if desc, ok := jsObj["description"].(string); ok {
-								format.Description = &desc
-							}
-							if strict, ok := jsObj["strict"].(bool); ok {
-								format.Strict = &strict
-							}
-							if schema, ok := jsObj["schema"]; ok {
-								format.JSONSchema = JSONSchemaFromMap(schema)
-							}
-						}
-					}
-					if validFormat {
-						brr.Params.Text.Format = format
-					}
-				}
+		if format := ResponsesTextConfigFormatFromChatResponseFormat(cr.Params.ResponseFormat); format != nil {
+			if brr.Params.Text == nil {
+				brr.Params.Text = &ResponsesTextConfig{}
 			}
+			brr.Params.Text.Format = format
 		}
 
 		// Handle Verbosity
@@ -1265,30 +1268,12 @@ func (brr *BifrostResponsesRequest) ToChatRequest() *BifrostChatRequest {
 			bcr.Params.Reasoning = &ChatReasoning{
 				Effort:    brr.Params.Reasoning.Effort,
 				MaxTokens: brr.Params.Reasoning.MaxTokens,
+				Type:      brr.Params.Reasoning.Type,
 			}
 		}
 
-		if brr.Params.Text != nil && brr.Params.Text.Format != nil {
-			f := brr.Params.Text.Format
-			rfMap := map[string]interface{}{"type": f.Type}
-			if f.Type == "json_schema" {
-				jsObj := map[string]interface{}{}
-				if f.Name != nil {
-					jsObj["name"] = *f.Name
-				}
-				if f.Description != nil {
-					jsObj["description"] = *f.Description
-				}
-				if f.Strict != nil {
-					jsObj["strict"] = *f.Strict
-				}
-				if schemaMap := f.JSONSchema.ToMap(); schemaMap != nil {
-					jsObj["schema"] = schemaMap
-				}
-				rfMap["json_schema"] = jsObj
-			}
-			var rf interface{} = rfMap
-			bcr.Params.ResponseFormat = &rf
+		if rf := ChatResponseFormatFromResponsesFormat(brr.Params.Text.GetFormat()); rf != nil {
+			bcr.Params.ResponseFormat = rf
 		}
 
 		// Handle Verbosity from Text config
@@ -1380,12 +1365,30 @@ func sanitizeChatToolChoiceForFallback(toolChoice *ChatToolChoice, tools []ChatT
 func responsesStatusFromChatFinishReason(finishReason string) (status string, incompleteDetails *ResponsesResponseIncompleteDetails, mapped bool) {
 	switch finishReason {
 	case string(BifrostFinishReasonLength):
-		return "incomplete", &ResponsesResponseIncompleteDetails{Reason: "max_output_tokens"}, true
+		return "incomplete", &ResponsesResponseIncompleteDetails{Reason: ResponsesResponseIncompleteReasonMaxOutputTokens}, true
+	case "content_filter", "guardrail_intervened":
+		return "incomplete", &ResponsesResponseIncompleteDetails{Reason: ResponsesResponseIncompleteReasonContentFilter}, true
 	case string(BifrostFinishReasonStop), string(BifrostFinishReasonToolCalls):
 		return "completed", nil, true
 	default:
 		return "", nil, false
 	}
+}
+
+// ResponsesStatusFromFinishReason maps a Bifrost finish reason to the Responses-API
+// status and incomplete_details. mapped is false for reasons with no Responses
+// equivalent, which should leave Status unset.
+func ResponsesStatusFromFinishReason(finishReason string) (status string, incompleteDetails *ResponsesResponseIncompleteDetails, mapped bool) {
+	return responsesStatusFromChatFinishReason(finishReason)
+}
+
+// MarkTruncatedOutputItem sets status "incomplete" on the last output item -- the one
+// being generated when the turn was cut short -- matching OpenAI's truncated-turn shape.
+func MarkTruncatedOutputItem(output []ResponsesMessage) {
+	if len(output) == 0 {
+		return
+	}
+	output[len(output)-1].Status = Ptr(ResponsesResponseStatusIncomplete)
 }
 
 func responsesStopReasonFromChatFinishReason(finishReason *string) *string {
@@ -1417,6 +1420,40 @@ func responsesTerminalFromChatFinishReason(finishReason *string) (eventType Resp
 	}
 
 	return eventType, mappedStatus, mappedIncompleteDetails
+}
+
+// chatFinishReasonFromResponses derives a Chat finish_reason from a Responses terminal state.
+// Returns nil for non-terminal or unrecognized states so finish_reason stays unset.
+func chatFinishReasonFromResponses(status *string, incompleteDetails *ResponsesResponseIncompleteDetails, stopReason *string, output []ResponsesMessage) *string {
+	if status != nil && (*status == ResponsesResponseStatusInProgress || *status == ResponsesResponseStatusQueued) {
+		return nil
+	}
+
+	if stopReason != nil && *stopReason != "" {
+		if _, _, mapped := responsesStatusFromChatFinishReason(*stopReason); mapped {
+			return Ptr(*stopReason)
+		}
+	}
+
+	if incompleteDetails != nil {
+		switch incompleteDetails.Reason {
+		case ResponsesResponseIncompleteReasonMaxOutputTokens:
+			return Ptr(string(BifrostFinishReasonLength))
+		case ResponsesResponseIncompleteReasonContentFilter:
+			return Ptr("content_filter")
+		}
+	}
+
+	if status != nil && *status == ResponsesResponseStatusCompleted {
+		for _, item := range output {
+			if item.Type != nil && *item.Type == ResponsesMessageTypeFunctionCall {
+				return Ptr(string(BifrostFinishReasonToolCalls))
+			}
+		}
+		return Ptr(string(BifrostFinishReasonStop))
+	}
+
+	return nil
 }
 
 // ToBifrostResponsesResponse converts the BifrostChatResponse to BifrostResponsesResponse format
@@ -1515,11 +1552,14 @@ func (responsesResp *BifrostResponsesResponse) ToBifrostChatResponse() *BifrostC
 		// Convert ResponsesMessages back to ChatMessages
 		chatMessages := ToChatMessages(responsesResp.Output)
 
+		finishReason := chatFinishReasonFromResponses(responsesResp.Status, responsesResp.IncompleteDetails, responsesResp.StopReason, responsesResp.Output)
+
 		// Create choices from chat messages
 		choices := make([]BifrostResponseChoice, 0, len(chatMessages))
 		for i, chatMsg := range chatMessages {
 			choice := BifrostResponseChoice{
-				Index: i,
+				Index:        i,
+				FinishReason: finishReason,
 				ChatNonStreamResponseChoice: &ChatNonStreamResponseChoice{
 					Message: &chatMsg,
 				},
@@ -2568,33 +2608,40 @@ func (rsr *BifrostResponsesStreamResponse) ToBifrostChatResponse() *BifrostChatR
 		return resp
 
 	case ResponsesStreamResponseTypeCompleted, ResponsesStreamResponseTypeIncomplete:
-		finishReason := string(BifrostFinishReasonStop)
+		status := ResponsesResponseStatusCompleted
+		fallback := string(BifrostFinishReasonStop)
 		if rsr.Type == ResponsesStreamResponseTypeIncomplete {
-			finishReason = string(BifrostFinishReasonLength)
+			status = ResponsesResponseStatusIncomplete
+			fallback = string(BifrostFinishReasonLength)
 		}
+
+		var (
+			incompleteDetails *ResponsesResponseIncompleteDetails
+			stopReason        *string
+			output            []ResponsesMessage
+		)
+		if rsr.Response != nil {
+			incompleteDetails = rsr.Response.IncompleteDetails
+			stopReason = rsr.Response.StopReason
+			output = rsr.Response.Output
+			if rsr.Response.Usage != nil {
+				resp.Usage = rsr.Response.Usage.ToBifrostLLMUsage()
+			}
+		}
+
+		finishReason := chatFinishReasonFromResponses(&status, incompleteDetails, stopReason, output)
+		if finishReason == nil {
+			finishReason = &fallback
+		}
+
 		resp.Choices = []BifrostResponseChoice{
 			{
 				Index:        0,
-				FinishReason: &finishReason,
+				FinishReason: finishReason,
 				ChatStreamResponseChoice: &ChatStreamResponseChoice{
 					Delta: &ChatStreamResponseChoiceDelta{},
 				},
 			},
-		}
-		if rsr.Response != nil {
-			if rsr.Response.Usage != nil {
-				resp.Usage = rsr.Response.Usage.ToBifrostLLMUsage()
-			}
-			// Check for tool_calls finish reason
-			if rsr.Type == ResponsesStreamResponseTypeCompleted {
-				for _, output := range rsr.Response.Output {
-					if output.Type != nil && *output.Type == ResponsesMessageTypeFunctionCall {
-						finishReason = string(BifrostFinishReasonToolCalls)
-						resp.Choices[0].FinishReason = &finishReason
-						break
-					}
-				}
-			}
 		}
 		return resp
 
@@ -2639,6 +2686,7 @@ func (cr *BifrostChatResponse) ToBifrostTextCompletionResponse() *BifrostTextCom
 				Latency:                 cr.ExtraFields.Latency,
 				RawResponse:             cr.ExtraFields.RawResponse,
 				CacheDebug:              cr.ExtraFields.CacheDebug,
+				GuardrailDebug:          cr.ExtraFields.GuardrailDebug,
 				ProviderResponseHeaders: cr.ExtraFields.ProviderResponseHeaders,
 			},
 		}
@@ -2673,6 +2721,7 @@ func (cr *BifrostChatResponse) ToBifrostTextCompletionResponse() *BifrostTextCom
 				Latency:                 cr.ExtraFields.Latency,
 				RawResponse:             cr.ExtraFields.RawResponse,
 				CacheDebug:              cr.ExtraFields.CacheDebug,
+				GuardrailDebug:          cr.ExtraFields.GuardrailDebug,
 				ProviderResponseHeaders: cr.ExtraFields.ProviderResponseHeaders,
 			},
 		}
@@ -2723,6 +2772,7 @@ func (cr *BifrostChatResponse) ToBifrostTextCompletionResponse() *BifrostTextCom
 				Latency:                 cr.ExtraFields.Latency,
 				RawResponse:             cr.ExtraFields.RawResponse,
 				CacheDebug:              cr.ExtraFields.CacheDebug,
+				GuardrailDebug:          cr.ExtraFields.GuardrailDebug,
 				ProviderResponseHeaders: cr.ExtraFields.ProviderResponseHeaders,
 			},
 		}
@@ -2744,6 +2794,7 @@ func (cr *BifrostChatResponse) ToBifrostTextCompletionResponse() *BifrostTextCom
 			Latency:                 cr.ExtraFields.Latency,
 			RawResponse:             cr.ExtraFields.RawResponse,
 			CacheDebug:              cr.ExtraFields.CacheDebug,
+			GuardrailDebug:          cr.ExtraFields.GuardrailDebug,
 			ProviderResponseHeaders: cr.ExtraFields.ProviderResponseHeaders,
 		},
 	}

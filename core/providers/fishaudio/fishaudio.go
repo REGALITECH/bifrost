@@ -34,6 +34,10 @@ type FishAudioProvider struct {
 	customProviderConfig *schemas.CustomProviderConfig // Custom provider config
 }
 
+// Compile-time guard: bifrost.go registers this type as a schemas.Provider, so
+// an upstream interface change must fail the build here rather than at runtime.
+var _ schemas.Provider = (*FishAudioProvider)(nil)
+
 // NewFishAudioProvider creates a new Fish Audio provider instance.
 func NewFishAudioProvider(config *schemas.ProviderConfig, logger schemas.Logger) *FishAudioProvider {
 	config.CheckAndSetDefaults()
@@ -236,14 +240,14 @@ func (provider *FishAudioProvider) Speech(ctx *schemas.BifrostContext, key schem
 	wsURL := fishWebSocketURL(provider.networkConfig.BaseURL)
 
 	startTime := time.Now()
-	conn, bifrostErr := provider.dial(wsURL, headers)
+	conn, bifrostErr := provider.dial(ctx, wsURL, headers)
 	if bifrostErr != nil {
 		return nil, bifrostErr
 	}
 	defer conn.Close()
 
 	var audio []byte
-	bifrostErr = runSynthesis(conn, fishReq, request.Input.Input, provider.requestTimeout(), provider.readIdleTimeout(), func(frame []byte) *schemas.BifrostError {
+	bifrostErr = runSynthesis(ctx, conn, fishReq, request.Input.Input, provider.requestTimeout(), provider.readIdleTimeout(), func(frame []byte) *schemas.BifrostError {
 		audio = append(audio, frame...)
 		return nil
 	})
@@ -279,7 +283,7 @@ func (provider *FishAudioProvider) SpeechStream(ctx *schemas.BifrostContext, pos
 	text := request.Input.Input
 
 	startTime := time.Now()
-	conn, bifrostErr := provider.dial(wsURL, headers)
+	conn, bifrostErr := provider.dial(ctx, wsURL, headers)
 	if bifrostErr != nil {
 		return nil, bifrostErr
 	}
@@ -307,7 +311,7 @@ func (provider *FishAudioProvider) SpeechStream(ctx *schemas.BifrostContext, pos
 		chunkIndex := -1
 		lastChunkTime := time.Now()
 
-		synthErr := runSynthesis(conn, fishReq, text, provider.requestTimeout(), provider.readIdleTimeout(), func(frame []byte) *schemas.BifrostError {
+		synthErr := runSynthesis(ctx, conn, fishReq, text, provider.requestTimeout(), provider.readIdleTimeout(), func(frame []byte) *schemas.BifrostError {
 			chunkIndex++
 			audioChunk := make([]byte, len(frame))
 			copy(audioChunk, frame)
@@ -398,6 +402,10 @@ func (provider *FishAudioProvider) Rerank(ctx *schemas.BifrostContext, key schem
 	return nil, providerUtils.NewUnsupportedOperationError(schemas.RerankRequest, provider.GetProviderKey())
 }
 
+func (provider *FishAudioProvider) Decision(ctx *schemas.BifrostContext, key schemas.Key, request *schemas.BifrostDecisionRequest) (*schemas.BifrostDecisionResponse, *schemas.BifrostError) {
+	return nil, providerUtils.NewUnsupportedOperationError(schemas.DecisionRequest, provider.GetProviderKey())
+}
+
 func (provider *FishAudioProvider) OCR(ctx *schemas.BifrostContext, key schemas.Key, request *schemas.BifrostOCRRequest) (*schemas.BifrostOCRResponse, *schemas.BifrostError) {
 	return nil, providerUtils.NewUnsupportedOperationError(schemas.OCRRequest, provider.GetProviderKey())
 }
@@ -432,6 +440,10 @@ func (provider *FishAudioProvider) ImageVariation(ctx *schemas.BifrostContext, k
 
 func (provider *FishAudioProvider) VideoGeneration(_ *schemas.BifrostContext, _ schemas.Key, _ *schemas.BifrostVideoGenerationRequest) (*schemas.BifrostVideoGenerationResponse, *schemas.BifrostError) {
 	return nil, providerUtils.NewUnsupportedOperationError(schemas.VideoGenerationRequest, provider.GetProviderKey())
+}
+
+func (provider *FishAudioProvider) VideoEdit(_ *schemas.BifrostContext, _ schemas.Key, _ *schemas.BifrostVideoEditRequest) (*schemas.BifrostVideoEditResponse, *schemas.BifrostError) {
+	return nil, providerUtils.NewUnsupportedOperationError(schemas.VideoEditRequest, provider.GetProviderKey())
 }
 
 func (provider *FishAudioProvider) VideoRetrieve(_ *schemas.BifrostContext, _ schemas.Key, _ *schemas.BifrostVideoRetrieveRequest) (*schemas.BifrostVideoGenerationResponse, *schemas.BifrostError) {

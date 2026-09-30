@@ -158,20 +158,10 @@ type RealtimeError struct {
 	ExtraParams map[string]json.RawMessage `json:"extra_params,omitempty"`
 }
 
-// RealtimeSessionEndpointType identifies the public ephemeral-token endpoint
-// shape the client called so providers can preserve versioned behavior.
-type RealtimeSessionEndpointType string
-
-const (
-	RealtimeSessionEndpointClientSecrets RealtimeSessionEndpointType = "client_secrets"
-	RealtimeSessionEndpointSessions      RealtimeSessionEndpointType = "sessions"
-)
-
 // RealtimeSessionRoute describes a provider-registered public route for
 // ephemeral-token creation.
 type RealtimeSessionRoute struct {
 	Path            string
-	EndpointType    RealtimeSessionEndpointType
 	DefaultProvider ModelProvider
 }
 
@@ -180,8 +170,8 @@ type RealtimeSessionRoute struct {
 // Checked via type assertion: provider.(RealtimeProvider).
 type RealtimeProvider interface {
 	SupportsRealtimeAPI() bool
-	RealtimeWebSocketURL(key Key, model string) string
-	RealtimeHeaders(ctx *BifrostContext, key Key, model string) (map[string]string, *BifrostError)
+	RealtimeWebSocketURL(key Key, model, intent string) (string, *BifrostError)
+	RealtimeHeaders(ctx *BifrostContext, key Key) (map[string]string, *BifrostError)
 	// SupportsRealtimeWebRTC reports whether the provider supports WebRTC SDP exchange.
 	SupportsRealtimeWebRTC() bool
 	// ExchangeRealtimeWebRTCSDP performs the provider-specific SDP signaling exchange.
@@ -229,6 +219,19 @@ type RealtimeInputUsageProvider interface {
 	RealtimeInputUsage(inputText string) *BifrostLLMUsage
 }
 
+// RealtimeModelHeadersProvider is an optional interface for realtime providers
+// whose upstream handshake headers depend on the requested model — e.g. Fish
+// Audio, which selects the tts-live model with a "model" header rather than in
+// the URL. When a provider implements it, the realtime transport calls
+// RealtimeHeadersForModel with the requested model (after key alias
+// resolution) instead of RealtimeProvider.RealtimeHeaders.
+//
+// Providers that do not implement this interface keep using RealtimeHeaders,
+// so existing realtime providers are unaffected.
+type RealtimeModelHeadersProvider interface {
+	RealtimeHeadersForModel(ctx *BifrostContext, key Key, model string) (map[string]string, *BifrostError)
+}
+
 // RealtimeLegacyWebRTCProvider is an optional interface for providers that
 // support the beta WebRTC handshake (e.g., OpenAI's /v1/realtime).
 // Only checked for legacy integration routes via type assertion.
@@ -249,7 +252,7 @@ type RealtimeUsageExtractor interface {
 // short-lived client secrets for browser/client-side Realtime connections.
 // Checked via type assertion: provider.(RealtimeSessionProvider).
 type RealtimeSessionProvider interface {
-	CreateRealtimeClientSecret(ctx *BifrostContext, key Key, endpointType RealtimeSessionEndpointType, rawRequest json.RawMessage) (*BifrostPassthroughResponse, *BifrostError)
+	CreateRealtimeClientSecret(ctx *BifrostContext, key Key, rawRequest json.RawMessage) (*BifrostPassthroughResponse, *BifrostError)
 }
 
 // ParseRealtimeEvent decodes a client/provider realtime event while preserving

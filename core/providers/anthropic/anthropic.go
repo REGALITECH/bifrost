@@ -144,7 +144,13 @@ func setAnthropicRequestBody(ctx *schemas.BifrostContext, req *fasthttp.Request,
 	// was already activated at transport layer.
 	usedLargePayloadBody := providerUtils.ApplyLargePayloadRequestBodyWithModelNormalization(ctx, req, schemas.Anthropic)
 	if !usedLargePayloadBody {
+		// Time the payload copy as "request-marshal" so it lands in the marshal bucket
+		// instead of the provider-internal residual.
+		mt, mh := providerUtils.StartPhaseSpan(ctx, "request-marshal")
 		req.SetBody(body)
+		if mt != nil {
+			mt.EndSpan(mh, schemas.SpanStatusOk, "")
+		}
 	}
 	return usedLargePayloadBody
 }
@@ -285,8 +291,14 @@ func completeRequest(
 		return nil, latency, nil, bifrostErr
 	}
 
-	// Extract provider response headers before status check so error responses also forward them
+	// Extract provider response headers before status check so error responses also forward them.
+	// Time the header copy as "response-finalize" so it lands in that bucket instead of the
+	// provider-internal residual.
+	ft, fh := providerUtils.StartPhaseSpan(ctx, "response-finalize")
 	providerResponseHeaders := providerUtils.ExtractProviderResponseHeaders(resp)
+	if ft != nil {
+		ft.EndSpan(fh, schemas.SpanStatusOk, "")
+	}
 
 	// Handle error response — materialize stream body for error parsing
 	if resp.StatusCode() != fasthttp.StatusOK {
@@ -440,12 +452,16 @@ func (provider *AnthropicProvider) TextCompletion(ctx *schemas.BifrostContext, k
 	response := acquireAnthropicTextResponse()
 	defer releaseAnthropicTextResponse(response)
 
-	rawRequest, rawResponse, bifrostErr := providerUtils.HandleProviderResponse(responseBody, response, jsonData, providerUtils.ShouldSendBackRawRequest(ctx, provider.sendBackRawRequest), providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse))
+	rawRequest, rawResponse, bifrostErr := providerUtils.HandleProviderResponseCtx(ctx, responseBody, response, jsonData, providerUtils.ShouldSendBackRawRequest(ctx, provider.sendBackRawRequest), providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse))
 	if bifrostErr != nil {
 		return nil, providerUtils.EnrichError(ctx, bifrostErr, jsonData, responseBody, provider.sendBackRawRequest, provider.sendBackRawResponse, latency)
 	}
 
+	convTracer, convHandle := providerUtils.StartResponseConvertorSpan(ctx)
 	bifrostResponse := response.ToBifrostTextCompletionResponse()
+	if convTracer != nil {
+		convTracer.EndSpan(convHandle, schemas.SpanStatusOk, "")
+	}
 
 	// Set ExtraFields
 	bifrostResponse.ExtraFields.Latency = latency.Milliseconds()
@@ -544,12 +560,16 @@ func HandleAnthropicChatCompletionRequest(
 	response := AcquireAnthropicMessageResponse()
 	defer ReleaseAnthropicMessageResponse(response)
 
-	rawRequest, rawResponse, bifrostErr := providerUtils.HandleProviderResponse(responseBody, response, jsonBody, providerUtils.ShouldSendBackRawRequest(ctx, config.ShouldSendBackRawRequest), providerUtils.ShouldSendBackRawResponse(ctx, config.ShouldSendBackRawResponse))
+	rawRequest, rawResponse, bifrostErr := providerUtils.HandleProviderResponseCtx(ctx, responseBody, response, jsonBody, providerUtils.ShouldSendBackRawRequest(ctx, config.ShouldSendBackRawRequest), providerUtils.ShouldSendBackRawResponse(ctx, config.ShouldSendBackRawResponse))
 	if bifrostErr != nil {
 		return nil, providerUtils.EnrichError(ctx, bifrostErr, jsonBody, responseBody, config.ShouldSendBackRawRequest, config.ShouldSendBackRawResponse, latency)
 	}
 	// Create final response
+	convTracer, convHandle := providerUtils.StartResponseConvertorSpan(ctx)
 	bifrostResponse := response.ToBifrostChatResponse(ctx)
+	if convTracer != nil {
+		convTracer.EndSpan(convHandle, schemas.SpanStatusOk, "")
+	}
 
 	// Set ExtraFields
 	bifrostResponse.ExtraFields.Latency = latency.Milliseconds()
@@ -634,6 +654,16 @@ func accumulateAnthropicResponsesUsage(usage *schemas.ResponsesResponseUsage, bi
 	if usage == nil || usageToProcess == nil {
 		return
 	}
+	// Keep the per-pass breakdown like the non-streaming converter; billable folding drops it.
+	if len(usageToProcess.Iterations) > 0 {
+		usage.Iterations = make([]schemas.ResponsesResponseUsage, len(usageToProcess.Iterations))
+		for i := range usageToProcess.Iterations {
+			if converted := ConvertAnthropicUsageToBifrostUsage(&usageToProcess.Iterations[i]); converted != nil {
+				usage.Iterations[i] = *converted
+			}
+		}
+	}
+	usageToProcess = billableAnthropicUsage(usageToProcess)
 	// Web search request count → billed as search queries (server tool use). The
 	// terminal chunk overwrites Response.Usage with this accumulator, so the count
 	// must live here (not only on the per-event message_delta usage).
@@ -778,7 +808,7 @@ func HandleAnthropicChatCompletionStreaming(
 	providerUtils.SetExtraHeaders(ctx, req, extraHeaders, []string{AnthropicBetaHeader})
 	// OAuth passthrough: forward the caller's raw headers, whose token is the upstream
 	// credential. Skips anthropic-beta — MergeBetaHeaders below owns the final value.
-	providerUtils.SetPassthroughHeaders(ctx, req, providerName, []string{AnthropicBetaHeader})
+	providerUtils.SetPassthroughHeadersForStreaming(ctx, req, providerName, []string{AnthropicBetaHeader})
 
 	if betaHeaders := FilterBetaHeadersForProvider(MergeBetaHeaders(ctx, extraHeaders), providerName, betaHeaderOverrides); len(betaHeaders) > 0 {
 		req.Header.Set(AnthropicBetaHeader, strings.Join(betaHeaders, ","))
@@ -920,7 +950,10 @@ func HandleAnthropicChatCompletionStreaming(
 
 		usage := &schemas.BifrostLLMUsage{}
 		// Served billing modifiers (top-level response fields, not usage) captured
-		// across events and set on the final chunk: fast mode and data residency.
+		// across events and set on the final chunk: served tier, fast mode and data
+		// residency. Anthropic reports service_tier on the message_start usage, which
+		// the per-event converter drops, so it has to be latched here like the rest.
+		var servedServiceTier *schemas.BifrostServiceTier
 		var servedSpeed *string
 		var servedInferenceGeo *string
 		// Model that actually served the turn after a server-side fallback handoff.
@@ -990,8 +1023,12 @@ func HandleAnthropicChatCompletionStreaming(
 				continue
 			}
 			var event AnthropicStreamEvent
-			if err := sonic.Unmarshal([]byte(eventData), &event); err != nil {
-				logger.Warn("Failed to parse message_start event: %v", err)
+			// Per-event decode -> "response-parse" (Serialization) stream phase.
+			parseStart := time.Now()
+			umErr := sonic.Unmarshal([]byte(eventData), &event)
+			schemas.AddStreamParse(ctx, time.Since(parseStart))
+			if umErr != nil {
+				logger.Warn("Failed to parse message_start event: %v", umErr)
 				continue
 			}
 			if event.Type == AnthropicStreamEventTypeMessageStart && event.Message != nil && event.Message.ID != "" {
@@ -1006,6 +1043,11 @@ func HandleAnthropicChatCompletionStreaming(
 				usageToProcess = event.Message.Usage
 			}
 			if usageToProcess != nil {
+				if served := usageToProcess.ServerSideFallbackModel(); served != nil {
+					servedFallbackModel = served
+					usage.ServerSideFallbackModel = served
+				}
+				usageToProcess = billableAnthropicUsage(usageToProcess)
 				// Web search request count → billed as search queries (server tool use).
 				if usageToProcess.ServerToolUse != nil && usageToProcess.ServerToolUse.WebSearchRequests > 0 {
 					if usage.CompletionTokensDetails == nil {
@@ -1026,9 +1068,15 @@ func HandleAnthropicChatCompletionStreaming(
 						usage.CompletionTokensDetails.ReasoningTokens = t
 					}
 				}
-				// Capture served fast mode + inference geography (top-level response fields).
-				// Mirror onto the billing usage handle so a mid-stream cancel/timeout can
-				// still apply the served-tier multiplier (billed usage is otherwise bare).
+				// Capture served tier + fast mode + inference geography (top-level response
+				// fields). Speed and InferenceGeo are mirrored onto the billing usage handle
+				// so a mid-stream cancel/timeout can still apply the served-tier multiplier
+				// (billed usage is otherwise bare); BifrostLLMUsage has no service_tier field,
+				// so that one can only ride the final chunk's response envelope.
+				if usageToProcess.ServiceTier != nil {
+					mapped := MapAnthropicServiceTierToBifrost(*usageToProcess.ServiceTier)
+					servedServiceTier = &mapped
+				}
 				if usageToProcess.Speed != nil {
 					servedSpeed = usageToProcess.Speed
 					usage.Speed = usageToProcess.Speed
@@ -1036,10 +1084,6 @@ func HandleAnthropicChatCompletionStreaming(
 				if usageToProcess.InferenceGeo != nil {
 					servedInferenceGeo = usageToProcess.InferenceGeo
 					usage.InferenceGeo = usageToProcess.InferenceGeo
-				}
-				if served := usageToProcess.ServerSideFallbackModel(); served != nil {
-					servedFallbackModel = served
-					usage.ServerSideFallbackModel = served
 				}
 				// Collect usage information and send at the end of the stream
 				// Here in some cases usage comes before final message
@@ -1159,7 +1203,10 @@ func HandleAnthropicChatCompletionStreaming(
 				}
 			}
 
+			// Per-event mapping -> "convertor" (Convertor) stream phase.
+			convStart := time.Now()
 			response, bifrostErr, isLastChunk := event.ToBifrostChatCompletionStream(ctx, structuredOutputToolName, streamState)
+			schemas.AddStreamConvert(ctx, time.Since(convStart))
 			if bifrostErr != nil {
 				ctx.SetValue(schemas.BifrostContextKeyStreamEndIndicator, true)
 				providerUtils.ProcessAndSendBifrostError(ctx, postHookRunner, bifrostErr, responseChan, logger, postHookSpanFinalizer)
@@ -1221,7 +1268,10 @@ func HandleAnthropicChatCompletionStreaming(
 				return
 			}
 		}
-		// Forward served fast mode + data residency so the final chunk bills correctly.
+		// Forward served tier + fast mode + data residency so the final chunk bills correctly.
+		if servedServiceTier != nil {
+			response.ServiceTier = servedServiceTier
+		}
 		if servedSpeed != nil {
 			response.Speed = servedSpeed
 		}
@@ -1301,7 +1351,7 @@ func HandleAnthropicResponsesRequest(
 	if isLargeResp, _ := ctx.Value(schemas.BifrostContextKeyLargeResponseMode).(bool); isLargeResp {
 		preview, _ := ctx.Value(schemas.BifrostContextKeyLargePayloadResponsePreview).(string)
 		return &schemas.BifrostResponsesResponse{
-			ID:        schemas.Ptr("resp_" + providerUtils.GetRandomString(50)),
+			ID:        schemas.Ptr("resp_" + schemas.GetRandomString(50)),
 			Object:    "response",
 			CreatedAt: int(time.Now().Unix()),
 			Model:     request.Model,
@@ -1317,13 +1367,17 @@ func HandleAnthropicResponsesRequest(
 	response := AcquireAnthropicMessageResponse()
 	defer ReleaseAnthropicMessageResponse(response)
 
-	rawRequest, rawResponse, bifrostErr := providerUtils.HandleProviderResponse(responseBody, response, jsonBody, providerUtils.ShouldSendBackRawRequest(ctx, config.ShouldSendBackRawRequest), providerUtils.ShouldSendBackRawResponse(ctx, config.ShouldSendBackRawResponse))
+	rawRequest, rawResponse, bifrostErr := providerUtils.HandleProviderResponseCtx(ctx, responseBody, response, jsonBody, providerUtils.ShouldSendBackRawRequest(ctx, config.ShouldSendBackRawRequest), providerUtils.ShouldSendBackRawResponse(ctx, config.ShouldSendBackRawResponse))
 	if bifrostErr != nil {
 		return nil, providerUtils.EnrichError(ctx, bifrostErr, jsonBody, responseBody, config.ShouldSendBackRawRequest, config.ShouldSendBackRawResponse, latency)
 	}
 
 	// Create final response
+	convTracer, convHandle := providerUtils.StartResponseConvertorSpan(ctx)
 	bifrostResponse := response.ToBifrostResponsesResponse(ctx)
+	if convTracer != nil {
+		convTracer.EndSpan(convHandle, schemas.SpanStatusOk, "")
+	}
 
 	// Set ExtraFields
 	bifrostResponse.ExtraFields.Latency = latency.Milliseconds()
@@ -1420,7 +1474,7 @@ func HandleAnthropicResponsesStream(
 	providerUtils.SetExtraHeaders(ctx, req, extraHeaders, []string{AnthropicBetaHeader})
 	// OAuth passthrough: forward the caller's raw headers, whose token is the upstream
 	// credential. Skips anthropic-beta — MergeBetaHeaders below owns the final value.
-	providerUtils.SetPassthroughHeaders(ctx, req, providerName, []string{AnthropicBetaHeader})
+	providerUtils.SetPassthroughHeadersForStreaming(ctx, req, providerName, []string{AnthropicBetaHeader})
 
 	if betaHeaders := FilterBetaHeadersForProvider(MergeBetaHeaders(ctx, extraHeaders), providerName, betaHeaderOverrides); len(betaHeaders) > 0 {
 		req.Header.Set(AnthropicBetaHeader, strings.Join(betaHeaders, ","))
@@ -1590,6 +1644,7 @@ func HandleAnthropicResponsesStream(
 		}
 
 		var modelName string
+		var servedServiceTier *schemas.BifrostServiceTier
 		var servedSpeed *string
 		var servedInferenceGeo *string
 		// Model that served the turn after a server-side fallback handoff. Latched
@@ -1623,8 +1678,11 @@ func HandleAnthropicResponsesStream(
 				continue
 			}
 			var event AnthropicStreamEvent
-			if err := sonic.Unmarshal([]byte(eventData), &event); err != nil {
-				logger.Warn("Failed to parse message_start event: %v", err)
+			parseStart := time.Now()
+			umErr := sonic.Unmarshal([]byte(eventData), &event)
+			schemas.AddStreamParse(ctx, time.Since(parseStart))
+			if umErr != nil {
+				logger.Warn("Failed to parse message_start event: %v", umErr)
 				continue
 			}
 			if event.Message != nil && modelName == "" {
@@ -1649,6 +1707,12 @@ func HandleAnthropicResponsesStream(
 				accumulateAnthropicResponsesUsage(usage, billedUsage, usageToProcess)
 				// Mirror served tier onto billedUsage so a mid-stream cancel/timeout can
 				// still apply the served-tier multiplier (billed usage is otherwise bare).
+				// service_tier has no home on BifrostLLMUsage, so it is latched for the
+				// final chunk's response envelope only.
+				if usageToProcess.ServiceTier != nil {
+					mapped := MapAnthropicServiceTierToBifrost(*usageToProcess.ServiceTier)
+					servedServiceTier = &mapped
+				}
 				if usageToProcess.Speed != nil {
 					servedSpeed = usageToProcess.Speed
 					if billedUsage != nil {
@@ -1669,7 +1733,9 @@ func HandleAnthropicResponsesStream(
 				}
 			}
 
+			convCallStart := time.Now()
 			responses, bifrostErr, isLastChunk := event.ToBifrostResponsesStream(ctx, chunkIndex, streamState)
+			schemas.AddStreamConvert(ctx, time.Since(convCallStart))
 			// Propagate message_delta emission flag to context so the output converter
 			// (ToAnthropicResponsesStreamResponse) can skip synthesizing a duplicate.
 			if streamState.HasEmittedMessageDelta {
@@ -1718,6 +1784,14 @@ func HandleAnthropicResponsesStream(
 						response.ExtraFields.RawResponse = eventData
 					}
 
+					// Carry safeguard_results (Claude Code auto-mode classifier) so the
+					// Anthropic egress can restore it on re-rendered frames. Attached to
+					// the same single chunk as the raw frame, and not gated on raw capture
+					// so the fully typed path benefits too.
+					if i == rawIdx && len(event.SafeguardResults) > 0 {
+						response.SafeguardResults = event.SafeguardResults
+					}
+
 					if isLastChunk && i == len(responses)-1 {
 						if response.Response == nil {
 							response.Response = &schemas.BifrostResponsesResponse{}
@@ -1727,6 +1801,9 @@ func HandleAnthropicResponsesStream(
 							usage.TotalTokens = usage.TotalTokens + usage.InputTokensDetails.CachedReadTokens + usage.InputTokensDetails.CachedWriteTokens
 						}
 						response.Response.Usage = usage
+						if servedServiceTier != nil {
+							response.Response.ServiceTier = servedServiceTier
+						}
 						if servedSpeed != nil {
 							response.Response.Speed = servedSpeed
 						}
@@ -1976,6 +2053,10 @@ func (provider *AnthropicProvider) BatchRetrieve(ctx *schemas.BifrostContext, ke
 	if request.BatchID == "" {
 		return nil, providerUtils.NewBifrostOperationError("batch_id is required", nil)
 	}
+	escapedBatchID, idErr := providerUtils.EscapeResourceID(request.BatchID, "batch_id")
+	if idErr != nil {
+		return nil, idErr
+	}
 
 	providerName := provider.GetProviderKey()
 	sendBackRawRequest := providerUtils.ShouldSendBackRawRequest(ctx, provider.sendBackRawRequest)
@@ -1991,7 +2072,7 @@ func (provider *AnthropicProvider) BatchRetrieve(ctx *schemas.BifrostContext, ke
 		providerUtils.SetExtraHeaders(ctx, req, provider.networkConfig.ExtraHeaders, nil)
 		req.SetRequestURI(provider.buildRequestURL(
 			ctx,
-			"/v1/messages/batches/"+url.PathEscape(request.BatchID),
+			"/v1/messages/batches/"+escapedBatchID,
 			schemas.BatchRetrieveRequest,
 		))
 		req.Header.SetMethod(http.MethodGet)
@@ -2062,6 +2143,10 @@ func (provider *AnthropicProvider) BatchCancel(ctx *schemas.BifrostContext, keys
 	if request.BatchID == "" {
 		return nil, providerUtils.NewBifrostOperationError("batch_id is required", nil)
 	}
+	escapedBatchID, idErr := providerUtils.EscapeResourceID(request.BatchID, "batch_id")
+	if idErr != nil {
+		return nil, idErr
+	}
 
 	providerName := provider.GetProviderKey()
 	sendBackRawRequest := providerUtils.ShouldSendBackRawRequest(ctx, provider.sendBackRawRequest)
@@ -2075,7 +2160,7 @@ func (provider *AnthropicProvider) BatchCancel(ctx *schemas.BifrostContext, keys
 
 		// Set headers
 		providerUtils.SetExtraHeaders(ctx, req, provider.networkConfig.ExtraHeaders, nil)
-		req.SetRequestURI(provider.networkConfig.BaseURL + "/v1/messages/batches/" + request.BatchID + "/cancel")
+		req.SetRequestURI(provider.networkConfig.BaseURL + "/v1/messages/batches/" + escapedBatchID + "/cancel")
 		req.Header.SetMethod(http.MethodPost)
 		req.Header.SetContentType("application/json")
 
@@ -2177,6 +2262,10 @@ func (provider *AnthropicProvider) BatchResults(ctx *schemas.BifrostContext, key
 	if request.BatchID == "" {
 		return nil, providerUtils.NewBifrostOperationError("batch_id is required", nil)
 	}
+	escapedBatchID, idErr := providerUtils.EscapeResourceID(request.BatchID, "batch_id")
+	if idErr != nil {
+		return nil, idErr
+	}
 
 	providerName := provider.GetProviderKey()
 
@@ -2188,7 +2277,7 @@ func (provider *AnthropicProvider) BatchResults(ctx *schemas.BifrostContext, key
 
 		// Set headers
 		providerUtils.SetExtraHeaders(ctx, req, provider.networkConfig.ExtraHeaders, nil)
-		req.SetRequestURI(provider.networkConfig.BaseURL + "/v1/messages/batches/" + request.BatchID + "/results")
+		req.SetRequestURI(provider.networkConfig.BaseURL + "/v1/messages/batches/" + escapedBatchID + "/results")
 		req.Header.SetMethod(http.MethodGet)
 
 		if key.Value.GetValue() != "" {
@@ -2260,11 +2349,16 @@ func (provider *AnthropicProvider) BatchResults(ctx *schemas.BifrostContext, key
 		})
 
 		batchResultsResp := &schemas.BifrostBatchResultsResponse{
-			BatchID: request.BatchID,
-			Results: results,
+			BatchID:  request.BatchID,
+			Endpoint: schemas.BatchEndpointMessages,
+			Results:  results,
 			ExtraFields: schemas.BifrostResponseExtraFields{
 				Latency: latency.Milliseconds(),
 			},
+		}
+
+		if providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse) {
+			batchResultsResp.ExtraFields.RawResponse = results
 		}
 
 		if len(parseResult.Errors) > 0 {
@@ -2330,6 +2424,11 @@ func (provider *AnthropicProvider) ImageVariation(ctx *schemas.BifrostContext, k
 // Rerank is not supported by the Anthropic provider.
 func (provider *AnthropicProvider) Rerank(ctx *schemas.BifrostContext, key schemas.Key, request *schemas.BifrostRerankRequest) (*schemas.BifrostRerankResponse, *schemas.BifrostError) {
 	return nil, providerUtils.NewUnsupportedOperationError(schemas.RerankRequest, provider.GetProviderKey())
+}
+
+// Decision is not supported by the Anthropic provider.
+func (provider *AnthropicProvider) Decision(ctx *schemas.BifrostContext, key schemas.Key, request *schemas.BifrostDecisionRequest) (*schemas.BifrostDecisionResponse, *schemas.BifrostError) {
+	return nil, providerUtils.NewUnsupportedOperationError(schemas.DecisionRequest, provider.GetProviderKey())
 }
 
 // OCR is not supported by the Anthropic provider.
@@ -2528,13 +2627,15 @@ func (provider *AnthropicProvider) FileList(ctx *schemas.BifrostContext, keys []
 	var lastFileID string
 	for _, file := range anthropicResp.Data {
 		files = append(files, schemas.FileObject{
-			ID:        file.ID,
-			Object:    file.Type,
-			Bytes:     file.SizeBytes,
-			CreatedAt: parseAnthropicFileTimestamp(file.CreatedAt),
-			Filename:  file.Filename,
-			Purpose:   schemas.FilePurposeBatch,
-			Status:    schemas.FileStatusProcessed,
+			ID:           file.ID,
+			Object:       file.Type,
+			Bytes:        file.SizeBytes,
+			CreatedAt:    parseAnthropicFileTimestamp(file.CreatedAt),
+			Filename:     file.Filename,
+			ContentType:  file.MimeType,
+			Downloadable: file.Downloadable,
+			Purpose:      schemas.FilePurposeBatch,
+			Status:       schemas.FileStatusProcessed,
 		})
 		lastFileID = file.ID
 	}
@@ -2570,6 +2671,10 @@ func (provider *AnthropicProvider) FileRetrieve(ctx *schemas.BifrostContext, key
 	if request.FileID == "" {
 		return nil, providerUtils.NewBifrostOperationError("file_id is required", nil)
 	}
+	escapedFileID, idErr := providerUtils.EscapeResourceID(request.FileID, "file_id")
+	if idErr != nil {
+		return nil, idErr
+	}
 
 	sendBackRawRequest := providerUtils.ShouldSendBackRawRequest(ctx, provider.sendBackRawRequest)
 	sendBackRawResponse := providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse)
@@ -2584,7 +2689,7 @@ func (provider *AnthropicProvider) FileRetrieve(ctx *schemas.BifrostContext, key
 		providerUtils.SetExtraHeaders(ctx, req, provider.networkConfig.ExtraHeaders, nil)
 		req.SetRequestURI(provider.buildRequestURL(
 			ctx,
-			"/v1/files/"+url.PathEscape(request.FileID),
+			"/v1/files/"+escapedFileID,
 			schemas.FileRetrieveRequest,
 		))
 		req.Header.SetMethod(http.MethodGet)
@@ -2656,6 +2761,10 @@ func (provider *AnthropicProvider) FileDelete(ctx *schemas.BifrostContext, keys 
 	if request.FileID == "" {
 		return nil, providerUtils.NewBifrostOperationError("file_id is required", nil)
 	}
+	escapedFileID, idErr := providerUtils.EscapeResourceID(request.FileID, "file_id")
+	if idErr != nil {
+		return nil, idErr
+	}
 
 	sendBackRawRequest := providerUtils.ShouldSendBackRawRequest(ctx, provider.sendBackRawRequest)
 	sendBackRawResponse := providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse)
@@ -2668,7 +2777,7 @@ func (provider *AnthropicProvider) FileDelete(ctx *schemas.BifrostContext, keys 
 
 		// Set headers
 		providerUtils.SetExtraHeaders(ctx, req, provider.networkConfig.ExtraHeaders, nil)
-		req.SetRequestURI(provider.networkConfig.BaseURL + "/v1/files/" + request.FileID)
+		req.SetRequestURI(provider.networkConfig.BaseURL + "/v1/files/" + escapedFileID)
 		req.Header.SetMethod(http.MethodDelete)
 		req.Header.SetContentType("application/json")
 
@@ -2771,6 +2880,10 @@ func (provider *AnthropicProvider) FileContent(ctx *schemas.BifrostContext, keys
 	if request.FileID == "" {
 		return nil, providerUtils.NewBifrostOperationError("file_id is required", nil)
 	}
+	escapedFileID, idErr := providerUtils.EscapeResourceID(request.FileID, "file_id")
+	if idErr != nil {
+		return nil, idErr
+	}
 
 	var lastErr *schemas.BifrostError
 	for _, key := range keys {
@@ -2780,7 +2893,7 @@ func (provider *AnthropicProvider) FileContent(ctx *schemas.BifrostContext, keys
 
 		// Set headers
 		providerUtils.SetExtraHeaders(ctx, req, provider.networkConfig.ExtraHeaders, nil)
-		req.SetRequestURI(provider.networkConfig.BaseURL + "/v1/files/" + request.FileID + "/content")
+		req.SetRequestURI(provider.networkConfig.BaseURL + "/v1/files/" + escapedFileID + "/content")
 		req.Header.SetMethod(http.MethodGet)
 
 		if key.Value.GetValue() != "" {
@@ -2958,6 +3071,11 @@ func (provider *AnthropicProvider) VideoList(_ *schemas.BifrostContext, _ schema
 	return nil, providerUtils.NewUnsupportedOperationError(schemas.VideoListRequest, provider.GetProviderKey())
 }
 
+// VideoEdit is not supported by the Anthropic provider.
+func (provider *AnthropicProvider) VideoEdit(_ *schemas.BifrostContext, _ schemas.Key, _ *schemas.BifrostVideoEditRequest) (*schemas.BifrostVideoEditResponse, *schemas.BifrostError) {
+	return nil, providerUtils.NewUnsupportedOperationError(schemas.VideoEditRequest, provider.GetProviderKey())
+}
+
 // VideoRemix is not supported by the Anthropic provider.
 func (provider *AnthropicProvider) VideoRemix(_ *schemas.BifrostContext, _ schemas.Key, _ *schemas.BifrostVideoRemixRequest) (*schemas.BifrostVideoGenerationResponse, *schemas.BifrostError) {
 	return nil, providerUtils.NewUnsupportedOperationError(schemas.VideoRemixRequest, provider.GetProviderKey())
@@ -3032,6 +3150,7 @@ func (provider *AnthropicProvider) Passthrough(
 
 	providerUtils.SetExtraHeaders(ctx, fasthttpReq, provider.networkConfig.ExtraHeaders, nil)
 
+	providerUtils.StripCallerAuthForInsecureURL(url, req.SafeHeaders)
 	for k, v := range req.SafeHeaders {
 		fasthttpReq.Header.Set(k, v)
 	}
@@ -3105,6 +3224,7 @@ func (provider *AnthropicProvider) PassthroughStream(
 
 	providerUtils.SetExtraHeaders(ctx, fasthttpReq, provider.networkConfig.ExtraHeaders, nil)
 
+	providerUtils.StripCallerAuthForInsecureURL(url, req.SafeHeaders)
 	for k, v := range req.SafeHeaders {
 		fasthttpReq.Header.Set(k, v)
 	}

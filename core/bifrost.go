@@ -14,7 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/bytedance/sonic"
 	"github.com/google/uuid"
 
 	"github.com/maximhq/bifrost/core/keyselectors"
@@ -27,11 +26,13 @@ import (
 	"github.com/maximhq/bifrost/core/providers/bedrockmantle"
 	"github.com/maximhq/bifrost/core/providers/cerebras"
 	"github.com/maximhq/bifrost/core/providers/cohere"
+	"github.com/maximhq/bifrost/core/providers/databricks"
 	"github.com/maximhq/bifrost/core/providers/deepseek"
 	"github.com/maximhq/bifrost/core/providers/elevenlabs"
-	"github.com/maximhq/bifrost/core/providers/fishaudio"
 	"github.com/maximhq/bifrost/core/providers/fireworks"
+	"github.com/maximhq/bifrost/core/providers/fishaudio"
 	"github.com/maximhq/bifrost/core/providers/gemini"
+	"github.com/maximhq/bifrost/core/providers/githubcopilot"
 	"github.com/maximhq/bifrost/core/providers/groq"
 	"github.com/maximhq/bifrost/core/providers/huggingface"
 	"github.com/maximhq/bifrost/core/providers/mistral"
@@ -47,6 +48,7 @@ import (
 	"github.com/maximhq/bifrost/core/providers/runway"
 	"github.com/maximhq/bifrost/core/providers/sarvam"
 	"github.com/maximhq/bifrost/core/providers/sgl"
+	"github.com/maximhq/bifrost/core/providers/typesafe"
 	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
 	"github.com/maximhq/bifrost/core/providers/vertex"
 	"github.com/maximhq/bifrost/core/providers/vllm"
@@ -64,6 +66,36 @@ type ChannelMessage struct {
 	Response       chan *schemas.BifrostResponse
 	ResponseStream chan chan *schemas.BifrostStreamChunk
 	Err            chan schemas.BifrostError
+	queueSpan      schemas.SpanHandle // "queue-wait" span opened at enqueue, closed when a worker dequeues (or on release if the send never landed)
+	sentAt         time.Time          // set by the worker immediately before sending the result/error, so tryRequest can measure the worker->caller goroutine-hop latency ("worker-handoff")
+	// handoff arbitrates who owns the terminal value of a NON-streaming request.
+	// Response/Err are cap-1 channels drained on acquire, so the worker's send is
+	// always ready; once the caller's context ends, ctx.Done() is ready too and a
+	// select picks between them uniformly at random (#6972). The claim makes it
+	// deterministic: the worker claims before it sends and the caller then must
+	// receive, or the caller abandons first and the worker bills and releases.
+	handoff atomic.Int32
+}
+
+const (
+	handoffOpen      int32 = iota // neither side has committed
+	handoffClaimed                // worker will send; tryRequest must receive
+	handoffAbandoned              // tryRequest left on ctx.Done; worker owns the value and the message
+)
+
+// claimDelivery is called by the worker before it sends a terminal value. False
+// means tryRequest already abandoned the message: nobody will read the channel,
+// so the worker bills the value itself and releases the message.
+func (m *ChannelMessage) claimDelivery() bool {
+	return m.handoff.CompareAndSwap(handoffOpen, handoffClaimed)
+}
+
+// abandonDelivery is called by tryRequest when its context ends before a value
+// arrived. False means the worker already claimed delivery: the value is in (or
+// about to enter) the buffer and the caller must receive it, since no one else
+// will. After a successful abandon the caller must not touch the message again.
+func (m *ChannelMessage) abandonDelivery() bool {
+	return m.handoff.CompareAndSwap(handoffOpen, handoffAbandoned)
 }
 
 // Bifrost manages providers and maintains specified open channels for concurrent processing.
@@ -97,6 +129,7 @@ type Bifrost struct {
 	keySelector         schemas.KeySelector                 // Custom key selector function
 	keyPoolFilter       schemas.KeyPoolFilter               // optional hook to veto keys before selection (nil = all eligible)
 	kvStore             schemas.KVStore                     // optional KV store for session stickiness (nil = disabled)
+	sessionAffinity     schemas.SessionAffinity             // decides which key a session stays on; never nil after Init
 }
 
 // ProviderQueue wraps a provider's request channel with lifecycle management
@@ -266,6 +299,12 @@ func Init(ctx context.Context, config schemas.BifrostConfig) (*Bifrost, error) {
 
 	if bifrost.keySelector == nil {
 		bifrost.keySelector = keyselectors.WeightedRandom
+	}
+	// Always present, so key selection never checks for it: without a KV store the shipped
+	// key affinity has nowhere to keep a binding and declines every request.
+	bifrost.sessionAffinity = config.SessionAffinity
+	if bifrost.sessionAffinity == nil {
+		bifrost.sessionAffinity = NewSessionAffinity(bifrost.kvStore, bifrost.logger)
 	}
 
 	// Initialize object pools
@@ -514,6 +553,16 @@ func (bifrost *Bifrost) ListAllModels(ctx *schemas.BifrostContext, req *schemas.
 	// Launch concurrent requests for all providers
 	for _, providerKey := range providerKeys {
 		if strings.TrimSpace(string(providerKey)) == "" {
+			continue
+		}
+
+		// Custom providers can disable list_models via allowed_requests; the call would
+		// only bounce with "unsupported operation", so don't spend a request on it here.
+		// Scoped to the fan-out: a direct ListModelsRequest still returns the error.
+		if config, err := bifrost.account.GetConfigForProvider(providerKey); err == nil && config != nil &&
+			config.CustomProviderConfig != nil &&
+			!config.CustomProviderConfig.IsOperationAllowed(schemas.ListModelsRequest) {
+			bifrost.logger.Debug("skipping provider %s in list all models: list_models is disabled via allowed_requests", providerKey)
 			continue
 		}
 
@@ -1371,11 +1420,12 @@ func (bifrost *Bifrost) RerankRequest(ctx *schemas.BifrostContext, req *schemas.
 		}
 	}
 	for i, doc := range req.Documents {
-		if strings.TrimSpace(doc.Text) == "" {
+		// A document carries either prose or a structured body; only an empty pair is unrankable.
+		if strings.TrimSpace(doc.Text) == "" && len(doc.Data) == 0 {
 			return nil, &schemas.BifrostError{
 				IsBifrostError: false,
 				Error: &schemas.ErrorField{
-					Message: fmt.Sprintf("document text is empty at index %d", i),
+					Message: fmt.Sprintf("document has no text or data at index %d", i),
 				},
 				ExtraFields: schemas.BifrostErrorExtraFields{
 					RequestType:            schemas.RerankRequest,
@@ -1395,6 +1445,58 @@ func (bifrost *Bifrost) RerankRequest(ctx *schemas.BifrostContext, req *schemas.
 		return nil, err
 	}
 	return response.RerankResponse, nil
+}
+
+// DecisionRequest sends an decision request to the specified provider.
+func (bifrost *Bifrost) DecisionRequest(ctx *schemas.BifrostContext, req *schemas.BifrostDecisionRequest) (*schemas.BifrostDecisionResponse, *schemas.BifrostError) {
+	if req == nil {
+		return nil, &schemas.BifrostError{
+			IsBifrostError: false,
+			Error: &schemas.ErrorField{
+				Message: "decision request is nil",
+			},
+			ExtraFields: schemas.BifrostErrorExtraFields{
+				RequestType: schemas.DecisionRequest,
+			},
+		}
+	}
+	if req.State == nil {
+		return nil, &schemas.BifrostError{
+			IsBifrostError: false,
+			Error: &schemas.ErrorField{
+				Message: "state not provided for decision request",
+			},
+			ExtraFields: schemas.BifrostErrorExtraFields{
+				RequestType:            schemas.DecisionRequest,
+				Provider:               req.Provider,
+				OriginalModelRequested: req.Model,
+				ResolvedModelUsed:      req.Model,
+			},
+		}
+	}
+	if len(req.Questions) == 0 {
+		return nil, &schemas.BifrostError{
+			IsBifrostError: false,
+			Error: &schemas.ErrorField{
+				Message: "questions not provided for decision request",
+			},
+			ExtraFields: schemas.BifrostErrorExtraFields{
+				RequestType:            schemas.DecisionRequest,
+				Provider:               req.Provider,
+				OriginalModelRequested: req.Model,
+				ResolvedModelUsed:      req.Model,
+			},
+		}
+	}
+	bifrostReq := bifrost.getBifrostRequest()
+	bifrostReq.RequestType = schemas.DecisionRequest
+	bifrostReq.DecisionRequest = req
+
+	response, err := bifrost.handleRequest(ctx, bifrostReq)
+	if err != nil {
+		return nil, err
+	}
+	return response.DecisionResponse, nil
 }
 
 // OCRRequest sends an OCR request to the specified provider.
@@ -1906,11 +2008,13 @@ func (bifrost *Bifrost) VideoGenerationRequest(ctx *schemas.BifrostContext,
 			},
 		}
 	}
-	if req.Input == nil || req.Input.Prompt == "" {
+	// Operations driven by an input asset (video upscale, image-to-3D) carry no prompt; the
+	// provider rejects a combination its model cannot serve.
+	if req.Input == nil || (req.Input.Prompt == "" && req.Input.InputReference == nil && req.Input.VideoURI == nil) {
 		return nil, &schemas.BifrostError{
 			IsBifrostError: false,
 			Error: &schemas.ErrorField{
-				Message: "prompt not provided for video generation request",
+				Message: "prompt, input_reference or video_uri not provided for video generation request",
 			},
 			ExtraFields: schemas.BifrostErrorExtraFields{
 				RequestType:            schemas.VideoGenerationRequest,
@@ -1937,6 +2041,82 @@ func (bifrost *Bifrost) VideoGenerationRequest(ctx *schemas.BifrostContext,
 			},
 			ExtraFields: schemas.BifrostErrorExtraFields{
 				RequestType:            schemas.VideoGenerationRequest,
+				Provider:               req.Provider,
+				OriginalModelRequested: req.Model,
+				ResolvedModelUsed:      req.Model,
+			},
+		}
+	}
+
+	return response.VideoGenerationResponse, nil
+}
+
+// VideoEditRequest sends a video edit request to the specified provider.
+func (bifrost *Bifrost) VideoEditRequest(ctx *schemas.BifrostContext,
+	req *schemas.BifrostVideoEditRequest,
+) (*schemas.BifrostVideoEditResponse, *schemas.BifrostError) {
+	if req == nil {
+		return nil, &schemas.BifrostError{
+			IsBifrostError: false,
+			Error: &schemas.ErrorField{
+				Message: "video edit request is nil",
+			},
+			ExtraFields: schemas.BifrostErrorExtraFields{
+				RequestType: schemas.VideoEditRequest,
+			},
+		}
+	}
+	if req.Input == nil ||
+		(len(req.Input.Video.Video) == 0 && req.Input.Video.URL == "" && req.Input.Video.ID == "") {
+		return nil, &schemas.BifrostError{
+			IsBifrostError: false,
+			Error: &schemas.ErrorField{
+				Message: "source video not provided for video edit request",
+			},
+			ExtraFields: schemas.BifrostErrorExtraFields{
+				RequestType:            schemas.VideoEditRequest,
+				Provider:               req.Provider,
+				OriginalModelRequested: req.Model,
+				ResolvedModelUsed:      req.Model,
+			},
+		}
+	}
+	// Operations driven purely by the source video (upscale, background removal) carry no prompt.
+	var videoEditParamsType *string
+	if req.Params != nil {
+		videoEditParamsType = req.Params.Type
+	}
+	if !isPromptOptionalVideoEditType(videoEditParamsType) && req.Input.Prompt == "" {
+		return nil, &schemas.BifrostError{
+			IsBifrostError: false,
+			Error: &schemas.ErrorField{
+				Message: "prompt not provided for video edit request",
+			},
+			ExtraFields: schemas.BifrostErrorExtraFields{
+				RequestType:            schemas.VideoEditRequest,
+				Provider:               req.Provider,
+				OriginalModelRequested: req.Model,
+				ResolvedModelUsed:      req.Model,
+			},
+		}
+	}
+
+	bifrostReq := bifrost.getBifrostRequest()
+	bifrostReq.RequestType = schemas.VideoEditRequest
+	bifrostReq.VideoEditRequest = req
+
+	response, err := bifrost.handleRequest(ctx, bifrostReq)
+	if err != nil {
+		return nil, err
+	}
+	if response == nil || response.VideoGenerationResponse == nil {
+		return nil, &schemas.BifrostError{
+			IsBifrostError: false,
+			Error: &schemas.ErrorField{
+				Message: "received nil response from provider",
+			},
+			ExtraFields: schemas.BifrostErrorExtraFields{
+				RequestType:            schemas.VideoEditRequest,
 				Provider:               req.Provider,
 				OriginalModelRequested: req.Model,
 				ResolvedModelUsed:      req.Model,
@@ -3830,6 +4010,8 @@ func (bifrost *Bifrost) UpdateProvider(providerKey schemas.ModelProvider) error 
 			default:
 				// newPq is full — cancel this message and all remaining in oldPq.
 				cancelMsg := func(r *ChannelMessage) {
+					// Cancelling instead of transferring: close its queue-wait span.
+					bifrost.endQueueWaitSpan(r)
 					prov, mod, _ := r.BifrostRequest.GetRequestFields()
 					select {
 					case r.Err <- schemas.BifrostError{
@@ -3994,6 +4176,41 @@ func (bifrost *Bifrost) RegisterMCPTool(name, description string, handler func(a
 // These operations involve network I/O and connection management that require mutex locks
 // which can block briefly during execution.
 
+// MCPClientRequiresPerCallConnection reports whether config resolves to a
+// per-call connection (true) or a persistent shared one (false), taking auth
+// type, connection type, and needs_session_stickiness into account together.
+// Returns false (the persistent-connection default) if MCP is not configured.
+func (bifrost *Bifrost) MCPClientRequiresPerCallConnection(config *schemas.MCPClientConfig) bool {
+	if bifrost.MCPManager == nil {
+		return false
+	}
+	return bifrost.MCPManager.RequiresPerCallConnection(config)
+}
+
+// SetMCPStateChangeCallback registers cb to be invoked on every reactive
+// (non-admin-driven) MCP client connection-state transition — periodic
+// checker transitions and reactive connect-failure classification into
+// NeedsReauth. Pass nil to clear a previously registered callback. A no-op
+// if MCP is not configured.
+func (bifrost *Bifrost) SetMCPStateChangeCallback(cb func(clientID, name string, oldState, newState schemas.MCPConnectionState)) {
+	if bifrost.MCPManager == nil {
+		return
+	}
+	bifrost.MCPManager.SetStateChangeCallback(cb)
+}
+
+// SetMCPToolsChangeCallback registers cb to be invoked whenever an MCP
+// client's tool map is freshly (re)discovered — connect/reconnect, per-call
+// discovery, and the periodic checker's own refresh. core/mcp has no DB
+// access; this is the seam the transport layer persists through. Pass nil to
+// clear a previously registered callback. A no-op if MCP is not configured.
+func (bifrost *Bifrost) SetMCPToolsChangeCallback(cb func(clientID, name string, tools map[string]schemas.ChatTool, toolNameMapping map[string]string)) {
+	if bifrost.MCPManager == nil {
+		return
+	}
+	bifrost.MCPManager.SetToolsChangeCallback(cb)
+}
+
 // GetMCPClients returns all MCP clients managed by the Bifrost instance.
 //
 // Returns:
@@ -4028,9 +4245,10 @@ func (bifrost *Bifrost) GetMCPClients() ([]schemas.MCPClient, error) {
 		})
 
 		clientsInConfig = append(clientsInConfig, schemas.MCPClient{
-			Config: client.ExecutionConfig,
-			Tools:  tools,
-			State:  client.State,
+			Config:      client.ExecutionConfig,
+			Tools:       tools,
+			State:       client.State,
+			LastFailure: client.LastFailure,
 		})
 	}
 
@@ -4182,12 +4400,12 @@ func (bifrost *Bifrost) UpdateMCPClient(id string, updatedConfig *schemas.MCPCli
 	return bifrost.MCPManager.UpdateClient(id, updatedConfig)
 }
 
-// UpdateMCPClientConnection reconnects an existing MCP client using updated headers
-func (bifrost *Bifrost) UpdateMCPClientConnection(id string, newConfig *schemas.MCPClientConfig) error {
+// UpdateMCPClientCredentials reconnects an existing MCP client using updated headers
+func (bifrost *Bifrost) UpdateMCPClientCredentials(id string, newConfig *schemas.MCPClientConfig) error {
 	if bifrost.MCPManager == nil {
 		return fmt.Errorf("mcp is not configured in this bifrost instance")
 	}
-	return bifrost.MCPManager.UpdateClientConnection(id, newConfig)
+	return bifrost.MCPManager.UpdateClientCredentials(id, newConfig)
 }
 
 // ReconnectMCPClient attempts to reconnect an MCP client if it is disconnected.
@@ -4203,6 +4421,22 @@ func (bifrost *Bifrost) ReconnectMCPClient(id string) error {
 	}
 
 	return bifrost.MCPManager.ReconnectClient(id)
+}
+
+// CloseAndMarkNeedsReauth closes a shared MCP client's live upstream
+// connection and flips it to needs_reauth, without attempting a new dial.
+// Used after OAuth credential rotation.
+//
+// Parameters:
+//   - id: ID of the client to close and flip to needs_reauth
+//
+// Returns:
+//   - error: if the client does not exist or has no persistent connection
+func (bifrost *Bifrost) CloseAndMarkNeedsReauth(id string) error {
+	if bifrost.MCPManager == nil {
+		return fmt.Errorf("mcp is not configured in this bifrost instance")
+	}
+	return bifrost.MCPManager.CloseAndMarkNeedsReauth(id)
 }
 
 // DisableMCPClient shuts down an MCP client's connection, health monitor, and tool
@@ -4307,6 +4541,17 @@ func (bifrost *Bifrost) UpdateToolManagerConfig(maxAgentDepth int, toolExecution
 	return nil
 }
 
+// UpdateMCPToolSyncInterval hot-reloads the global MCP tool sync interval and
+// re-times the periodic checkers of every client that follows the global
+// setting. Pass a non-positive interval to fall back to the built-in default.
+func (bifrost *Bifrost) UpdateMCPToolSyncInterval(interval time.Duration) error {
+	if bifrost.MCPManager == nil {
+		return fmt.Errorf("mcp is not configured in this bifrost instance")
+	}
+	bifrost.MCPManager.UpdateToolSyncInterval(interval)
+	return nil
+}
+
 // PROVIDER MANAGEMENT
 
 // createBaseProvider creates a provider based on the base provider type
@@ -4356,6 +4601,8 @@ func (bifrost *Bifrost) createBaseProvider(providerKey schemas.ModelProvider, co
 		return opencode.NewOpencodeGoProvider(config, bifrost.logger)
 	case schemas.OpencodeZen:
 		return opencode.NewOpencodeZenProvider(config, bifrost.logger)
+	case schemas.GithubCopilot:
+		return githubcopilot.NewGithubCopilotProvider(config, bifrost.logger)
 	case schemas.SGL:
 		return sgl.NewSGLProvider(config, bifrost.logger)
 	case schemas.Parasail:
@@ -4394,6 +4641,10 @@ func (bifrost *Bifrost) createBaseProvider(providerKey schemas.ModelProvider, co
 		return fireworks.NewFireworksProvider(config, bifrost.logger)
 	case schemas.Sarvam:
 		return sarvam.NewSarvamProvider(config, bifrost.logger)
+	case schemas.Databricks:
+		return databricks.NewDatabricksProvider(config, bifrost.logger)
+	case schemas.Typesafe:
+		return typesafe.NewTypesafeProvider(config, bifrost.logger)
 	default:
 		return nil, fmt.Errorf("unsupported provider: %s", targetProviderKey)
 	}
@@ -4475,7 +4726,7 @@ func (bifrost *Bifrost) getProviderQueue(providerKey schemas.ModelProvider) (*Pr
 		pq := pqValue.(*ProviderQueue)
 		return pq, nil
 	}
-	bifrost.logger.Debug(fmt.Sprintf("Creating new request queue for provider %s at runtime", providerKey))
+	bifrost.logger.Debug("Creating new request queue for provider %s at runtime", providerKey)
 	config, err := bifrost.account.GetConfigForProvider(providerKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get config for provider %s: %v", providerKey, err)
@@ -4618,6 +4869,8 @@ func (bifrost *Bifrost) RunStreamPreHooks(ctx *schemas.BifrostContext, req *sche
 		traceID := tracer.CreateTrace("")
 		if traceID != "" {
 			ctx.SetValue(schemas.BifrostContextKeyTraceID, traceID)
+			// No traceparent on this path, so the exported W3C trace ID equals the store handle.
+			ctx.SetValue(schemas.BifrostContextKeyExportTraceID, traceID)
 		}
 	}
 
@@ -4752,6 +5005,8 @@ func (bifrost *Bifrost) RunRealtimeTurnPreHooks(ctx *schemas.BifrostContext, req
 		traceID := tracer.CreateTrace("")
 		if traceID != "" {
 			ctx.SetValue(schemas.BifrostContextKeyTraceID, traceID)
+			// No traceparent on this path, so the exported W3C trace ID equals the store handle.
+			ctx.SetValue(schemas.BifrostContextKeyExportTraceID, traceID)
 		}
 	}
 
@@ -4819,7 +5074,7 @@ func (bifrost *Bifrost) RunRealtimeTurnPreHooks(ctx *schemas.BifrostContext, req
 			drainAndAttachPluginLogs(ctx)
 			if bifrostErr != nil {
 				bifrostErr.PopulateExtraFields(schemas.RealtimeRequest, provider, model, model)
-				return nil, bifrostErr
+				return resp, bifrostErr
 			} else if resp != nil {
 				resp.PopulateExtraFields(schemas.RealtimeRequest, provider, model, model)
 			}
@@ -4979,6 +5234,12 @@ func (bifrost *Bifrost) prepareFallbackRequest(req *schemas.BifrostRequest, fall
 		tmp.Model = fallback.Model
 		fallbackReq.RerankRequest = &tmp
 	}
+	if req.DecisionRequest != nil {
+		tmp := *req.DecisionRequest
+		tmp.Provider = fallback.Provider
+		tmp.Model = fallback.Model
+		fallbackReq.DecisionRequest = &tmp
+	}
 	if req.OCRRequest != nil {
 		tmp := *req.OCRRequest
 		tmp.Provider = fallback.Provider
@@ -5011,13 +5272,43 @@ func (bifrost *Bifrost) prepareFallbackRequest(req *schemas.BifrostRequest, fall
 		tmp.Model = fallback.Model
 		fallbackReq.VideoGenerationRequest = &tmp
 	}
+	if req.VideoEditRequest != nil {
+		tmp := *req.VideoEditRequest
+		tmp.Provider = fallback.Provider
+		tmp.Model = fallback.Model
+		fallbackReq.VideoEditRequest = &tmp
+	}
+	if req.ImageEditRequest != nil {
+		tmp := *req.ImageEditRequest
+		tmp.Provider = fallback.Provider
+		tmp.Model = fallback.Model
+		fallbackReq.ImageEditRequest = &tmp
+	}
+	if req.ImageVariationRequest != nil {
+		tmp := *req.ImageVariationRequest
+		tmp.Provider = fallback.Provider
+		tmp.Model = fallback.Model
+		fallbackReq.ImageVariationRequest = &tmp
+	}
+	// A sub-request type without an arm above keeps the primary's pointer through the
+	// shallow copy, so the "fallback" would be routed back to the primary while
+	// RoutingInfo reports it as a fallback (#6966). Skip it loudly instead of silently
+	// re-running the primary; the caller treats nil as a skipped fallback.
+	if provider, model, _ := fallbackReq.GetRequestFields(); provider != fallback.Provider || model != fallback.Model {
+		bifrost.logger.Warn("fallback %s/%s skipped: request type has no arm in prepareFallbackRequest (request still targets %s/%s)", fallback.Provider, fallback.Model, provider, model)
+		return nil
+	}
 	return &fallbackReq
 }
 
 // shouldContinueWithFallbacks processes errors from fallback attempts
 // Returns true if we should continue with more fallbacks, false if we should stop
 func (bifrost *Bifrost) shouldContinueWithFallbacks(fallback schemas.Fallback, fallbackErr *schemas.BifrostError) bool {
-	if fallbackErr.Error.Type != nil && *fallbackErr.Error.Type == schemas.RequestCancelled {
+	if fallbackErr == nil {
+		return false
+	}
+
+	if fallbackErr.Error != nil && fallbackErr.Error.Type != nil && *fallbackErr.Error.Type == schemas.RequestCancelled {
 		return false
 	}
 
@@ -5026,8 +5317,21 @@ func (bifrost *Bifrost) shouldContinueWithFallbacks(fallback schemas.Fallback, f
 		return false
 	}
 
-	bifrost.logger.Debug(fmt.Sprintf("Fallback provider %s failed: %s", fallback.Provider, fallbackErr.Error.Message))
+	bifrost.logger.Debug("Fallback provider %s failed: %s", fallback.Provider, fallbackErr.GetErrorString())
 	return true
+}
+
+// populateLatencyExtraFields stamps upstream and overhead onto resp's ExtraFields,
+// deriving overhead from the request-start time on ctx. No-ops when unmeasured, so
+// absent stays distinct from zero. Call before RunPostLLMHooks so logging sees it.
+func populateLatencyExtraFields(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse) {
+	if resp == nil {
+		return
+	}
+	resp.PopulateUpstreamLatency(ctx)
+	if start, ok := ctx.Value(schemas.BifrostContextKeyRequestStartTime).(time.Time); ok {
+		resp.PopulateOverheadLatency(ctx, time.Since(start))
+	}
 }
 
 // handleRequest handles the request to the provider based on the request type
@@ -5043,12 +5347,22 @@ func (bifrost *Bifrost) handleRequest(ctx *schemas.BifrostContext, req *schemas.
 		ctx = bifrost.ctx
 	}
 
+	// What the caller asked for, before any hook rewrites it: the name under which a session
+	// remembers where these requests were served. Reported back with how the request ended.
+	requested := schemas.Route{Provider: provider, Model: model}
+	var served *schemas.Route
+	servedFallback := false
+	defer func() { bifrost.observeSessionOutcome(ctx, requested, served, servedFallback, bifrostErr) }()
+
 	// Reset first: bifrost.ctx is shared across every nil-ctx caller.
 	ctx.ResetUpstreamLatency()
-	// Stamp on the way out, after every attempt and fallback.
+	// Whole-request start for top-down overhead (total minus upstream). On ctx so
+	// tryRequest can stamp the response before post-hooks, where logging reads it.
+	ctx.SetValue(schemas.BifrostContextKeyRequestStartTime, time.Now())
+	// Backstop for the returned body if a post-hook replaced the response.
 	defer func() {
 		ctx.StampUpstreamLatency()
-		resp.PopulateUpstreamLatency(ctx)
+		populateLatencyExtraFields(ctx, resp)
 	}()
 
 	// Try the primary provider first
@@ -5058,6 +5372,11 @@ func (bifrost *Bifrost) handleRequest(ctx *schemas.BifrostContext, req *schemas.
 		requestID := uuid.New().String()
 		ctx.SetValue(schemas.BifrostContextKeyRequestID, requestID)
 	}
+	// "handle-setup" overhead phase: model-catalog publish + the pre-request hook
+	// pipeline glue. Per-plugin work nests as its own spans; this bucket is the
+	// remaining core-side setup.
+	setupSpan := bifrost.startCoreSpan(ctx, "handle-setup")
+
 	// Expose the model catalog to plugins (ctx.GetModelInfo / ctx.CalculateCost)
 	// before any hook runs.
 	bifrost.setModelCatalogOnContext(ctx)
@@ -5068,35 +5387,46 @@ func (bifrost *Bifrost) handleRequest(ctx *schemas.BifrostContext, req *schemas.
 	preReqPipeline := bifrost.getPluginPipeline()
 	preReqPipeline.RunPreRequestHooks(ctx, req)
 	bifrost.releasePluginPipeline(preReqPipeline)
+	// The session has the last word on the chain the hooks produced.
+	bifrost.resolveSessionRoute(ctx, requested, req)
+	bifrost.endCoreSpan(setupSpan)
+	// "miscellaneous" phase: pre-dispatch glue (field re-read + validation) on no other
+	// span. Closed before tryRequest so pipeline-pre stays a separate bucket.
+	preDispatchSpan := bifrost.startCoreSpan(ctx, "miscellaneous")
 	// Re-read after PreRequestHook — provider/model/fallbacks may have changed.
 	provider, model, fallbacks = req.GetRequestFields()
 	// Empty provider/model after PreRequestHook means no plugin
 	// could pick a provider for this model — the caller's input is unresolvable.
-	if err := validateRequestAfterPreRequestHooks(req); err != nil {
+	validateErr := validateRequestAfterPreRequestHooks(req)
+	bifrost.endCoreSpan(preDispatchSpan)
+	if validateErr != nil {
 		// Returning before tryRequest skips the downstream log drain, so flush
 		// any PreRequestHook-emitted plugin logs here.
 		flushPluginLogs(ctx)
-		err.PopulateExtraFields(req.RequestType, provider, model, model)
-		return nil, err
+		validateErr.PopulateExtraFields(req.RequestType, provider, model, model)
+		return nil, validateErr
 	}
 
-	bifrost.logger.Debug(fmt.Sprintf("primary provider %s with model %s and %d fallbacks", provider, model, len(fallbacks)))
+	bifrost.logger.Debug("primary provider %s with model %s and %d fallbacks", provider, model, len(fallbacks))
 
 	primaryResult, primaryErr := bifrost.tryRequest(ctx, req)
 	if primaryErr != nil {
-		if primaryErr.Error != nil {
-			bifrost.logger.Debug(fmt.Sprintf("primary provider %s with model %s returned error: %s", provider, model, primaryErr.Error.Message))
-		} else {
-			bifrost.logger.Debug(fmt.Sprintf("primary provider %s with model %s returned error: %v", provider, model, primaryErr))
-		}
+		// GetErrorString, not %v on the error itself: BifrostError.String marshals the
+		// whole struct, and ExtraFields.RawRequest/RawResponse carry the outbound provider
+		// payload, which holds the Authorization header, or the ?key=<api-key> query
+		// param on Vertex/Gemini. Debug logs are not a place to put credentials.
+		bifrost.logger.Debug("primary provider %s with model %s returned error: %s", provider, model, primaryErr.GetErrorString())
 		if len(fallbacks) > 0 {
-			bifrost.logger.Debug(fmt.Sprintf("check if we should try %d fallbacks", len(fallbacks)))
+			bifrost.logger.Debug("check if we should try %d fallbacks", len(fallbacks))
 		}
 	}
 
 	// Check if we should proceed with fallbacks
 	shouldTryFallbacks := bifrost.shouldTryFallbacks(req, primaryErr)
 	if !shouldTryFallbacks {
+		if primaryErr == nil {
+			served = &schemas.Route{Provider: provider, Model: model}
+		}
 		return primaryResult, primaryErr
 	}
 
@@ -5114,10 +5444,15 @@ func (bifrost *Bifrost) handleRequest(ctx *schemas.BifrostContext, req *schemas.
 	// Try fallbacks in order
 	for i, fallback := range fallbacks {
 		ctx.SetValue(schemas.BifrostContextKeyFallbackIndex, i+1)
-		bifrost.logger.Debug(fmt.Sprintf("trying fallback provider %s with model %s", fallback.Provider, fallback.Model))
+		bifrost.logger.Debug("trying fallback provider %s with model %s", fallback.Provider, fallback.Model)
 		ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelInfo, fmt.Sprintf("Trying fallback %d/%d: %s/%s (previous attempt failed: %s)", i+1, len(fallbacks), fallback.Provider, fallback.Model, routingErrorSummary(lastErr)))
 		ctx.SetValue(schemas.BifrostContextKeyFallbackRequestID, uuid.New().String())
 		clearCtxForFallback(ctx)
+		// Re-pin after the clear: RunPreRequestHooks, which commits a target's pin, runs once per request, not per fallback.
+		if keyID := strings.TrimSpace(fallback.KeyID); keyID != "" {
+			ctx.SetFallbackPinnedAPIKeyID(keyID)
+			ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelInfo, fmt.Sprintf("Fallback %d/%d pinned to provider key %s", i+1, len(fallbacks), keyID))
+		}
 
 		// Start span for fallback attempt
 		tracer := bifrost.getTracer()
@@ -5130,8 +5465,8 @@ func (bifrost *Bifrost) handleRequest(ctx *schemas.BifrostContext, req *schemas.
 
 		fallbackReq := bifrost.prepareFallbackRequest(req, fallback)
 		if fallbackReq == nil {
-			bifrost.logger.Debug(fmt.Sprintf("fallback provider %s with model %s is nil", fallback.Provider, fallback.Model))
-			ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelWarn, fmt.Sprintf("Fallback %s/%s skipped: missing provider config", fallback.Provider, fallback.Model))
+			bifrost.logger.Debug("fallback provider %s with model %s is nil", fallback.Provider, fallback.Model)
+			ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelWarn, fmt.Sprintf("Fallback %s/%s skipped: missing provider config or unsupported request type", fallback.Provider, fallback.Model))
 			tracer.SetAttribute(handle, "error", "fallback request preparation failed")
 			tracer.EndSpan(handle, schemas.SpanStatusError, "fallback request preparation failed")
 			continue
@@ -5145,9 +5480,11 @@ func (bifrost *Bifrost) handleRequest(ctx *schemas.BifrostContext, req *schemas.
 		result.SetFallbackRoutingInfo(provider, model)
 		fallbackErr.SetFallbackRoutingInfo(provider, model)
 		if fallbackErr == nil {
-			bifrost.logger.Debug(fmt.Sprintf("successfully used fallback provider %s with model %s", fallback.Provider, fallback.Model))
+			bifrost.logger.Debug("successfully used fallback provider %s with model %s", fallback.Provider, fallback.Model)
 			ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelInfo, fmt.Sprintf("Request served by fallback %s/%s (attempt %d/%d)", fallback.Provider, fallback.Model, i+1, len(fallbacks)))
 			tracer.EndSpan(handle, schemas.SpanStatusOk, "")
+			served = &schemas.Route{Provider: fallback.Provider, Model: fallback.Model}
+			servedFallback = true
 			return result, nil
 		}
 
@@ -5175,7 +5512,7 @@ func (bifrost *Bifrost) handleRequest(ctx *schemas.BifrostContext, req *schemas.
 // It handles plugin hooks, request validation, response processing, and fallback providers.
 // If the primary provider fails, it will try each fallback provider in order until one succeeds.
 // It is the wrapper for all streaming public API methods.
-func (bifrost *Bifrost) handleStreamRequest(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
+func (bifrost *Bifrost) handleStreamRequest(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (stream chan *schemas.BifrostStreamChunk, bifrostErr *schemas.BifrostError) {
 	defer bifrost.releaseBifrostRequest(req)
 	provider, model, fallbacks := req.GetRequestFields()
 
@@ -5184,7 +5521,18 @@ func (bifrost *Bifrost) handleStreamRequest(ctx *schemas.BifrostContext, req *sc
 		ctx = bifrost.ctx
 	}
 
+	// What the caller asked for, before any hook rewrites it: the name under which a session
+	// remembers where these requests were served. Reported back with how the request ended.
+	requested := schemas.Route{Provider: provider, Model: model}
+	var served *schemas.Route
+	servedFallback := false
+	defer func() { bifrost.observeSessionOutcome(ctx, requested, served, servedFallback, bifrostErr) }()
+
 	ctx.ResetUpstreamLatency()
+	ctx.ResetStreamOverhead()
+	// Whole-request start for overhead on the streaming short-circuit path; the
+	// normal path derives its total from the final chunk.
+	ctx.SetValue(schemas.BifrostContextKeyRequestStartTime, time.Now())
 
 	// Try the primary provider first
 	ctx.SetValue(schemas.BifrostContextKeyFallbackIndex, 0)
@@ -5201,35 +5549,45 @@ func (bifrost *Bifrost) handleStreamRequest(ctx *schemas.BifrostContext, req *sc
 	preReqPipeline := bifrost.getPluginPipeline()
 	preReqPipeline.RunPreRequestHooks(ctx, req)
 	bifrost.releasePluginPipeline(preReqPipeline)
+	// The session has the last word on the chain the hooks produced.
+	bifrost.resolveSessionRoute(ctx, requested, req)
+	// "miscellaneous" phase: pre-dispatch glue (field re-read + validation) on no other
+	// span. Mirrors handleRequest so streaming classifies this cost too.
+	preDispatchSpan := bifrost.startCoreSpan(ctx, "miscellaneous")
 	// Re-read after PreRequestHook — provider/model/fallbacks may have changed.
 	provider, model, fallbacks = req.GetRequestFields()
 	// Empty provider after PreRequestHook means no plugin
 	// could pick a provider for this model — the caller's input is unresolvable.
-	if err := validateRequestAfterPreRequestHooks(req); err != nil {
+	validateErr := validateRequestAfterPreRequestHooks(req)
+	bifrost.endCoreSpan(preDispatchSpan)
+	if validateErr != nil {
 		// Returning before tryStreamRequest skips the downstream log drain, so
 		// flush any PreRequestHook-emitted plugin logs here.
 		flushPluginLogs(ctx)
-		err.PopulateExtraFields(req.RequestType, provider, model, model)
-		return nil, err
+		validateErr.PopulateExtraFields(req.RequestType, provider, model, model)
+		return nil, validateErr
 	}
 
-	bifrost.logger.Debug(fmt.Sprintf("primary provider %s with model %s and %d fallbacks", provider, model, len(fallbacks)))
+	bifrost.logger.Debug("primary provider %s with model %s and %d fallbacks", provider, model, len(fallbacks))
 
 	primaryResult, primaryErr := bifrost.tryStreamRequest(ctx, req)
 	if primaryErr != nil {
-		if primaryErr.Error != nil {
-			bifrost.logger.Debug(fmt.Sprintf("primary provider %s with model %s returned error: %s", provider, model, primaryErr.Error.Message))
-		} else {
-			bifrost.logger.Debug(fmt.Sprintf("primary provider %s with model %s returned error: %v", provider, model, primaryErr))
-		}
+		// GetErrorString, not %v on the error itself: BifrostError.String marshals the
+		// whole struct, and ExtraFields.RawRequest/RawResponse carry the outbound provider
+		// payload, which holds the Authorization header, or the ?key=<api-key> query
+		// param on Vertex/Gemini. Debug logs are not a place to put credentials.
+		bifrost.logger.Debug("primary provider %s with model %s returned error: %s", provider, model, primaryErr.GetErrorString())
 		if len(fallbacks) > 0 {
-			bifrost.logger.Debug(fmt.Sprintf("check if we should try %d fallbacks", len(fallbacks)))
+			bifrost.logger.Debug("check if we should try %d fallbacks", len(fallbacks))
 		}
 	}
 
 	// Check if we should proceed with fallbacks
 	shouldTryFallbacks := bifrost.shouldTryFallbacks(req, primaryErr)
 	if !shouldTryFallbacks {
+		if primaryErr == nil {
+			served = &schemas.Route{Provider: provider, Model: model}
+		}
 		return primaryResult, primaryErr
 	}
 
@@ -5247,6 +5605,11 @@ func (bifrost *Bifrost) handleStreamRequest(ctx *schemas.BifrostContext, req *sc
 		ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelInfo, fmt.Sprintf("Trying fallback %d/%d: %s/%s (previous attempt failed: %s)", i+1, len(fallbacks), fallback.Provider, fallback.Model, routingErrorSummary(lastErr)))
 		ctx.SetValue(schemas.BifrostContextKeyFallbackRequestID, uuid.New().String())
 		clearCtxForFallback(ctx)
+		// Re-pin after the clear: RunPreRequestHooks, which commits a target's pin, runs once per request, not per fallback.
+		if keyID := strings.TrimSpace(fallback.KeyID); keyID != "" {
+			ctx.SetFallbackPinnedAPIKeyID(keyID)
+			ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelInfo, fmt.Sprintf("Fallback %d/%d pinned to provider key %s", i+1, len(fallbacks), keyID))
+		}
 
 		// Start span for fallback attempt
 		tracer := bifrost.getTracer()
@@ -5259,7 +5622,7 @@ func (bifrost *Bifrost) handleStreamRequest(ctx *schemas.BifrostContext, req *sc
 
 		fallbackReq := bifrost.prepareFallbackRequest(req, fallback)
 		if fallbackReq == nil {
-			ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelWarn, fmt.Sprintf("Fallback %s/%s skipped: missing provider config", fallback.Provider, fallback.Model))
+			ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelWarn, fmt.Sprintf("Fallback %s/%s skipped: missing provider config or unsupported request type", fallback.Provider, fallback.Model))
 			tracer.SetAttribute(handle, "error", "fallback request preparation failed")
 			tracer.EndSpan(handle, schemas.SpanStatusError, "fallback request preparation failed")
 			continue
@@ -5289,9 +5652,11 @@ func (bifrost *Bifrost) handleStreamRequest(ctx *schemas.BifrostContext, req *sc
 				}
 				ctx.SetRoutingInfoSnapshot(ri)
 			}
-			bifrost.logger.Debug(fmt.Sprintf("successfully used fallback provider %s with model %s", fallback.Provider, fallback.Model))
+			bifrost.logger.Debug("successfully used fallback provider %s with model %s", fallback.Provider, fallback.Model)
 			ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelInfo, fmt.Sprintf("Request served by fallback %s/%s (attempt %d/%d)", fallback.Provider, fallback.Model, i+1, len(fallbacks)))
 			tracer.EndSpan(handle, schemas.SpanStatusOk, "")
+			served = &schemas.Route{Provider: fallback.Provider, Model: fallback.Model}
+			servedFallback = true
 			return result, nil
 		}
 
@@ -5326,9 +5691,12 @@ func (bifrost *Bifrost) tryRequest(ctx *schemas.BifrostContext, req *schemas.Bif
 		return nil, bifrostErr
 	}
 
-	// Add MCP tools to request if MCP is configured and requested
+	// Add MCP tools to request if MCP is configured and requested.
+	// Timed as "miscellaneous": the tool-definition merge sits on no other span.
 	if bifrost.MCPManager != nil {
+		mcpSpan := bifrost.startCoreSpan(ctx, "miscellaneous")
 		req = bifrost.MCPManager.AddToolsToRequest(ctx, req)
+		bifrost.endCoreSpan(mcpSpan)
 	}
 
 	tracer := bifrost.getTracer()
@@ -5344,6 +5712,9 @@ func (bifrost *Bifrost) tryRequest(ctx *schemas.BifrostContext, req *schemas.Bif
 	// must be set before requestHandler() is called.
 	ctx.SetValue(schemas.BifrostContextKeyTracer, tracer)
 
+	// "pipeline-pre" overhead phase: the LLM pre-hook pipeline glue (loop + pool
+	// around the per-plugin spans that nest inside it), previously part of the residual.
+	prePipeSpan := bifrost.startCoreSpan(ctx, "pipeline-pre")
 	pipeline := bifrost.getPluginPipeline()
 	defer bifrost.releasePluginPipeline(pipeline)
 
@@ -5351,10 +5722,14 @@ func (bifrost *Bifrost) tryRequest(ctx *schemas.BifrostContext, req *schemas.Bif
 	// overwritten around RunPostLLMHooks — plugin modifications to these 4 fields are
 	// no-ops by design; proper request metadata is preserved and tampering is discouraged.
 	preReq, shortCircuit, preCount := pipeline.RunLLMPreHooks(ctx, req)
+	bifrost.endCoreSpan(prePipeSpan)
 	if shortCircuit != nil {
 		// Handle short-circuit with response (success case)
 		if shortCircuit.Response != nil {
 			shortCircuit.Response.PopulateExtraFields(req.RequestType, provider, model, model)
+			// Cache hit / short-circuit: upstream 0, overhead is the whole request.
+			// Stamp before post-hooks for logging.
+			populateLatencyExtraFields(ctx, shortCircuit.Response)
 			resp, bifrostErr := pipeline.RunPostLLMHooks(ctx, shortCircuit.Response, nil, preCount)
 			if bifrostErr != nil {
 				bifrostErr.PopulateExtraFields(req.RequestType, provider, model, model)
@@ -5389,10 +5764,16 @@ func (bifrost *Bifrost) tryRequest(ctx *schemas.BifrostContext, req *schemas.Bif
 		return nil, bifrostErr
 	}
 
+	// "miscellaneous" phase: field re-read + channel-message setup before enqueue.
+	preEnqueueSpan := bifrost.startCoreSpan(ctx, "miscellaneous")
 	provider, model, _ = preReq.GetRequestFields()
 
 	msg := bifrost.getChannelMessage(*preReq)
 	msg.Context = ctx
+	bifrost.endCoreSpan(preEnqueueSpan)
+
+	// Open the queue-wait span; the worker closes it when it dequeues the message.
+	startQueueWaitSpan(ctx, tracer, msg)
 
 	// If the queue is closing, check whether the provider was updated (new queue
 	// available) or removed. On update, transparently re-route to the new queue
@@ -5465,8 +5846,24 @@ func (bifrost *Bifrost) tryRequest(ctx *schemas.BifrostContext, req *schemas.Bif
 	var result *schemas.BifrostResponse
 	var resp *schemas.BifrostResponse
 	pluginCount := len(*bifrost.llmPlugins.Load())
-	select {
-	case result = <-msg.Response:
+	// onResult / onError finish a terminal value: the normal receive path, and the
+	// path tryRequest takes on ctx.Done when the worker has already claimed delivery.
+	onResult := func(result *schemas.BifrostResponse) (*schemas.BifrostResponse, *schemas.BifrostError) {
+		// Worker->caller goroutine-hop latency: measure the instant we receive so the
+		// breakdown carves this scheduling gap out of the residual into "worker-handoff".
+		if !msg.sentAt.IsZero() {
+			msg.Context.StampWorkerHandoff(time.Since(msg.sentAt))
+		}
+		// "pipeline-post" overhead phase: everything from here to return (latency stamp,
+		// post-hook pipeline glue, raw-field stripping, message release). The defer is
+		// function-scoped and this case ends by returning, so it times exactly the post
+		// block; per-plugin post-hook spans nest inside and subtract out.
+		if ph := bifrost.startCoreSpan(msg.Context, "pipeline-post"); ph.h != nil {
+			defer bifrost.endCoreSpan(ph)
+		}
+		// Accumulator is complete once the provider returns; stamp before post-hooks
+		// so logging reads it off ExtraFields.
+		populateLatencyExtraFields(msg.Context, result)
 		resp, bifrostErr := pipeline.RunPostLLMHooks(msg.Context, result, nil, pluginCount)
 		if bifrostErr != nil {
 			bifrostErr.PopulateExtraFields(req.RequestType, provider, model, model)
@@ -5494,8 +5891,17 @@ func (bifrost *Bifrost) tryRequest(ctx *schemas.BifrostContext, req *schemas.Bif
 			}
 		}
 		return resp, nil
-	case bifrostErrVal := <-msg.Err:
+	}
+	onError := func(bifrostErrVal schemas.BifrostError) (*schemas.BifrostResponse, *schemas.BifrostError) {
 		bifrostErrPtr := &bifrostErrVal
+		// Worker->caller goroutine-hop latency on the error path too.
+		if !msg.sentAt.IsZero() {
+			msg.Context.StampWorkerHandoff(time.Since(msg.sentAt))
+		}
+		// "pipeline-post" overhead phase on the error path (see the success case above).
+		if ph := bifrost.startCoreSpan(msg.Context, "pipeline-post"); ph.h != nil {
+			defer bifrost.endCoreSpan(ph)
+		}
 		resp, bifrostErrPtr = pipeline.RunPostLLMHooks(msg.Context, nil, bifrostErrPtr, pluginCount)
 		if bifrostErrPtr != nil {
 			bifrostErrPtr.PopulateExtraFields(req.RequestType, provider, model, model)
@@ -5530,14 +5936,29 @@ func (bifrost *Bifrost) tryRequest(ctx *schemas.BifrostContext, req *schemas.Bif
 			return nil, bifrostErrPtr
 		}
 		return resp, nil
+	}
+	select {
+	case result = <-msg.Response:
+		return onResult(result)
+	case bifrostErrVal := <-msg.Err:
+		return onError(bifrostErrVal)
 	case <-ctx.Done():
-		// Do NOT releaseChannelMessage here. The message is already enqueued and
-		// the worker still holds a reference to msg.Response and msg.Err. Returning
-		// those channels to the pool now would let the next request reuse them while
-		// the worker is still writing to them — stale data corruption. The worker
-		// never calls releaseChannelMessage itself, so this message leaks from the
-		// pool and is GC'd. That is intentional: a small pool leak on cancellation
-		// is far safer than corrupting another request's channels.
+		if !msg.abandonDelivery() {
+			// The worker claimed delivery first: the value is in (or about to enter)
+			// the buffer and nobody else will read it. Take it and finish normally so
+			// it is billed and logged exactly once (#6972). The send is buffered and
+			// the worker is committed, so this cannot block.
+			select {
+			case result = <-msg.Response:
+				return onResult(result)
+			case bifrostErrVal := <-msg.Err:
+				return onError(bifrostErrVal)
+			}
+		}
+		// Abandoned: the worker now owns the message. It bills the terminal value
+		// when it arrives and returns the message to the pool, so it must not be
+		// touched here (releasing it now would let the next request reuse channels
+		// the worker is still about to write to).
 		provider, model, _ := req.GetRequestFields()
 		bifrostErr := newBifrostCtxDoneError(ctx, "waiting for provider response")
 		bifrostErr.PopulateExtraFields(req.RequestType, provider, model, model)
@@ -5556,9 +5977,12 @@ func (bifrost *Bifrost) tryStreamRequest(ctx *schemas.BifrostContext, req *schem
 		return nil, bifrostErr
 	}
 
-	// Add MCP tools to request if MCP is configured and requested
+	// Add MCP tools to request if MCP is configured and requested.
+	// Timed as "miscellaneous": the tool-definition merge sits on no other span.
 	if req.RequestType != schemas.SpeechStreamRequest && req.RequestType != schemas.TranscriptionStreamRequest && bifrost.MCPManager != nil {
+		mcpSpan := bifrost.startCoreSpan(ctx, "miscellaneous")
 		req = bifrost.MCPManager.AddToolsToRequest(ctx, req)
+		bifrost.endCoreSpan(mcpSpan)
 	}
 
 	tracer := bifrost.getTracer()
@@ -5582,6 +6006,8 @@ func (bifrost *Bifrost) tryStreamRequest(ctx *schemas.BifrostContext, req *schem
 		traceID := tracer.CreateTrace("")
 		if traceID != "" {
 			ctx.SetValue(schemas.BifrostContextKeyTraceID, traceID)
+			// No traceparent on this path, so the exported W3C trace ID equals the store handle.
+			ctx.SetValue(schemas.BifrostContextKeyExportTraceID, traceID)
 		}
 	}
 
@@ -5593,14 +6019,21 @@ func (bifrost *Bifrost) tryStreamRequest(ctx *schemas.BifrostContext, req *schem
 		}
 	}()
 
+	// "pipeline-pre" overhead phase: the LLM pre-hook pipeline glue (loop + pool
+	// around the per-plugin spans that nest inside it), mirroring tryRequest.
+	prePipeSpan := bifrost.startCoreSpan(ctx, "pipeline-pre")
 	// RequestType, Provider, OriginalModelRequested, and ResolvedModelUsed are always
 	// overwritten around RunPostLLMHooks — plugin modifications to these 4 fields are
 	// no-ops by design; proper request metadata is preserved and tampering is discouraged.
 	preReq, shortCircuit, preCount := pipeline.RunLLMPreHooks(ctx, req)
+	bifrost.endCoreSpan(prePipeSpan)
 	if shortCircuit != nil {
 		// Handle short-circuit with response (success case)
 		if shortCircuit.Response != nil {
 			shortCircuit.Response.PopulateExtraFields(req.RequestType, provider, model, model)
+			// Cache hit / short-circuit: upstream 0, overhead is the whole request.
+			// Stamp before post-hooks for logging.
+			populateLatencyExtraFields(ctx, shortCircuit.Response)
 			resp, bifrostErr := pipeline.RunPostLLMHooks(ctx, shortCircuit.Response, nil, preCount)
 			if bifrostErr != nil {
 				bifrostErr.PopulateExtraFields(req.RequestType, provider, model, model)
@@ -5723,10 +6156,16 @@ func (bifrost *Bifrost) tryStreamRequest(ctx *schemas.BifrostContext, req *schem
 		return nil, bifrostErr
 	}
 
+	// "miscellaneous" phase: field re-read + channel-message setup before enqueue.
+	preEnqueueSpan := bifrost.startCoreSpan(ctx, "miscellaneous")
 	provider, model, _ = preReq.GetRequestFields()
 
 	msg := bifrost.getChannelMessage(*preReq)
 	msg.Context = ctx
+	bifrost.endCoreSpan(preEnqueueSpan)
+
+	// Open the queue-wait span; the worker closes it when it dequeues the message.
+	startQueueWaitSpan(ctx, tracer, msg)
 
 	// If the queue is closing, check whether the provider was updated (new queue
 	// available) or removed. On update, transparently re-route to the new queue
@@ -5870,6 +6309,10 @@ func executeRequestWithRetries[T any](
 	logger schemas.Logger,
 ) (result T, bifrostError *schemas.BifrostError) {
 	var attempts int
+	isStreamRequest := IsStreamRequestType(requestType)
+	// Whether the previous attempt buffered startup events; its stream-end
+	// markers must be cleared before the next attempt reads a fresh stream.
+	prevCheckedPreamble := false
 
 	// Emit the terminal routing-engine entry on every return path — including
 	// early returns from key-selection failures and tracer-missing — so the
@@ -5885,10 +6328,15 @@ func executeRequestWithRetries[T any](
 		switch {
 		case bifrostError == nil:
 			ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelInfo, fmt.Sprintf("Request to %s/%s succeeded after %d retry attempt(s)", providerKey, model, attempts))
-		case bifrostError.IsBifrostError:
-			ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelError, fmt.Sprintf("Retries halted for %s/%s after %d attempt(s): internal Bifrost error (%s)", providerKey, model, attempts, routingErrorSummary(bifrostError)))
+		// Cancellation and timeout are checked before IsBifrostError: a context that
+		// ends during the retry backoff (newBifrostCtxDoneError) carries both, and
+		// so does a provider header-wait 504; neither is an internal error.
 		case bifrostError.Error != nil && bifrostError.Error.Type != nil && *bifrostError.Error.Type == schemas.RequestCancelled:
 			ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelError, fmt.Sprintf("Request to %s/%s cancelled after %d attempt(s)", providerKey, model, attempts))
+		case bifrostError.Error != nil && bifrostError.Error.Type != nil && *bifrostError.Error.Type == schemas.RequestTimedOut:
+			ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelError, fmt.Sprintf("Request to %s/%s timed out after %d attempt(s)", providerKey, model, attempts))
+		case bifrostError.IsBifrostError:
+			ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelError, fmt.Sprintf("Retries halted for %s/%s after %d attempt(s): internal Bifrost error (%s)", providerKey, model, attempts, routingErrorSummary(bifrostError)))
 		default:
 			ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelError, fmt.Sprintf("Retries exhausted for %s/%s after %d attempt(s); last error: %s", providerKey, model, attempts, routingErrorSummary(bifrostError)))
 		}
@@ -5951,7 +6399,7 @@ func executeRequestWithRetries[T any](
 				keyTracer.SetAttribute(keyHandle, schemas.AttrBifrostProviderName, string(providerKey)) // raw Bifrost short name, mirrors canonical gen_ai.provider.name
 				keyTracer.SetAttribute(keyHandle, schemas.AttrRequestModel, model)
 				if attempts > 0 {
-					keyTracer.SetAttribute(keyHandle, schemas.AttrLegacyRetryCount, attempts)
+					keyTracer.SetAttribute(keyHandle, schemas.AttrBifrostRetries, attempts)
 				}
 			}
 
@@ -6008,6 +6456,9 @@ func executeRequestWithRetries[T any](
 							Type:    &errType,
 							Message: err.Error(),
 						},
+						ExtraFields: schemas.BifrostErrorExtraFields{
+							ErrorType: schemas.ErrorTypeProviderCredentialsExhausted,
+						},
 					}
 				}
 				return zero, newBifrostErrorFromMsg(err.Error())
@@ -6015,30 +6466,6 @@ func executeRequestWithRetries[T any](
 			currentKey = selectedKey
 			ctx.SetValue(schemas.BifrostContextKeySelectedKeyID, currentKey.ID)
 			ctx.SetValue(schemas.BifrostContextKeySelectedKeyName, currentKey.Name)
-
-			// Resolve any pending rotation marker from the previous failed attempt. Only mark
-			// TriggeredRotation=true if the newly selected key differs from the failed one —
-			// fixed-key paths return the same key, in which case no rotation actually happened.
-			if pendingRotationAttemptIdx >= 0 {
-				if trail, ok := ctx.Value(schemas.BifrostContextKeyAttemptTrail).([]schemas.KeyAttemptRecord); ok &&
-					pendingRotationAttemptIdx < len(trail) &&
-					trail[pendingRotationAttemptIdx].KeyID != currentKey.ID {
-					trail[pendingRotationAttemptIdx].TriggeredRotation = true
-					ctx.SetValue(schemas.BifrostContextKeyAttemptTrail, trail)
-				}
-				pendingRotationAttemptIdx = -1
-			}
-		}
-
-		// Append a trail record for every attempt (key rotation and same-key retries alike).
-		// Skipped when keyProvider is nil (keyless providers have no key to track).
-		// FailReason is populated below once the attempt outcome is known.
-		if keyProvider != nil {
-			schemas.AppendToContextList(ctx, schemas.BifrostContextKeyAttemptTrail, schemas.KeyAttemptRecord{
-				Attempt: attempts,
-				KeyID:   currentKey.ID,
-				KeyName: currentKey.Name,
-			})
 		}
 
 		if attempts > 0 {
@@ -6086,11 +6513,54 @@ func executeRequestWithRetries[T any](
 			}
 			ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelInfo, fmt.Sprintf("Retry %d/%d for %s/%s (previous attempt failed: %s%s)", attempts, config.NetworkConfig.MaxRetries+extraAttempts, providerKey, model, routingErrorSummary(bifrostError), keyNote))
 
+			// A context that ends before the retry is dispatched ends the loop: the
+			// worker is freed and the request ends as a cancellation instead of
+			// recording one more attempt on behalf of a caller that has gone (#7035).
+			// That holds whether the wait was a backoff or was skipped for a
+			// credential swap or a stripped replay.
+			ctxEnded := false
+			stage := "before retry dispatch"
 			if !((lastWasPermanentKeyFailure && keyChanged) || lastWasEncryptedContentStrip) {
 				backoff := calculateBackoff(attempts-1, config)
 				logger.Debug("sleeping for %s before retry", backoff)
-				time.Sleep(backoff)
+				ctxEnded = waitRetryBackoff(ctx, backoff)
+				stage = "during retry backoff"
+			} else {
+				ctxEnded = ctx.Err() != nil
 			}
+			if ctxEnded {
+				// This retry never ran: report the retries that did.
+				ctx.SetValue(schemas.BifrostContextKeyNumberOfRetries, attempts-1)
+				bifrostError = newBifrostCtxDoneError(ctx, stage)
+				break
+			}
+		}
+
+		// Append a trail record for every attempt that is actually dispatched (key
+		// rotation and same-key retries alike). It sits after the backoff so a request
+		// cancelled while waiting to retry does not record an attempt that never ran.
+		// Skipped when keyProvider is nil (keyless providers have no key to track).
+		// FailReason is populated below once the attempt outcome is known.
+		if keyProvider != nil {
+			// Resolve any pending rotation marker from the previous failed attempt. Only mark
+			// TriggeredRotation=true if the newly selected key differs from the failed one:
+			// fixed-key paths return the same key, in which case no rotation actually happened.
+			// It is resolved here, after the backoff, so a request cancelled while waiting
+			// does not report a rotation whose attempt never ran.
+			if pendingRotationAttemptIdx >= 0 {
+				if trail, ok := ctx.Value(schemas.BifrostContextKeyAttemptTrail).([]schemas.KeyAttemptRecord); ok &&
+					pendingRotationAttemptIdx < len(trail) &&
+					trail[pendingRotationAttemptIdx].KeyID != currentKey.ID {
+					trail[pendingRotationAttemptIdx].TriggeredRotation = true
+					ctx.SetValue(schemas.BifrostContextKeyAttemptTrail, trail)
+				}
+				pendingRotationAttemptIdx = -1
+			}
+			schemas.AppendToContextList(ctx, schemas.BifrostContextKeyAttemptTrail, schemas.KeyAttemptRecord{
+				Attempt: attempts,
+				KeyID:   currentKey.ID,
+				KeyName: currentKey.Name,
+			})
 		}
 
 		logger.Debug("attempting %s request for provider %s", requestType, providerKey)
@@ -6112,92 +6582,21 @@ func executeRequestWithRetries[T any](
 			spanName = fmt.Sprintf("%s %s", otelOp, model)
 			spanKind = schemas.SpanKindLLMCall
 		}
-		spanCtx, handle := tracer.StartSpan(ctx, spanName, spanKind)
-		tracer.SetAttribute(handle, schemas.AttrProviderName, schemas.OTelProviderName(providerKey))
-		tracer.SetAttribute(handle, schemas.AttrBifrostProviderName, string(providerKey)) // raw Bifrost short name, mirrors canonical gen_ai.provider.name
-		tracer.SetAttribute(handle, schemas.AttrRequestModel, model)
-		tracer.SetAttribute(handle, schemas.AttrOperationName, otelOp)
-		tracer.SetAttribute(handle, schemas.AttrLegacyRequestType, string(requestType)) // legacy: replaced by gen_ai.operation.name
-		if attempts > 0 {
-			tracer.SetAttribute(handle, schemas.AttrLegacyRetryCount, attempts) // legacy: bare key with no semconv prefix
-		}
+		spanID, handle := tracer.StartSpanID(ctx, spanName, spanKind)
+		// Resolve the span once and write attributes directly. Previously each
+		// attribute was a separate tracer.SetAttribute, and every call re-resolved
+		// the span (trace lookup + linear span scan over all spans in the trace):
+		// ~30 lookups per request. span.SetAttribute is nil-safe, so a nil span
+		// (e.g. NoOpTracer) makes the whole block a no-op with no branch here.
+		span := tracer.SpanFromHandle(handle)
+		span.SetAttribute(schemas.AttrProviderName, schemas.OTelProviderName(providerKey))
+		span.SetAttribute(schemas.AttrBifrostProviderName, string(providerKey)) // raw Bifrost short name, mirrors canonical gen_ai.provider.name
+		span.SetAttribute(schemas.AttrRequestModel, model)
+		span.SetAttribute(schemas.AttrOperationName, otelOp)
+		span.SetAttribute(schemas.AttrLegacyRequestType, string(requestType))
 
-		// Add context-related attributes (selected key, virtual key, team, customer, etc.)
-		// Each AttrXxx (gen_ai.*) emission below is LEGACY namespace pollution: the
-		// Bifrost-internal concept does not belong under gen_ai.*. The bifrost.* mirrors
-		// are the canonical home going forward; once all dashboards migrate, drop the
-		// gen_ai.* lines (grep for "// legacy:" in this block).
-		if selectedKeyID, ok := ctx.Value(schemas.BifrostContextKeySelectedKeyID).(string); ok && selectedKeyID != "" {
-			tracer.SetAttribute(handle, schemas.AttrSelectedKeyID, selectedKeyID) // legacy: gen_ai.* placement of bifrost-internal attr
-			tracer.SetAttribute(handle, schemas.AttrBifrostSelectedKeyID, selectedKeyID)
-		}
-		if selectedKeyName, ok := ctx.Value(schemas.BifrostContextKeySelectedKeyName).(string); ok && selectedKeyName != "" {
-			tracer.SetAttribute(handle, schemas.AttrSelectedKeyName, selectedKeyName) // legacy: gen_ai.* placement of bifrost-internal attr
-			tracer.SetAttribute(handle, schemas.AttrBifrostSelectedKeyName, selectedKeyName)
-		}
-		if virtualKeyID, ok := ctx.Value(schemas.BifrostContextKeyGovernanceVirtualKeyID).(string); ok && virtualKeyID != "" {
-			tracer.SetAttribute(handle, schemas.AttrVirtualKeyID, virtualKeyID) // legacy: gen_ai.* placement of bifrost-internal attr
-			tracer.SetAttribute(handle, schemas.AttrBifrostVirtualKeyID, virtualKeyID)
-		}
-		if virtualKeyName, ok := ctx.Value(schemas.BifrostContextKeyGovernanceVirtualKeyName).(string); ok && virtualKeyName != "" {
-			tracer.SetAttribute(handle, schemas.AttrVirtualKeyName, virtualKeyName) // legacy: gen_ai.* placement of bifrost-internal attr
-			tracer.SetAttribute(handle, schemas.AttrBifrostVirtualKeyName, virtualKeyName)
-		}
-		if teamID, ok := ctx.Value(schemas.BifrostContextKeyGovernanceTeamID).(string); ok && teamID != "" {
-			tracer.SetAttribute(handle, schemas.AttrTeamID, teamID) // legacy: gen_ai.* placement of bifrost-internal attr
-			tracer.SetAttribute(handle, schemas.AttrBifrostTeamID, teamID)
-		}
-		if teamName, ok := ctx.Value(schemas.BifrostContextKeyGovernanceTeamName).(string); ok && teamName != "" {
-			tracer.SetAttribute(handle, schemas.AttrTeamName, teamName) // legacy: gen_ai.* placement of bifrost-internal attr
-			tracer.SetAttribute(handle, schemas.AttrBifrostTeamName, teamName)
-		}
-		if customerID, ok := ctx.Value(schemas.BifrostContextKeyGovernanceCustomerID).(string); ok && customerID != "" {
-			tracer.SetAttribute(handle, schemas.AttrCustomerID, customerID) // legacy: gen_ai.* placement of bifrost-internal attr
-			tracer.SetAttribute(handle, schemas.AttrBifrostCustomerID, customerID)
-		}
-		if customerName, ok := ctx.Value(schemas.BifrostContextKeyGovernanceCustomerName).(string); ok && customerName != "" {
-			tracer.SetAttribute(handle, schemas.AttrCustomerName, customerName) // legacy: gen_ai.* placement of bifrost-internal attr
-			tracer.SetAttribute(handle, schemas.AttrBifrostCustomerName, customerName)
-		}
-		if businessUnitID, ok := ctx.Value(schemas.BifrostContextKeyGovernanceBusinessUnitID).(string); ok && businessUnitID != "" {
-			tracer.SetAttribute(handle, schemas.AttrBifrostBusinessUnitID, businessUnitID)
-		}
-		if businessUnitName, ok := ctx.Value(schemas.BifrostContextKeyGovernanceBusinessUnitName).(string); ok && businessUnitName != "" {
-			tracer.SetAttribute(handle, schemas.AttrBifrostBusinessUnitName, businessUnitName)
-		}
-		if teamIDs, ok := ctx.Value(schemas.BifrostContextKeyGovernanceTeamIDs).([]string); ok && len(teamIDs) > 0 {
-			tracer.SetAttribute(handle, schemas.AttrBifrostTeamIDs, teamIDs)
-		}
-		if teamNames, ok := ctx.Value(schemas.BifrostContextKeyGovernanceTeamNames).([]string); ok && len(teamNames) > 0 {
-			tracer.SetAttribute(handle, schemas.AttrBifrostTeamNames, teamNames)
-		}
-		if customerIDs, ok := ctx.Value(schemas.BifrostContextKeyGovernanceCustomerIDs).([]string); ok && len(customerIDs) > 0 {
-			tracer.SetAttribute(handle, schemas.AttrBifrostCustomerIDs, customerIDs)
-		}
-		if customerNames, ok := ctx.Value(schemas.BifrostContextKeyGovernanceCustomerNames).([]string); ok && len(customerNames) > 0 {
-			tracer.SetAttribute(handle, schemas.AttrBifrostCustomerNames, customerNames)
-		}
-		if businessUnitIDs, ok := ctx.Value(schemas.BifrostContextKeyGovernanceBusinessUnitIDs).([]string); ok && len(businessUnitIDs) > 0 {
-			tracer.SetAttribute(handle, schemas.AttrBifrostBusinessUnitIDs, businessUnitIDs)
-		}
-		if businessUnitNames, ok := ctx.Value(schemas.BifrostContextKeyGovernanceBusinessUnitNames).([]string); ok && len(businessUnitNames) > 0 {
-			tracer.SetAttribute(handle, schemas.AttrBifrostBusinessUnitNames, businessUnitNames)
-		}
-		if userID, ok := ctx.Value(schemas.BifrostContextKeyUserID).(string); ok && userID != "" {
-			tracer.SetAttribute(handle, schemas.AttrBifrostUserID, userID)
-		}
-		if userName, ok := ctx.Value(schemas.BifrostContextKeyUserName).(string); ok && userName != "" {
-			tracer.SetAttribute(handle, schemas.AttrBifrostUserName, userName)
-		}
-		if userEmail, ok := ctx.Value(schemas.BifrostContextKeyUserEmail).(string); ok && userEmail != "" {
-			tracer.SetAttribute(handle, schemas.AttrBifrostUserEmail, userEmail)
-		}
-		if fallbackIndex, ok := ctx.Value(schemas.BifrostContextKeyFallbackIndex).(int); ok {
-			tracer.SetAttribute(handle, schemas.AttrFallbackIndex, fallbackIndex) // legacy: gen_ai.* placement of bifrost-internal attr
-			tracer.SetAttribute(handle, schemas.AttrBifrostFallbackIndex, fallbackIndex)
-		}
-		tracer.SetAttribute(handle, schemas.AttrNumberOfRetries, attempts) // legacy: gen_ai.* placement of bifrost-internal attr
-		tracer.SetAttribute(handle, schemas.AttrBifrostRetries, attempts)
+		applyContextSpanAttributes(span, ctx)
+		span.SetAttribute(schemas.AttrBifrostRetries, attempts)
 
 		// Surface caller-supplied extra headers (from x-bf-eh-* and direct-allowlist
 		// header forwarding) as span attributes so observability backends see the
@@ -6206,7 +6605,9 @@ func executeRequestWithRetries[T any](
 		exportHeaderAttributes := func(headers map[string][]string) {
 			for name, values := range headers {
 				if value, export := extraHeaderSpanAttribute(name, values); export {
-					tracer.SetAttribute(handle, schemas.AttrExtraHeaderPrefix+name, value)
+					// Write via the already-resolved span (C1), not tracer.SetAttribute,
+					// which re-resolves the span per call.
+					span.SetAttribute(schemas.AttrExtraHeaderPrefix+name, value)
 				}
 			}
 		}
@@ -6222,13 +6623,21 @@ func executeRequestWithRetries[T any](
 			exportHeaderAttributes(passthrough)
 		}
 
-		// Populate LLM request attributes (messages, parameters, etc.)
-		if req != nil {
-			tracer.PopulateLLMRequestAttributes(handle, req)
+		// Make the LLM call the active span before attribute-population so that phase
+		// nests inside it rather than the preceding span (no valueCtx alloc; StartSpanID
+		// returned spanID).
+		if spanID != "" {
+			ctx.SetValue(schemas.BifrostContextKeySpanID, spanID)
 		}
 
-		// Update context with span ID
-		ctx.SetValue(schemas.BifrostContextKeySpanID, spanCtx.Value(schemas.BifrostContextKeySpanID))
+		// Populate LLM request attributes (messages, parameters, etc.). Timed as an
+		// "attribute-population" span: writing a large prompt's messages onto the span
+		// is real, payload-scaled work.
+		if req != nil {
+			_, attrHandle := tracer.StartSpanID(ctx, "attribute-population", schemas.SpanKindInternal)
+			tracer.PopulateLLMRequestAttributes(handle, req)
+			tracer.EndSpan(attrHandle, schemas.SpanStatusOk, "")
+		}
 
 		// Record stream start time for TTFT calculation (only for streaming requests)
 		// This is also used by RunPostLLMHooks to detect streaming mode
@@ -6237,17 +6646,44 @@ func executeRequestWithRetries[T any](
 			ctx.SetValue(schemas.BifrostContextKeyStreamStartTime, streamStartTime)
 		}
 
+		// The previous failed stream has drained before reaching this retry.
+		if prevCheckedPreamble && attempts > 0 {
+			ctx.ClearValue(schemas.BifrostContextKeyStreamEndIndicator)
+			ctx.ClearValue(schemas.BifrostContextKeyStreamBodyExhausted)
+			ctx.ClearValue(schemas.BifrostContextKeyStreamParkedAfterFinish)
+		}
+
 		// Attempt the request
 		result, bifrostError = requestHandler(currentKey)
 
-		// For streaming requests that returned success, check if the first chunk
-		// is actually an error (e.g., rate limits sent as SSE events in HTTP 200).
-		// This enables retries and fallbacks for providers that embed errors in
-		// the SSE stream instead of returning proper HTTP error status codes.
+		// Detect errors carried inside HTTP 200 streams before returning success.
+		// Azure and OpenAI upstreams (including custom providers built on them,
+		// whatever their model ids) and OpenAI models on any other host (Bedrock,
+		// Bedrock Mantle, Vertex) may emit startup events (response.created,
+		// in_progress, an empty role delta) before an overload or throttle error.
+		// Checked after requestHandler so the key's resolved alias decides the
+		// model family.
+		baseProvider := schemas.ResolveBaseProvider(ctx, providerKey)
+		checkPreamble := isStreamRequest &&
+			(baseProvider == schemas.Azure || baseProvider == schemas.OpenAI ||
+				schemas.IsOpenAIModelFamily(ctx, model))
+		prevCheckedPreamble = checkPreamble
 		emptyStream := false
 		if bifrostError == nil {
 			if streamChan, ok := any(result).(chan *schemas.BifrostStreamChunk); ok {
-				checkedStream, drainDone, firstChunkErr := providerUtils.CheckFirstStreamChunkForError(ctx, streamChan)
+				var (
+					checkedStream chan *schemas.BifrostStreamChunk
+					drainDone     <-chan struct{}
+					firstChunkErr *schemas.BifrostError
+				)
+				if checkPreamble {
+					requestID, _ := ctx.Value(schemas.BifrostContextKeyRequestID).(string)
+					checkedStream, drainDone, firstChunkErr = providerUtils.CheckStreamPreambleForError(
+						ctx, requestID, streamChan, azure.IsStreamPreamble,
+					)
+				} else {
+					checkedStream, drainDone, firstChunkErr = providerUtils.CheckFirstStreamChunkForError(ctx, streamChan)
+				}
 				if firstChunkErr != nil {
 					<-drainDone
 					// The dead stream's teardown (ReleaseStreamingResponse) claimed the
@@ -6310,11 +6746,15 @@ func executeRequestWithRetries[T any](
 					}
 				}
 				resp.PopulateExtraFields(requestType, providerKey, model, resolvedModelUsed)
+				_, attrHandle := tracer.StartSpanID(ctx, "attribute-population", schemas.SpanKindInternal)
 				tracer.PopulateLLMResponseAttributes(ctx, handle, resp, bifrostError)
+				tracer.EndSpan(attrHandle, schemas.SpanStatusOk, "")
 			} else if bifrostError != nil {
 				// Failed stream requests carry a chan result and miss the cast above;
 				// stamp error attributes explicitly so spans don't report unknown.
+				_, attrHandle := tracer.StartSpanID(ctx, "attribute-population", schemas.SpanKindInternal)
 				tracer.PopulateLLMResponseAttributes(ctx, handle, nil, bifrostError)
+				tracer.EndSpan(attrHandle, schemas.SpanStatusOk, "")
 			}
 
 			// End span with appropriate status
@@ -6387,22 +6827,33 @@ func executeRequestWithRetries[T any](
 			ctx.SetValue(schemas.BifrostContextKeyAttemptTrail, trail)
 		}
 
-		// Fail soft when the upstream refuses replayed encrypted reasoning. The ciphertext
+		// Fail soft on a 400 when the request replays encrypted reasoning. The ciphertext
 		// is bound to the identity that minted it (item id, organization, serving
-		// endpoint), and a gateway routinely changes that between turns -- key rotation
-		// across a multi-key pool, a fallback that served an earlier turn from another
-		// provider, or a client whose traffic starts or stops being proxied mid-session.
+		// endpoint, model family), and a gateway routinely changes that between turns:
+		// key rotation across a multi-key pool, a fallback or a user switching provider
+		// mid-conversation, or a client whose traffic starts or stops being proxied.
 		// Retrying the same payload cannot help, so drop the encrypted half and give the
 		// request one more attempt on the same key: the turn continues with summaries
-		// only instead of failing outright. Runs once per request.
+		// only instead of failing outright.
+		//
+		// The gate is a 400 that names a reasoning token by family word, not the
+		// provider's verdict sentence (see shouldStripReasoningAfterClientError):
+		// providers word the verdict differently and reword it without notice, and a
+		// missed phrasing handed a healable 400 to the client. stripUnverifiableReasoning
+		// returns false when there is nothing to strip, so the extra attempt is spent
+		// only on requests that carry a token. Runs once per request.
 		lastWasEncryptedContentStrip = false
-		if !shouldRetry && !strippedEncryptedContent && isEncryptedReasoningRejection(bifrostError) &&
+		if !shouldRetry && !strippedEncryptedContent && shouldStripReasoningAfterClientError(bifrostError) &&
 			stripUnverifiableReasoning(ctx, req) {
 			strippedEncryptedContent = true
 			lastWasEncryptedContentStrip = true
 			extraAttempts++
 			shouldRetry = true
-			logger.Warn("upstream rejected replayed encrypted reasoning content for %s/%s; retrying once without it: %s", providerKey, model, errMessage)
+			if isEncryptedReasoningRejection(bifrostError) {
+				logger.Warn("upstream rejected replayed encrypted reasoning content for %s/%s; retrying once without it: %s", providerKey, model, errMessage)
+			} else {
+				logger.Warn("upstream returned 400 for a request to %s/%s that replays encrypted reasoning; retrying once without it in case the token is the cause: %s", providerKey, model, errMessage)
+			}
 			ctx.AppendRoutingEngineLog(schemas.RoutingEngineCore, schemas.LogLevelWarn, fmt.Sprintf("Stripped unverifiable encrypted reasoning content from the request to %s/%s and retrying once", providerKey, model))
 		}
 
@@ -6473,24 +6924,136 @@ func executeRequestWithRetries[T any](
 }
 
 // clearAnthropicPassthroughForNonNativeProvider disables Anthropic raw-body passthrough when a
-// request from the Anthropic-format integration resolves to a provider that doesn't speak the
-// Anthropic Messages API natively (e.g. Bedrock), forcing that provider to convert the request
-// itself. Gated on the final resolved provider so it fires regardless of how the provider was
-// picked (prefix, catalog, key alias, governance) and re-runs per attempt for fallbacks. No-op
-// for Anthropic/Vertex/Azure providers and for non-Anthropic integrations.
-func clearAnthropicPassthroughForNonNativeProvider(ctx *schemas.BifrostContext, baseProvider schemas.ModelProvider) {
+// request from the Anthropic-format integration resolves to a provider/model pair that doesn't
+// speak the Anthropic Messages API natively (e.g. Bedrock, or a routing rule that retargets a
+// Claude Code request to an OpenAI-family model on Bedrock Mantle), forcing that provider to
+// convert the request itself. Gated on the final resolved provider and model so it fires
+// regardless of how either was picked (prefix, catalog, key alias, governance, routing rule)
+// and re-runs per attempt for fallbacks. No-op for Anthropic and for non-Anthropic integrations.
+//
+// Vertex, Azure and Bedrock Mantle are multi-family: they serve Anthropic Messages for Claude and
+// OpenAI/Gemini surfaces for everything else, so their exemption reuses the IsAnthropicModelFamily
+// predicate their own dispatch uses. Call this only after key-level alias resolution — that
+// predicate reads the resolved alias from context.
+func clearAnthropicPassthroughForNonNativeProvider(ctx *schemas.BifrostContext, baseProvider schemas.ModelProvider, model string) {
 	if integrationType, _ := ctx.Value(schemas.BifrostContextKeyIntegrationType).(string); integrationType != "anthropic" {
 		return
 	}
-	if baseProvider == schemas.Anthropic ||
-		baseProvider == schemas.Vertex ||
+	if baseProvider == schemas.Anthropic {
+		return
+	}
+	if (baseProvider == schemas.Vertex ||
 		baseProvider == schemas.Azure ||
-		baseProvider == schemas.BedrockMantle {
+		baseProvider == schemas.BedrockMantle) &&
+		schemas.IsAnthropicModelFamily(ctx, model) {
+		return
+	}
+	// Native redaction codecs are valid only while the matching Anthropic body
+	// and response stream are forwarded; converted fallbacks must not inherit them.
+	ctx.SetValue(schemas.BifrostContextKeyUseRawRequestBody, false)
+	ctx.ClearValue(schemas.BifrostContextKeyRawRequestBodyTextRewriter)
+	ctx.ClearValue(schemas.BifrostContextKeyRawStreamTextCodec)
+	ctx.SetValue(schemas.BifrostContextKeySendBackRawResponse, false)
+	ctx.SetValue(schemas.BifrostContextKeyPassthroughOverridesPresent, false)
+	ctx.ClearValue(schemas.BifrostContextKeyURLPath)
+}
+
+// clearAnthropicPassthroughForUnsupportedStructuredOutput disables Anthropic raw-body passthrough
+// when the resolved provider cannot serve native structured outputs but the request carries a
+// schema. The raw body would forward output_config.format verbatim and the provider answers 400
+// "output_config.format: Extra inputs are not permitted"; typed conversion instead rewrites the
+// schema into the synthetic bf_so_* tool these providers do accept. Gated on the final resolved
+// provider so it fires however that was picked (prefix, key alias, governance, routing rule) and
+// re-runs per attempt for fallbacks — the ingress guard in the Anthropic integration only sees a
+// provider the caller spelled out in the model string, so an alias or routing rule hides it.
+func clearAnthropicPassthroughForUnsupportedStructuredOutput(ctx *schemas.BifrostContext, baseProvider schemas.ModelProvider, req *schemas.BifrostRequest) {
+	if integrationType, _ := ctx.Value(schemas.BifrostContextKeyIntegrationType).(string); integrationType != "anthropic" {
+		return
+	}
+	if useRawBody, _ := ctx.Value(schemas.BifrostContextKeyUseRawRequestBody).(bool); !useRawBody {
+		return
+	}
+	if !anthropic.ProviderRequiresSyntheticStructuredOutput(baseProvider) {
+		return
+	}
+	// Read the bytes that would go on the wire rather than Params.Text: plugins run before
+	// the worker and can drop the typed field (compat's drop-params) while the raw body still
+	// carries it. The Anthropic Messages integration always builds a Responses request.
+	if req == nil || req.ResponsesRequest == nil {
+		return
+	}
+	rawBody := req.ResponsesRequest.GetRawRequestBody()
+	if !providerUtils.JSONFieldExists(rawBody, "output_config.format") && !providerUtils.JSONFieldExists(rawBody, "output_format") {
 		return
 	}
 	ctx.SetValue(schemas.BifrostContextKeyUseRawRequestBody, false)
-	ctx.SetValue(schemas.BifrostContextKeySendBackRawResponse, false)
-	ctx.SetValue(schemas.BifrostContextKeyPassthroughOverridesPresent, false)
+}
+
+// applyRawCaptureSignals writes this attempt's raw-payload capture signals, merging provider
+// config with any per-request context overrides. Call it after
+// clearAnthropicPassthroughForNonNativeProvider: that helper can drop the passthrough overrides
+// this derivation reads, so deriving first would leave a converted response captured and
+// unstripped on a request that no longer passes anything through.
+func applyRawCaptureSignals(ctx *schemas.BifrostContext, config *schemas.ProviderConfig) {
+	// Effective values are computed by merging provider config with any per-request
+	// context overrides (BifrostContextKeySendBackRawRequest/Response and
+	// BifrostContextKeyStoreRawRequestResponse). A context value set to either true
+	// or false fully overrides the provider config for that flag.
+	//
+	// Each flag is independent:
+	//   send_back_raw_request  — include raw request bytes in the client response.
+	//   send_back_raw_response — include raw response bytes in the client response.
+	//   store_raw_request_response — persist raw bytes in log records (logging plugin only).
+	//
+	// Capture is enabled per-side whenever send-back OR store is requested for that side.
+	// Strip flags tell the response path to remove that side's bytes before the payload
+	// reaches the caller (used when store=true but send-back=false for that side).
+	//
+	// All internal signals are always written explicitly on every attempt so stale values
+	// from a previous provider attempt (e.g. different fallback provider config) cannot
+	// leak into the new attempt on a reused context. The user override keys
+	// (BifrostContextKeySendBackRaw*, BifrostContextKeyStoreRawRequestResponse) are
+	// never overwritten — they are read-only from bifrost.go's perspective.
+
+	// Step 1: compute effective value for each flag (provider config ← per-request override).
+	effectiveSendBackReq := config.SendBackRawRequest
+	allowRawOverride, _ := ctx.Value(schemas.BifrostContextKeyAllowPerRequestRawOverride).(bool)
+	passthroughOverridePresent, _ := ctx.Value(schemas.BifrostContextKeyPassthroughOverridesPresent).(bool)
+
+	if allowRawOverride || passthroughOverridePresent {
+		if override, ok := ctx.Value(schemas.BifrostContextKeySendBackRawRequest).(bool); ok {
+			effectiveSendBackReq = override
+		}
+	}
+	effectiveSendBackResp := config.SendBackRawResponse
+	if allowRawOverride || passthroughOverridePresent {
+		if override, ok := ctx.Value(schemas.BifrostContextKeySendBackRawResponse).(bool); ok {
+			effectiveSendBackResp = override
+		}
+	}
+	effectiveStore := config.StoreRawRequestResponse
+	allowStorageOverride, _ := ctx.Value(schemas.BifrostContextKeyAllowPerRequestStorageOverride).(bool)
+	if allowStorageOverride {
+		if override, ok := ctx.Value(schemas.BifrostContextKeyStoreRawRequestResponse).(bool); ok {
+			effectiveStore = override
+		}
+	}
+
+	// Step 2: derive per-side capture and strip flags.
+	// Capture if we need to send the data back OR store it — independent per side.
+	captureReq := effectiveSendBackReq || effectiveStore
+	captureResp := effectiveSendBackResp || effectiveStore
+	// Strip from client response if we captured for storage but not for send-back.
+	dropReq := effectiveStore && !effectiveSendBackReq
+	dropResp := effectiveStore && !effectiveSendBackResp
+
+	// Step 3: write all internal signals explicitly (never touch the user override keys).
+	ctx.SetValue(schemas.BifrostContextKeyCaptureRawRequest, captureReq)
+	ctx.SetValue(schemas.BifrostContextKeyCaptureRawResponse, captureResp)
+	ctx.SetValue(schemas.BifrostContextKeyDropRawRequestFromClient, dropReq)
+	ctx.SetValue(schemas.BifrostContextKeyDropRawResponseFromClient, dropResp)
+	// Tells the logging plugin whether to persist raw bytes in log records.
+	ctx.SetValue(schemas.BifrostContextKeyShouldStoreRawInLogs, effectiveStore)
 }
 
 // requestWorker handles incoming requests from the queue for a specific provider.
@@ -6498,20 +7061,30 @@ func clearAnthropicPassthroughForNonNativeProvider(ctx *schemas.BifrostContext, 
 func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas.ProviderConfig, pq *ProviderQueue, waitGroup *sync.WaitGroup) {
 	defer waitGroup.Done()
 
+	// Reusable timer for the response/error/stream handoff guard below. One timer per
+	// (long-lived) worker, reset per use, instead of a fresh time.After on every request:
+	// time.After leaks a live timer for the full 5s after each request, piling ~5s worth
+	// of timers on the runtime heap under load. Reset/Stop is race-free on Go 1.23+.
+	deliveryTimer := time.NewTimer(time.Hour)
+	deliveryTimer.Stop()
+	defer deliveryTimer.Stop()
+
 	for {
 		var req *ChannelMessage
 		select {
 		case r := <-pq.queue:
 			req = r
+			bifrost.endQueueWaitSpan(req)
 		case <-pq.done:
 			// Provider is shutting down. Drain any buffered requests and send
 			// back errors so callers are not left blocked on their response channel.
 			for {
 				select {
 				case r := <-pq.queue:
+					// Draining a still-open queue-wait span: close it before discarding.
+					bifrost.endQueueWaitSpan(r)
 					provKey, mod, _ := r.GetRequestFields()
-					select {
-					case r.Err <- schemas.BifrostError{
+					bifrost.sendWorkerError(r, schemas.BifrostError{
 						IsBifrostError: false,
 						Error: &schemas.ErrorField{
 							Message: "provider is shutting down",
@@ -6521,15 +7094,18 @@ func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas
 							Provider:               provKey,
 							OriginalModelRequested: mod,
 						},
-					}:
-					case <-r.Context.Done():
-					}
+					})
 				default:
 					return
 				}
 			}
 		}
 
+		// "worker-setup" overhead phase: the dequeue field re-read, per-attempt
+		// base-provider resolution, and raw-capture flag computation (~a dozen ctx writes)
+		// the worker does between dequeue and key acquisition. No early exits in this
+		// block, so a single span pair is safe; closed just before key acquisition below.
+		workerSetupSpan := bifrost.startCoreSpan(req.Context, "worker-setup")
 		_, model, _ := req.BifrostRequest.GetRequestFields()
 
 		var result *schemas.BifrostResponse
@@ -6545,71 +7121,21 @@ func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas
 		req.Context.SetValue(schemas.BifrostContextKeyIsCustomProvider, !IsStandardProvider(baseProvider))
 		// Lets downstream converters resolve a custom provider key back to the built-in provider it wraps.
 		req.Context.SetValue(schemas.BifrostContextKeyBaseProviderType, baseProvider)
-
-		// Disable Anthropic raw-body passthrough when this attempt's provider isn't Anthropic-native (e.g. Bedrock).
-		clearAnthropicPassthroughForNonNativeProvider(req.Context, baseProvider)
-
-		// Determine whether this provider attempt should capture raw payloads.
-		//
-		// Effective values are computed by merging provider config with any per-request
-		// context overrides (BifrostContextKeySendBackRawRequest/Response and
-		// BifrostContextKeyStoreRawRequestResponse). A context value set to either true
-		// or false fully overrides the provider config for that flag.
-		//
-		// Each flag is independent:
-		//   send_back_raw_request  — include raw request bytes in the client response.
-		//   send_back_raw_response — include raw response bytes in the client response.
-		//   store_raw_request_response — persist raw bytes in log records (logging plugin only).
-		//
-		// Capture is enabled per-side whenever send-back OR store is requested for that side.
-		// Strip flags tell the response path to remove that side's bytes before the payload
-		// reaches the caller (used when store=true but send-back=false for that side).
-		//
-		// All internal signals are always written explicitly on every attempt so stale values
-		// from a previous provider attempt (e.g. different fallback provider config) cannot
-		// leak into the new attempt on a reused context. The user override keys
-		// (BifrostContextKeySendBackRaw*, BifrostContextKeyStoreRawRequestResponse) are
-		// never overwritten — they are read-only from bifrost.go's perspective.
-
-		// Step 1: compute effective value for each flag (provider config ← per-request override).
-		effectiveSendBackReq := config.SendBackRawRequest
-		allowRawOverride, _ := req.Context.Value(schemas.BifrostContextKeyAllowPerRequestRawOverride).(bool)
-		passthroughOverridePresent, _ := req.Context.Value(schemas.BifrostContextKeyPassthroughOverridesPresent).(bool)
-
-		if allowRawOverride || passthroughOverridePresent {
-			if override, ok := req.Context.Value(schemas.BifrostContextKeySendBackRawRequest).(bool); ok {
-				effectiveSendBackReq = override
-			}
+		// Re-stamped per attempt so a fallback cannot inherit the previous provider's opt-in.
+		if config.CustomProviderConfig != nil && config.CustomProviderConfig.DoesNotSendDoneMarker {
+			req.Context.SetValue(schemas.BifrostContextKeyDoesNotSendDoneMarker, true)
+		} else {
+			req.Context.ClearValue(schemas.BifrostContextKeyDoesNotSendDoneMarker)
 		}
-		effectiveSendBackResp := config.SendBackRawResponse
-		if allowRawOverride || passthroughOverridePresent {
-			if override, ok := req.Context.Value(schemas.BifrostContextKeySendBackRawResponse).(bool); ok {
-				effectiveSendBackResp = override
-			}
-		}
-		effectiveStore := config.StoreRawRequestResponse
-		allowStorageOverride, _ := req.Context.Value(schemas.BifrostContextKeyAllowPerRequestStorageOverride).(bool)
-		if allowStorageOverride {
-			if override, ok := req.Context.Value(schemas.BifrostContextKeyStoreRawRequestResponse).(bool); ok {
-				effectiveStore = override
-			}
+		// Same set-or-clear discipline: wait_for_usage must never leak onto a fallback provider
+		// that did not declare it, or that provider's stream would hold past finish_reason.
+		if config.CustomProviderConfig != nil && config.CustomProviderConfig.WaitForUsage {
+			req.Context.SetValue(schemas.BifrostContextKeyWaitForUsage, true)
+		} else {
+			req.Context.ClearValue(schemas.BifrostContextKeyWaitForUsage)
 		}
 
-		// Step 2: derive per-side capture and strip flags.
-		// Capture if we need to send the data back OR store it — independent per side.
-		captureReq := effectiveSendBackReq || effectiveStore
-		captureResp := effectiveSendBackResp || effectiveStore
-		// Strip from client response if we captured for storage but not for send-back.
-		dropReq := effectiveStore && !effectiveSendBackReq
-		dropResp := effectiveStore && !effectiveSendBackResp
-
-		// Step 3: write all internal signals explicitly (never touch the user override keys).
-		req.Context.SetValue(schemas.BifrostContextKeyCaptureRawRequest, captureReq)
-		req.Context.SetValue(schemas.BifrostContextKeyCaptureRawResponse, captureResp)
-		req.Context.SetValue(schemas.BifrostContextKeyDropRawRequestFromClient, dropReq)
-		req.Context.SetValue(schemas.BifrostContextKeyDropRawResponseFromClient, dropResp)
-		// Tells the logging plugin whether to persist raw bytes in log records.
-		req.Context.SetValue(schemas.BifrostContextKeyShouldStoreRawInLogs, effectiveStore)
+		bifrost.endCoreSpan(workerSetupSpan)
 
 		var keys []schemas.Key
 		// keyProvider is passed to executeRequestWithRetries to manage key selection and rotation.
@@ -6624,7 +7150,7 @@ func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas
 				keys, err = bifrost.getAllSupportedKeys(req.Context, provider.GetProviderKey(), baseProvider)
 				if err != nil {
 					bifrost.logger.Debug("error getting supported keys for list models: %v", err)
-					req.Err <- schemas.BifrostError{
+					bifrost.sendWorkerError(req, schemas.BifrostError{
 						IsBifrostError: false,
 						Error: &schemas.ErrorField{
 							Message: err.Error(),
@@ -6636,7 +7162,7 @@ func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas
 							OriginalModelRequested: model,
 							ResolvedModelUsed:      model,
 						},
-					}
+					})
 					continue
 				}
 				// Scope to a single key when ListModelsRequest.KeyID is set, so
@@ -6647,7 +7173,7 @@ func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas
 					target := *lmr.KeyID
 					keys = filterKeysByID(keys, target)
 					if len(keys) == 0 {
-						req.Err <- schemas.BifrostError{
+						bifrost.sendWorkerError(req, schemas.BifrostError{
 							IsBifrostError: false,
 							Error: &schemas.ErrorField{
 								Message: fmt.Sprintf("no key found with id %q for provider %s", target, provider.GetProviderKey()),
@@ -6658,7 +7184,7 @@ func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas
 								OriginalModelRequested: model,
 								ResolvedModelUsed:      model,
 							},
-						}
+						})
 						continue
 					}
 				}
@@ -6678,7 +7204,7 @@ func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas
 					keys, err = bifrost.getKeysForBatchAndFileOps(req.Context, provider.GetProviderKey(), baseProvider, modelPtr, isMultiKeyBatchOp)
 					if err != nil {
 						bifrost.logger.Debug("error getting keys for batch/file operation: %v", err)
-						req.Err <- schemas.BifrostError{
+						bifrost.sendWorkerError(req, schemas.BifrostError{
 							IsBifrostError: false,
 							Error: &schemas.ErrorField{
 								Message: err.Error(),
@@ -6690,29 +7216,38 @@ func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas
 								OriginalModelRequested: model,
 								ResolvedModelUsed:      model,
 							},
-						}
+						})
 						continue
 					}
 				} else {
 					// Build the key pool for this request. Selection and rotation are deferred to
 					// executeRequestWithRetries via keyProvider so that each retry attempt can use
 					// a different key (on rate-limit errors) without re-running the full filtering.
+					// "key-pool" overhead phase: building the candidate key pool (filtering,
+					// governance/alias resolution) is worker-side work; the per-attempt pick
+					// is the separate "key.selection" span.
+					keyPoolSpan := bifrost.startCoreSpan(req.Context, "key-pool")
 					supportedKeys, canRotate, keyPoolErr := bifrost.selectKeyFromProviderForModelWithPool(req.Context, req.RequestType, provider.GetProviderKey(), model, baseProvider)
+					bifrost.endCoreSpan(keyPoolSpan)
 					if keyPoolErr != nil {
 						bifrost.logger.Debug("error building key pool for model %s: %v", model, keyPoolErr)
-						req.Err <- schemas.BifrostError{
+						bifrost.sendWorkerError(req, schemas.BifrostError{
 							IsBifrostError: false,
+							Type:           schemas.Ptr(schemas.NoKeySupportsModel),
+							StatusCode:     schemas.Ptr(400),
 							Error: &schemas.ErrorField{
 								Message: keyPoolErr.Error(),
 								Error:   keyPoolErr,
+								Type:    schemas.Ptr(schemas.NoKeySupportsModel),
 							},
 							ExtraFields: schemas.BifrostErrorExtraFields{
 								Provider:               provider.GetProviderKey(),
 								RequestType:            req.RequestType,
 								OriginalModelRequested: model,
 								ResolvedModelUsed:      model,
+								ErrorType:              schemas.ErrorTypeCallerModelNotAvailable,
 							},
-						}
+						})
 						continue
 					}
 
@@ -6833,6 +7368,11 @@ func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas
 					req.Context.SetValue(schemas.BifrostContextKeyResolvedAlias, nil)
 				}
 				req.SetModel(resolvedModel)
+				// Disable Anthropic raw-body passthrough when this attempt's provider/model isn't Anthropic-native.
+				clearAnthropicPassthroughForNonNativeProvider(req.Context, baseProvider, resolvedModel)
+				// Disable it too when this attempt's provider has no native structured outputs.
+				clearAnthropicPassthroughForUnsupportedStructuredOutput(req.Context, baseProvider, &req.BifrostRequest)
+				applyRawCaptureSignals(req.Context, config)
 				// Snapshot per-attempt so postHookRunner doesn't observe a later retry's
 				// alias while this attempt's provider goroutine is still emitting chunks.
 				attemptResolvedModel := resolvedModel
@@ -6911,7 +7451,7 @@ func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas
 					})
 				}
 				lastAttemptFinalizer = postHookSpanFinalizer
-				streamCh, streamErr := bifrost.handleProviderStreamRequest(provider, req, k, postHookRunner, postHookSpanFinalizer)
+				streamCh, streamErr := bifrost.handleProviderStreamRequest(provider, config, req, k, postHookRunner, postHookSpanFinalizer)
 				// If stream setup failed before any provider goroutine started,
 				// no deferred finalizer will run — release the pipeline directly
 				// so a retry doesn't inherit a leaked pool entry.
@@ -6932,6 +7472,11 @@ func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas
 					req.Context.SetValue(schemas.BifrostContextKeyResolvedAlias, nil)
 				}
 				req.SetModel(resolvedModel)
+				// Disable Anthropic raw-body passthrough when this attempt's provider/model isn't Anthropic-native.
+				clearAnthropicPassthroughForNonNativeProvider(req.Context, baseProvider, resolvedModel)
+				// Disable it too when this attempt's provider has no native structured outputs.
+				clearAnthropicPassthroughForUnsupportedStructuredOutput(req.Context, baseProvider, &req.BifrostRequest)
+				applyRawCaptureSignals(req.Context, config)
 				attemptRoutingInfo = schemas.BuildRoutingInfo(req.Context, provider.GetProviderKey(), originalModelRequested, k)
 				return bifrost.handleProviderRequest(provider, config, req, k, keys)
 			}, keyProvider, req.RequestType, provider.GetProviderKey(), model, &req.BifrostRequest, bifrost.logger)
@@ -6954,62 +7499,118 @@ func (bifrost *Bifrost) requestWorker(provider schemas.Provider, config *schemas
 		}
 
 		if bifrostError != nil {
+			// Time the field population as "miscellaneous", then stamp sentAt just before
+			// the send so "worker-handoff" measures only the goroutine hop, not this work.
+			miscSpan := bifrost.startCoreSpan(req.Context, "miscellaneous")
 			bifrostError.PopulateExtraFields(req.RequestType, provider.GetProviderKey(), originalModelRequested, resolvedModel)
 			bifrostError.PopulateRoutingInfo(attemptRoutingInfo)
+			bifrost.endCoreSpan(miscSpan)
+			req.sentAt = time.Now()
 
-			// Send error with context awareness to prevent deadlock
-			select {
-			case req.Err <- *bifrostError:
-				// Error sent successfully
-			case <-req.Context.Done():
-				// Client no longer listening, log and continue
-				bifrost.logger.Debug("Client context cancelled while sending error response")
-				// The provider already produced this error (possibly after
-				// processing input tokens). tryRequest returned on ctx.Done and will
-				// never receive it, so bill/log it here. Non-streaming only.
+			if IsStreamRequestType(req.RequestType) {
+				// Streaming takes no part in the claim; its caller keeps a ctx escape
+				// and may already have released the message back to the pool, so the
+				// guarded send stays. Teardown bills via the provider goroutine.
+				deliveryTimer.Reset(5 * time.Second)
+				select {
+				case req.Err <- *bifrostError:
+					// Error sent successfully
+				case <-req.Context.Done():
+					// Client no longer listening, log and continue
+					bifrost.logger.Debug("Client context cancelled while sending error response")
+				case <-deliveryTimer.C:
+					// Timeout to prevent indefinite blocking
+					bifrost.logger.Warn("Timeout while sending error response, client may have disconnected")
+				}
+				deliveryTimer.Stop()
+			} else if !req.claimDelivery() {
+				// tryRequest abandoned the handoff on ctx.Done: it will never read
+				// req.Err and does not touch the message again, so this side owns both
+				// the value and the message. The claim is what makes this deterministic:
+				// a buffered send and ctx.Done() are both ready once the caller is gone
+				// and select picks uniformly among ready cases (#6972). The provider
+				// already produced this error (possibly after processing input tokens).
+				bifrost.logger.Debug("Client context cancelled before error handoff")
 				bifrost.billAbandonedTerminal(req, nil, bifrostError)
-			case <-time.After(5 * time.Second):
-				// Timeout to prevent indefinite blocking
-				bifrost.logger.Warn("Timeout while sending error response, client may have disconnected")
+				bifrost.releaseChannelMessage(req)
+			} else {
+				// Claimed: the caller is committed to receiving and req.Err is a cap-1
+				// channel drained on acquire, so this never blocks. No ctx.Done arm:
+				// with a done context both arms are ready, select flips a coin, and a
+				// discarded value strands the committed caller forever (#7308).
+				req.Err <- *bifrostError
 			}
 		} else {
+			// Time the field population as "miscellaneous", then stamp sentAt just before
+			// the send so "worker-handoff" measures only the goroutine hop, not this work.
+			miscSpan := bifrost.startCoreSpan(req.Context, "miscellaneous")
 			if result != nil {
 				result.PopulateExtraFields(req.RequestType, provider.GetProviderKey(), originalModelRequested, resolvedModel)
 				result.PopulateRoutingInfo(attemptRoutingInfo)
 			}
+			bifrost.endCoreSpan(miscSpan)
+			req.sentAt = time.Now()
 			if IsStreamRequestType(req.RequestType) {
 				// Send stream with context awareness to prevent deadlock
+				deliveryTimer.Reset(5 * time.Second)
 				select {
 				case req.ResponseStream <- stream:
 					// Stream sent successfully
 				case <-req.Context.Done():
 					// Client no longer listening, log and continue
 					bifrost.logger.Debug("Client context cancelled while sending stream response")
-				case <-time.After(5 * time.Second):
+					drainAbandonedStream(stream)
+				case <-deliveryTimer.C:
 					// Timeout to prevent indefinite blocking
 					bifrost.logger.Warn("Timeout while sending stream response, client may have disconnected")
+					drainAbandonedStream(stream)
 				}
+				deliveryTimer.Stop()
+			} else if !req.claimDelivery() {
+				// tryRequest abandoned the handoff on ctx.Done: it will never read
+				// req.Response (see the error path above for why the claim, not a
+				// select, decides this, #6972). The provider already produced this
+				// result and consumed tokens; bill it and release the message.
+				bifrost.logger.Debug("Client context cancelled before response handoff")
+				bifrost.billAbandonedTerminal(req, result, nil)
+				bifrost.releaseChannelMessage(req)
 			} else {
-				// Send response with context awareness to prevent deadlock
-				select {
-				case req.Response <- result:
-					// Response sent successfully
-				case <-req.Context.Done():
-					// Client no longer listening, log and continue
-					bifrost.logger.Debug("Client context cancelled while sending response")
-					// The provider already produced this non-streaming result
-					// (consuming tokens). tryRequest returned on ctx.Done and will never
-					// receive it, so bill/log it here.
-					bifrost.billAbandonedTerminal(req, result, nil)
-				case <-time.After(5 * time.Second):
-					// Timeout to prevent indefinite blocking
-					bifrost.logger.Warn("Timeout while sending response, client may have disconnected")
-				}
+				// Claimed: the caller is committed to receiving and req.Response is a
+				// cap-1 channel drained on acquire, so this never blocks. No ctx.Done
+				// arm: with a done context both arms are ready, select flips a coin, and
+				// a discarded value strands the committed caller forever (#7308).
+				req.Response <- result
 			}
 		}
 	}
 
 	// bifrost.logger.Debug("worker for provider %s exiting...", provider.GetProviderKey())
+}
+
+// sendWorkerError hands an error the worker produced without a provider call
+// (key discovery failures, the shutdown drain) to the caller under the same
+// ownership rules as a terminal value. A non-streaming caller that already
+// abandoned the handoff on ctx.Done will never read req.Err, so send nothing:
+// run its terminal post-hooks and return the message to the pool instead, exactly
+// as the provider-error path does (#6972). Streaming callers take no part in the
+// claim; their send keeps the ctx.Done escape so an abandoned stream caller can
+// never wedge the worker.
+func (bifrost *Bifrost) sendWorkerError(req *ChannelMessage, bifrostError schemas.BifrostError) {
+	if IsStreamRequestType(req.RequestType) {
+		select {
+		case req.Err <- bifrostError:
+		case <-req.Context.Done():
+		}
+		return
+	}
+	if !req.claimDelivery() {
+		bifrost.billAbandonedTerminal(req, nil, &bifrostError)
+		bifrost.releaseChannelMessage(req)
+		return
+	}
+	// Claimed: the caller is committed to receiving and req.Err is a cap-1 channel
+	// drained on acquire, so this never blocks.
+	req.Err <- bifrostError
 }
 
 // billAbandonedTerminal runs terminal post-LLM hooks for a NON-STREAMING request
@@ -7038,6 +7639,193 @@ func (bifrost *Bifrost) billAbandonedTerminal(req *ChannelMessage, result *schem
 	drainAndAttachPluginLogs(req.Context)
 }
 
+// drainAbandonedStream consumes a stream that will never reach the caller, so
+// the provider goroutine feeding it can finish.
+//
+// Both abandonment branches above drop the stream: the client context is done,
+// or the 5s delivery handoff timed out. The provider goroutine on the other end
+// is still producing, and GateSendChunk only escapes on ctx.Done(). On the
+// timeout path the context is still alive, so that goroutine blocks forever on a
+// channel nobody reads. It never reaches its deferred ReleaseStreamingResponse,
+// so its upstream connection is never released and one slot of MaxConnsPerHost
+// is burned for the life of the process.
+//
+// Draining asynchronously is deliberate: the worker must not wait out the rest
+// of an upstream response before picking up its next request. Post-hooks,
+// billing and the deferred span still run, because the provider goroutine
+// completes normally once unblocked and the chunks are discarded downstream of
+// that work rather than upstream of it.
+func drainAbandonedStream(stream chan *schemas.BifrostStreamChunk) {
+	if stream == nil {
+		return
+	}
+	go func() {
+		for range stream { //nolint:revive // draining; the chunks are deliberately discarded
+		}
+	}()
+}
+
+// promptCacheResponsesRequest returns the Responses request to dispatch, with
+// prompt-cache breakpoints synthesized when the provider is configured for it.
+//
+// The result is a SHALLOW COPY whenever injection is enabled, never the shared
+// request. That matters for exactly one reason: req.BifrostRequest survives across
+// retries and fallbacks. Writing an injected marker back onto it would let an attempt
+// against a provider with injection disabled inherit a breakpoint the caller never
+// sent — the same request-isolation leak that sank PR #6181, one level further up.
+//
+// Injection is per-attempt by design: a fallback re-evaluates against the new
+// provider's own config and capabilities rather than carrying the previous one's
+// decision.
+//
+// The capability gate runs against the BASE provider, not the key the provider
+// reports. A custom provider surfaces its own key ("my-anthropic"), which no
+// capability switch knows, so gating on it unresolved would answer false and quietly
+// deny injection to every custom provider wrapping a cache_control backend.
+func promptCacheResponsesRequest(ctx *schemas.BifrostContext, config *schemas.ProviderConfig, provider schemas.ModelProvider, r *schemas.BifrostResponsesRequest) *schemas.BifrostResponsesRequest {
+	if r == nil || config == nil {
+		return r
+	}
+	promptCache := providerUtils.ResolvePromptCacheConfig(ctx, config.PromptCache)
+	if !providerUtils.PromptCacheInjectionEnabled(promptCache, schemas.ResolveBaseProvider(ctx, provider), r.Model) {
+		return r
+	}
+	cp := *r
+	cp.Input = providerUtils.InjectResponsesCacheBreakpoints(promptCache, r.Input)
+	return &cp
+}
+
+// prepareResponsesRequest returns the Responses request to dispatch for one attempt:
+// billing metadata restored for Anthropic models, prompt-cache breakpoints
+// injected, then embedded client tools promoted and namespace
+// tools flattened when the target wire does not understand them. All steps are copy-on-write, so the shared
+// req.BifrostRequest keeps the caller's namespaces for a later fallback attempt against
+// a wire that does.
+//
+// The provider answers the support question itself when it implements
+// schemas.ResponsesNamespaceToolProvider (Bedrock: Mantle yes, Converse no); otherwise
+// the per-provider default in providerUtils applies, keyed on the BASE provider so a
+// custom provider wrapping OpenAI is treated like OpenAI.
+func prepareResponsesRequest(ctx *schemas.BifrostContext, config *schemas.ProviderConfig, provider schemas.Provider, key schemas.Key, r *schemas.BifrostResponsesRequest) (*schemas.BifrostResponsesRequest, *schemas.BifrostError) {
+	r = restoreResponsesBillingHeader(ctx, provider.GetProviderKey(), r)
+	r = promptCacheResponsesRequest(ctx, config, provider.GetProviderKey(), r)
+	if r == nil {
+		return nil, nil
+	}
+	r = normalizeResponsesToolSchemas(ctx, r)
+	var supported bool
+	if capable, ok := provider.(schemas.ResponsesNamespaceToolProvider); ok {
+		supported = capable.SupportsResponsesNamespaceTools(ctx, key, r.Model)
+	} else {
+		supported = providerUtils.ResponsesNamespaceToolsSupported(ctx, schemas.ResolveBaseProvider(ctx, provider.GetProviderKey()), r.Model)
+	}
+	if !supported {
+		var bifrostErr *schemas.BifrostError
+		r, bifrostErr = hoistResponsesAdditionalTools(r)
+		if bifrostErr != nil {
+			return nil, bifrostErr
+		}
+	}
+	// Codex's explicit "functions" namespace is the default namespace by definition,
+	// so it is unwrapped for every wire before the support check: Bedrock Mantle
+	// reserves the name, and flattening wires would otherwise prefix its members.
+	r, bifrostErr := providerUtils.UnwrapDefaultNamespaceTools(r)
+	if bifrostErr != nil {
+		return nil, bifrostErr
+	}
+	if supported {
+		// Pass-through: the request carries no alias map, so nothing is restored.
+		return r, nil
+	}
+	return providerUtils.FlattenResponsesNamespaceTools(ctx, r)
+}
+
+// normalizeResponsesToolSchemas applies toolSchemaPatternRewriter to the request's
+// tool schemas, with the same copy-on-write guarantee as promptCacheResponsesRequest:
+// a request whose model is outside the relaxed set, or whose tools need no
+// rewrite, is returned unchanged and allocates nothing.
+//
+// This sits on the shared dispatch path rather than in any one provider because
+// the affected models are reached through several: DeepSeek natively,
+// moonshotai.kimi-k3 through Bedrock, and OpenAI-compatible gateways fronting
+// either.
+func normalizeResponsesToolSchemas(ctx *schemas.BifrostContext, r *schemas.BifrostResponsesRequest) *schemas.BifrostResponsesRequest {
+	if r == nil || r.Params == nil || len(r.Params.Tools) == 0 {
+		return r
+	}
+	rewrite := toolSchemaPatternRewriter(ctx, r.Model)
+	if rewrite == nil {
+		return r
+	}
+	tools, changed := providerUtils.RewriteResponsesToolSchemas(r.Params.Tools, rewrite)
+	if !changed {
+		return r
+	}
+	params := *r.Params
+	params.Tools = tools
+	cp := *r
+	cp.Params = &params
+	return &cp
+}
+
+// relaxedPatternRewriter is the tool-schema pattern rewrite for the two model
+// families whose validators reject regex syntax that every other tested backend
+// accepts: the lossless `\0` -> `\x00` normalization followed by the lossy
+// lookaround strip. Built once so the per-request path allocates no closure.
+var relaxedPatternRewriter = providerUtils.ComposePatternRewriters(
+	providerUtils.NormalizeRegexNULEscape,
+	providerUtils.StripRegexLookaround,
+)
+
+// toolSchemaPatternRewriter returns the pattern rewrite for a request's model, or
+// nil when the model's tool schemas must reach the provider untouched.
+//
+// This is a positive list on purpose. Verified live on 2026-09-22: OpenAI,
+// Anthropic (directly and on Bedrock) and Gemini all accept both `\0` and
+// lookaround; DeepSeek rejects `\0` with a 400; moonshotai.kimi-k3 on Bedrock
+// rejects both with HTTP 200 and an empty event stream. Only the two families
+// with a verified rejection are rewritten, so every other model keeps its exact
+// bytes (and its prompt-cache key), and a new backend that chokes on a pattern
+// fails loudly through the Bedrock empty-stream guard rather than being silently
+// rewritten. The check is on the model, never the provider: kimi behind an
+// OpenAI-compatible custom provider is still kimi, and Claude on Bedrock is still
+// Claude.
+func toolSchemaPatternRewriter(ctx *schemas.BifrostContext, model string) providerUtils.PatternRewriter {
+	canonical := schemas.ResolveCanonicalModel(ctx, model)
+	if schemas.IsMoonshotModel(canonical) || schemas.IsDeepSeekModel(canonical) {
+		return relaxedPatternRewriter
+	}
+	return nil
+}
+
+// promptCacheChatRequest is the Chat Completions parallel of
+// promptCacheResponsesRequest, with the same copy-on-write guarantee.
+// It also strips Bedrock cachePoint markers when the attempt targets a wire or model
+// that cannot act on them.
+func promptCacheChatRequest(ctx *schemas.BifrostContext, config *schemas.ProviderConfig, provider schemas.ModelProvider, r *schemas.BifrostChatRequest) *schemas.BifrostChatRequest {
+	if r == nil {
+		return r
+	}
+	baseProvider := schemas.ResolveBaseProvider(ctx, provider)
+	if !providerUtils.ChatCachePointsSupported(baseProvider, schemas.ResolveCanonicalModel(ctx, r.Model)) {
+		if input, stripped := providerUtils.StripChatCachePoints(r.Input); stripped {
+			cp := *r
+			cp.Input = input
+			r = &cp
+		}
+	}
+	if config == nil {
+		return r
+	}
+	promptCache := providerUtils.ResolvePromptCacheConfig(ctx, config.PromptCache)
+	if !providerUtils.PromptCacheInjectionEnabled(promptCache, baseProvider, r.Model) {
+		return r
+	}
+	cp := *r
+	cp.Input = providerUtils.InjectChatCacheBreakpoints(promptCache, r.Input)
+	return &cp
+}
+
 // handleProviderRequest handles the request to the provider based on the request type
 // key is used for single-key operations, keys is used for batch/file operations that need multiple keys
 func (bifrost *Bifrost) handleProviderRequest(provider schemas.Provider, config *schemas.ProviderConfig, req *ChannelMessage, key schemas.Key, keys []schemas.Key) (*schemas.BifrostResponse, *schemas.BifrostError) {
@@ -7053,6 +7841,7 @@ func (bifrost *Bifrost) handleProviderRequest(provider schemas.Provider, config 
 		if changeType, ok := req.Context.Value(schemas.BifrostContextKeyChangeRequestType).(schemas.RequestType); ok && changeType == schemas.ChatCompletionRequest {
 			chatRequest := req.BifrostRequest.TextCompletionRequest.ToBifrostChatRequest()
 			if chatRequest != nil {
+				chatRequest = promptCacheChatRequest(req.Context, config, provider.GetProviderKey(), chatRequest)
 				chatCompletionResponse, bifrostError := provider.ChatCompletion(req.Context, key, chatRequest)
 				if bifrostError != nil {
 					return nil, bifrostError
@@ -7070,6 +7859,10 @@ func (bifrost *Bifrost) handleProviderRequest(provider schemas.Provider, config 
 		if changeType, ok := req.Context.Value(schemas.BifrostContextKeyChangeRequestType).(schemas.RequestType); ok && changeType == schemas.ResponsesRequest {
 			responsesRequest := req.BifrostRequest.ChatRequest.ToResponsesRequest()
 			if responsesRequest != nil {
+				responsesRequest, bifrostError := prepareResponsesRequest(req.Context, config, provider, key, responsesRequest)
+				if bifrostError != nil {
+					return nil, bifrostError
+				}
 				responsesResponse, bifrostError := provider.Responses(req.Context, key, responsesRequest)
 				if bifrostError != nil {
 					return nil, bifrostError
@@ -7078,19 +7871,40 @@ func (bifrost *Bifrost) handleProviderRequest(provider schemas.Provider, config 
 				break
 			}
 		}
-		chatCompletionResponse, bifrostError := provider.ChatCompletion(req.Context, key, req.BifrostRequest.ChatRequest)
+		chatCompletionResponse, bifrostError := provider.ChatCompletion(req.Context, key, promptCacheChatRequest(req.Context, config, provider.GetProviderKey(), req.BifrostRequest.ChatRequest))
 		if bifrostError != nil {
 			return nil, bifrostError
 		}
 		chatCompletionResponse.BackfillParams(req.BifrostRequest.ChatRequest)
 		response.ChatResponse = chatCompletionResponse
 	case schemas.ResponsesRequest:
-		responsesResponse, bifrostError := provider.Responses(req.Context, key, req.BifrostRequest.ResponsesRequest)
+		// Prepared BEFORE the chat-fallback branch: ToChatRequest keeps only function
+		// tools, so a namespace that reached it unflattened would be dropped silently.
+		preparedRequest, bifrostError := prepareResponsesRequest(req.Context, config, provider, key, req.BifrostRequest.ResponsesRequest)
+		if bifrostError != nil {
+			return nil, bifrostError
+		}
+		if changeType, ok := req.Context.Value(schemas.BifrostContextKeyChangeRequestType).(schemas.RequestType); ok && changeType == schemas.ChatCompletionRequest {
+			chatRequest := preparedRequest.ToChatRequest()
+			if chatRequest != nil {
+				chatCompletionResponse, bifrostError := provider.ChatCompletion(req.Context, key, chatRequest)
+				if bifrostError != nil {
+					return nil, bifrostError
+				}
+				responsesResponse := chatCompletionResponse.ToBifrostResponsesResponse()
+				responsesResponse.BackfillParams(req.BifrostRequest.ResponsesRequest)
+				response.ResponsesResponse = responsesResponse
+				providerUtils.RestoreResponsesNamespaceToolCalls(preparedRequest.NamespaceToolAliases, response)
+				break
+			}
+		}
+		responsesResponse, bifrostError := provider.Responses(req.Context, key, preparedRequest)
 		if bifrostError != nil {
 			return nil, bifrostError
 		}
 		responsesResponse.BackfillParams(req.BifrostRequest.ResponsesRequest)
 		response.ResponsesResponse = responsesResponse
+		providerUtils.RestoreResponsesNamespaceToolCalls(preparedRequest.NamespaceToolAliases, response)
 	case schemas.CountTokensRequest:
 		countTokensResponse, bifrostError := provider.CountTokens(req.Context, key, req.BifrostRequest.CountTokensRequest)
 		if bifrostError != nil {
@@ -7156,6 +7970,32 @@ func (bifrost *Bifrost) handleProviderRequest(provider schemas.Provider, config 
 			return nil, bifrostError
 		}
 		response.RerankResponse = rerankResponse
+	case schemas.DecisionRequest:
+		decisionResponse, bifrostError := provider.Decision(req.Context, key, req.BifrostRequest.DecisionRequest)
+		// A provider without native decision support returns unsupported_operation;
+		// emulate the judgment through that provider's model (tool-calling /
+		// structured output). Covers both an LLM named as the decision model and an
+		// LLM reached as a fallback - both flow through this one case.
+		if isUnsupportedOperation(bifrostError) {
+			// unsupported_operation also covers a policy denial (AllowedRequests without
+			// Decision). Emulate only when the operation is actually permitted, so a
+			// config that denies Decision cannot run it through the chat/responses path.
+			var customProviderConfig *schemas.CustomProviderConfig
+			if config != nil {
+				customProviderConfig = config.CustomProviderConfig
+			}
+			if denyErr := providerUtils.CheckOperationAllowed(provider.GetProviderKey(), customProviderConfig, schemas.DecisionRequest); denyErr != nil {
+				if req.BifrostRequest.DecisionRequest != nil {
+					denyErr.ExtraFields.OriginalModelRequested = req.BifrostRequest.DecisionRequest.Model
+				}
+				return nil, denyErr
+			}
+			decisionResponse, bifrostError = bifrost.emulateDecisionViaResponses(req.Context, provider, key, req.BifrostRequest.DecisionRequest)
+		}
+		if bifrostError != nil {
+			return nil, bifrostError
+		}
+		response.DecisionResponse = decisionResponse
 	case schemas.OCRRequest:
 		var customProviderConfig *schemas.CustomProviderConfig
 		if config != nil {
@@ -7214,6 +8054,13 @@ func (bifrost *Bifrost) handleProviderRequest(provider schemas.Provider, config 
 		}
 		videoGenerationResponse.BackfillParams(&req.BifrostRequest)
 		response.VideoGenerationResponse = videoGenerationResponse
+	case schemas.VideoEditRequest:
+		videoEditResponse, bifrostError := provider.VideoEdit(req.Context, key, req.BifrostRequest.VideoEditRequest)
+		if bifrostError != nil {
+			return nil, bifrostError
+		}
+		videoEditResponse.BackfillParams(&req.BifrostRequest)
+		response.VideoGenerationResponse = videoEditResponse
 	case schemas.VideoRetrieveRequest:
 		videoRetrieveResponse, bifrostError := provider.VideoRetrieve(req.Context, key, req.BifrostRequest.VideoRetrieveRequest)
 		if bifrostError != nil {
@@ -7422,13 +8269,13 @@ func (bifrost *Bifrost) handleProviderRequest(provider schemas.Provider, config 
 }
 
 // handleProviderStreamRequest handles the stream request to the provider based on the request type
-func (bifrost *Bifrost) handleProviderStreamRequest(provider schemas.Provider, req *ChannelMessage, key schemas.Key, postHookRunner schemas.PostHookRunner, postHookSpanFinalizer func(context.Context)) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
+func (bifrost *Bifrost) handleProviderStreamRequest(provider schemas.Provider, config *schemas.ProviderConfig, req *ChannelMessage, key schemas.Key, postHookRunner schemas.PostHookRunner, postHookSpanFinalizer func(context.Context)) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
 	switch req.RequestType {
 	case schemas.TextCompletionStreamRequest:
 		if changeType, ok := req.Context.Value(schemas.BifrostContextKeyChangeRequestType).(schemas.RequestType); ok && changeType == schemas.ChatCompletionRequest {
 			chatRequest := req.BifrostRequest.TextCompletionRequest.ToBifrostChatRequest()
 			if chatRequest != nil {
-				return provider.ChatCompletionStream(req.Context, wrapConvertedStreamPostHookRunner(postHookRunner, schemas.ChatCompletionRequest), postHookSpanFinalizer, key, chatRequest)
+				return provider.ChatCompletionStream(req.Context, wrapConvertedStreamPostHookRunner(postHookRunner, schemas.ChatCompletionRequest), postHookSpanFinalizer, key, promptCacheChatRequest(req.Context, config, provider.GetProviderKey(), chatRequest))
 			}
 		}
 		return provider.TextCompletionStream(req.Context, postHookRunner, postHookSpanFinalizer, key, req.BifrostRequest.TextCompletionRequest)
@@ -7436,12 +8283,33 @@ func (bifrost *Bifrost) handleProviderStreamRequest(provider schemas.Provider, r
 		if changeType, ok := req.Context.Value(schemas.BifrostContextKeyChangeRequestType).(schemas.RequestType); ok && changeType == schemas.ResponsesRequest {
 			responsesRequest := req.BifrostRequest.ChatRequest.ToResponsesRequest()
 			if responsesRequest != nil {
+				responsesRequest, bifrostError := prepareResponsesRequest(req.Context, config, provider, key, responsesRequest)
+				if bifrostError != nil {
+					return nil, bifrostError
+				}
 				return provider.ResponsesStream(req.Context, wrapConvertedStreamPostHookRunner(postHookRunner, schemas.ResponsesRequest), postHookSpanFinalizer, key, responsesRequest)
 			}
 		}
-		return provider.ChatCompletionStream(req.Context, postHookRunner, postHookSpanFinalizer, key, req.BifrostRequest.ChatRequest)
+		return provider.ChatCompletionStream(req.Context, postHookRunner, postHookSpanFinalizer, key, promptCacheChatRequest(req.Context, config, provider.GetProviderKey(), req.BifrostRequest.ChatRequest))
 	case schemas.ResponsesStreamRequest:
-		return provider.ResponsesStream(req.Context, postHookRunner, postHookSpanFinalizer, key, req.BifrostRequest.ResponsesRequest)
+		// Prepared BEFORE the chat-fallback branch: ToChatRequest keeps only function
+		// tools, so a namespace that reached it unflattened would be dropped silently.
+		preparedRequest, bifrostError := prepareResponsesRequest(req.Context, config, provider, key, req.BifrostRequest.ResponsesRequest)
+		if bifrostError != nil {
+			return nil, bifrostError
+		}
+		if changeType, ok := req.Context.Value(schemas.BifrostContextKeyChangeRequestType).(schemas.RequestType); ok && changeType == schemas.ChatCompletionRequest {
+			chatRequest := preparedRequest.ToChatRequest()
+			if chatRequest != nil {
+				// The providers' chat streaming handler re-assembles Responses events from the
+				// chat chunks when this flag is set, so the caller still gets a Responses stream.
+				req.Context.SetValue(schemas.BifrostContextKeyIsResponsesToChatCompletionFallback, true)
+				return provider.ChatCompletionStream(req.Context, providerUtils.WrapNamespaceRestorePostHookRunner(postHookRunner, preparedRequest.NamespaceToolAliases), postHookSpanFinalizer, key, chatRequest)
+			}
+		}
+		// The prepared request carries the alias map; the wrapped runner restores the
+		// caller's tool names on every chunk before the post hooks see it.
+		return provider.ResponsesStream(req.Context, providerUtils.WrapNamespaceRestorePostHookRunner(postHookRunner, preparedRequest.NamespaceToolAliases), postHookSpanFinalizer, key, preparedRequest)
 	case schemas.ResponsesRetrieveStreamRequest:
 		lifecycle, ok := provider.(schemas.ResponsesLifecycleProvider)
 		if !ok {
@@ -7490,13 +8358,17 @@ func (p *PluginPipeline) RunLLMPreHooks(ctx *schemas.BifrostContext, req *schema
 	for i, plugin := range p.llmPlugins {
 		pluginName := plugin.GetName()
 		p.logger.Debug("running pre-hook for plugin %s", pluginName)
-		// Start span for this plugin's PreLLMHook
-		spanCtx, handle := p.tracer.StartSpan(ctx, fmt.Sprintf("plugin.%s.prehook", sanitizeSpanName(pluginName)), schemas.SpanKindPlugin)
-		// Update pluginCtx with span context for nested operations
-		if spanCtx != nil {
-			if spanID, ok := spanCtx.Value(schemas.BifrostContextKeySpanID).(string); ok {
-				ctx.SetValue(schemas.BifrostContextKeySpanID, spanID)
-			}
+		// Start span for this plugin's PreLLMHook. Capture the parent first so we can
+		// restore it after this plugin ends: without the restore each plugin would set
+		// itself active and never revert, so the next plugin would nest under this one
+		// (a chain) instead of being a sibling. The overhead breakdown subtracts only
+		// DIRECT children, so a chained plugin's time would be counted in both its own
+		// bucket and the enclosing phase span's self-time (e.g. pipeline-pre).
+		prevSpanID := ctx.Value(schemas.BifrostContextKeySpanID)
+		spanID, handle := p.tracer.StartSpanID(ctx, pluginSpanNamesFor(pluginName).prehook, schemas.SpanKindPlugin)
+		// Mirror the new span ID into ctx for nested operations (no valueCtx alloc).
+		if spanID != "" {
+			ctx.SetValue(schemas.BifrostContextKeySpanID, spanID)
 		}
 
 		pluginCtx := ctx.WithPluginScope(&pluginName)
@@ -7515,6 +8387,8 @@ func (p *PluginPipeline) RunLLMPreHooks(ctx *schemas.BifrostContext, req *schema
 		} else {
 			p.tracer.EndSpan(handle, schemas.SpanStatusOk, "")
 		}
+		// Restore the parent so the next plugin is a sibling, not chained under this one.
+		ctx.SetValue(schemas.BifrostContextKeySpanID, prevSpanID)
 
 		p.executedPreHooks = i + 1
 		if shortCircuit != nil {
@@ -7544,11 +8418,12 @@ func (p *PluginPipeline) RunPreRequestHooks(ctx *schemas.BifrostContext, req *sc
 	for _, plugin := range p.llmPlugins {
 		pluginName := plugin.GetName()
 		p.logger.Debug("running pre-request hook for plugin %s", pluginName)
-		spanCtx, handle := p.tracer.StartSpan(ctx, fmt.Sprintf("plugin.%s.prerequesthook", sanitizeSpanName(pluginName)), schemas.SpanKindPlugin)
-		if spanCtx != nil {
-			if spanID, ok := spanCtx.Value(schemas.BifrostContextKeySpanID).(string); ok {
-				ctx.SetValue(schemas.BifrostContextKeySpanID, spanID)
-			}
+		// Capture the parent so it can be restored after this plugin ends, keeping the
+		// next plugin a sibling rather than chained under this one (see RunLLMPreHooks).
+		prevSpanID := ctx.Value(schemas.BifrostContextKeySpanID)
+		spanID, handle := p.tracer.StartSpanID(ctx, pluginSpanNamesFor(pluginName).prerequesthook, schemas.SpanKindPlugin)
+		if spanID != "" {
+			ctx.SetValue(schemas.BifrostContextKeySpanID, spanID)
 		}
 
 		pluginCtx := ctx.WithPluginScope(&pluginName)
@@ -7560,9 +8435,11 @@ func (p *PluginPipeline) RunPreRequestHooks(ctx *schemas.BifrostContext, req *sc
 			p.tracer.EndSpan(handle, schemas.SpanStatusError, err.Error())
 			p.preHookErrors = append(p.preHookErrors, err)
 			p.logger.Warn("error in PreRequestHook for plugin %s: %s", pluginName, err.Error())
-			continue
+		} else {
+			p.tracer.EndSpan(handle, schemas.SpanStatusOk, "")
 		}
-		p.tracer.EndSpan(handle, schemas.SpanStatusOk, "")
+		// Restore the parent so the next plugin is a sibling, not chained under this one.
+		ctx.SetValue(schemas.BifrostContextKeySpanID, prevSpanID)
 	}
 	ctx.UnblockRestrictedWrites()
 
@@ -7629,13 +8506,15 @@ func (p *PluginPipeline) RunPostLLMHooks(ctx *schemas.BifrostContext, resp *sche
 				p.logger.Warn("error in PostLLMHook for plugin %s: %v", pluginName, err)
 			}
 		} else {
-			// For non-streaming: create span per plugin (existing behavior)
-			spanCtx, handle := p.tracer.StartSpan(ctx, fmt.Sprintf("plugin.%s.posthook", sanitizeSpanName(pluginName)), schemas.SpanKindPlugin)
-			// Update pluginCtx with span context for nested operations
-			if spanCtx != nil {
-				if spanID, ok := spanCtx.Value(schemas.BifrostContextKeySpanID).(string); ok {
-					ctx.SetValue(schemas.BifrostContextKeySpanID, spanID)
-				}
+			// For non-streaming: create span per plugin (existing behavior). Capture the
+			// parent first and restore it below so the next plugin is a sibling rather than
+			// chained under this one (see RunLLMPreHooks) — otherwise later post-hooks would
+			// be double-counted in both their bucket and the enclosing pipeline-post span.
+			prevSpanID := ctx.Value(schemas.BifrostContextKeySpanID)
+			spanID, handle := p.tracer.StartSpanID(ctx, pluginSpanNamesFor(pluginName).posthook, schemas.SpanKindPlugin)
+			// Mirror the new span ID into ctx for nested operations (no valueCtx alloc).
+			if spanID != "" {
+				ctx.SetValue(schemas.BifrostContextKeySpanID, spanID)
 			}
 			pluginCtx := ctx.WithPluginScope(&pluginName)
 			resp, bifrostErr, err = plugin.PostLLMHook(pluginCtx, resp, bifrostErr)
@@ -7649,6 +8528,8 @@ func (p *PluginPipeline) RunPostLLMHooks(ctx *schemas.BifrostContext, resp *sche
 			} else {
 				p.tracer.EndSpan(handle, schemas.SpanStatusOk, "")
 			}
+			// Restore the parent so the next plugin is a sibling, not chained under this one.
+			ctx.SetValue(schemas.BifrostContextKeySpanID, prevSpanID)
 		}
 		// If a plugin recovers from an error (sets bifrostErr to nil and sets resp), allow that
 		// If a plugin invalidates a response (sets resp to nil and sets bifrostErr), allow that
@@ -7688,12 +8569,10 @@ func (p *PluginPipeline) RunMCPPreHooks(ctx *schemas.BifrostContext, req *schema
 		pluginName := plugin.GetName()
 		p.logger.Debug("running MCP pre-hook for plugin %s", pluginName)
 		// Start span for this plugin's PreMCPHook
-		spanCtx, handle := p.tracer.StartSpan(ctx, fmt.Sprintf("plugin.%s.mcp_prehook", sanitizeSpanName(pluginName)), schemas.SpanKindPlugin)
-		// Update pluginCtx with span context for nested operations
-		if spanCtx != nil {
-			if spanID, ok := spanCtx.Value(schemas.BifrostContextKeySpanID).(string); ok {
-				ctx.SetValue(schemas.BifrostContextKeySpanID, spanID)
-			}
+		spanID, handle := p.tracer.StartSpanID(ctx, pluginSpanNamesFor(pluginName).mcpPrehook, schemas.SpanKindPlugin)
+		// Mirror the new span ID into ctx for nested operations (no valueCtx alloc).
+		if spanID != "" {
+			ctx.SetValue(schemas.BifrostContextKeySpanID, spanID)
 		}
 
 		pluginCtx := ctx.WithPluginScope(&pluginName)
@@ -7744,12 +8623,10 @@ func (p *PluginPipeline) RunMCPPostHooks(ctx *schemas.BifrostContext, mcpResp *s
 		pluginName := plugin.GetName()
 		p.logger.Debug("running MCP post-hook for plugin %s", pluginName)
 		// Create span per plugin
-		spanCtx, handle := p.tracer.StartSpan(ctx, fmt.Sprintf("plugin.%s.mcp_posthook", sanitizeSpanName(pluginName)), schemas.SpanKindPlugin)
-		// Update pluginCtx with span context for nested operations
-		if spanCtx != nil {
-			if spanID, ok := spanCtx.Value(schemas.BifrostContextKeySpanID).(string); ok {
-				ctx.SetValue(schemas.BifrostContextKeySpanID, spanID)
-			}
+		spanID, handle := p.tracer.StartSpanID(ctx, pluginSpanNamesFor(pluginName).mcpPosthook, schemas.SpanKindPlugin)
+		// Mirror the new span ID into ctx for nested operations (no valueCtx alloc).
+		if spanID != "" {
+			ctx.SetValue(schemas.BifrostContextKeySpanID, spanID)
 		}
 
 		pluginCtx := ctx.WithPluginScope(&pluginName)
@@ -7798,11 +8675,9 @@ func (p *PluginPipeline) RunMCPPreConnectionHooks(ctx *schemas.BifrostContext, r
 	for i, plugin := range p.mcpPlugins {
 		pluginName := plugin.GetName()
 		p.logger.Debug("running MCP connect pre-hook for plugin %s", pluginName)
-		spanCtx, handle := p.tracer.StartSpan(ctx, fmt.Sprintf("plugin.%s.mcp_connect_prehook", sanitizeSpanName(pluginName)), schemas.SpanKindPlugin)
-		if spanCtx != nil {
-			if spanID, ok := spanCtx.Value(schemas.BifrostContextKeySpanID).(string); ok {
-				ctx.SetValue(schemas.BifrostContextKeySpanID, spanID)
-			}
+		spanID, handle := p.tracer.StartSpanID(ctx, pluginSpanNamesFor(pluginName).mcpConnectPrehook, schemas.SpanKindPlugin)
+		if spanID != "" {
+			ctx.SetValue(schemas.BifrostContextKeySpanID, spanID)
 		}
 
 		pluginCtx := ctx.WithPluginScope(&pluginName)
@@ -7861,11 +8736,9 @@ func (p *PluginPipeline) RunMCPPostConnectionHooks(ctx *schemas.BifrostContext, 
 		plugin := p.mcpPlugins[i]
 		pluginName := plugin.GetName()
 		p.logger.Debug("running MCP connect post-hook for plugin %s", pluginName)
-		spanCtx, handle := p.tracer.StartSpan(ctx, fmt.Sprintf("plugin.%s.mcp_connect_posthook", sanitizeSpanName(pluginName)), schemas.SpanKindPlugin)
-		if spanCtx != nil {
-			if spanID, ok := spanCtx.Value(schemas.BifrostContextKeySpanID).(string); ok {
-				ctx.SetValue(schemas.BifrostContextKeySpanID, spanID)
-			}
+		spanID, handle := p.tracer.StartSpanID(ctx, pluginSpanNamesFor(pluginName).mcpConnectPosthook, schemas.SpanKindPlugin)
+		if spanID != "" {
+			ctx.SetValue(schemas.BifrostContextKeySpanID, spanID)
 		}
 
 		pluginCtx := ctx.WithPluginScope(&pluginName)
@@ -7959,6 +8832,9 @@ func flushPluginLogs(ctx *schemas.BifrostContext) {
 // drainAndAttachPluginLogs drains accumulated plugin logs from the BifrostContext
 // and attaches them to the trace for later retrieval by observability plugins.
 func drainAndAttachPluginLogs(ctx *schemas.BifrostContext) {
+	if !ctx.HasPluginLogs() {
+		return
+	}
 	tracer, traceID, err := GetTracerFromContext(ctx)
 	if err != nil || tracer == nil || traceID == "" {
 		return
@@ -8043,7 +8919,7 @@ func (p *PluginPipeline) FinalizeStreamingPostHookSpans(ctx context.Context) {
 	// Start spans in execution order (nested: each is a child of the previous)
 	for _, entry := range snapshot {
 		// Create span as child of the previous span (nested hierarchy)
-		newCtx, handle := tracer.StartSpan(currentCtx, fmt.Sprintf("plugin.%s.posthook", sanitizeSpanName(entry.pluginName)), schemas.SpanKindPlugin)
+		newCtx, handle := tracer.StartSpan(currentCtx, pluginSpanNamesFor(entry.pluginName).posthook, schemas.SpanKindPlugin)
 		if handle == nil {
 			continue
 		}
@@ -8101,6 +8977,71 @@ func (bifrost *Bifrost) releasePluginPipeline(pipeline *PluginPipeline) {
 
 // POOL & RESOURCE MANAGEMENT
 
+// coreSpan is the token returned by startCoreSpan and consumed by endCoreSpan. It
+// carries the span handle plus the context and the span ID that was active when the
+// phase opened, so endCoreSpan can restore the prior parent. The zero value is a valid
+// no-op (no trace active), so callers need no nil guard beyond checking cs.h when they
+// want a defer only on the active path.
+type coreSpan struct {
+	h    schemas.SpanHandle
+	ctx  *schemas.BifrostContext
+	prev any
+}
+
+// startCoreSpan opens an internal overhead phase span for a core-pipeline segment
+// (setup, key-pool build, pre/post processing) that sits on no other span. It
+// installs the new span as the
+// ACTIVE parent on ctx so any spans opened during the phase (plugin hooks, provider
+// phases) nest as its children — computeOverheadBreakdown subtracts direct children, so
+// without this the nested work would be counted in both this phase's self-time and its
+// own bucket. endCoreSpan restores the prior parent. Returns a zero coreSpan (no-op)
+// when no trace is active. name becomes the breakdown bucket.
+func (bifrost *Bifrost) startCoreSpan(ctx *schemas.BifrostContext, name string) coreSpan {
+	t := bifrost.getTracer()
+	if t == nil {
+		return coreSpan{}
+	}
+	prev := ctx.Value(schemas.BifrostContextKeySpanID)
+	id, h := t.StartSpanID(ctx, name, schemas.SpanKindInternal)
+	if h == nil {
+		return coreSpan{}
+	}
+	ctx.SetValue(schemas.BifrostContextKeySpanID, id)
+	return coreSpan{h: h, ctx: ctx, prev: prev}
+}
+
+// endCoreSpan restores the parent that was active before the phase and closes the span.
+// Nil/zero-safe.
+func (bifrost *Bifrost) endCoreSpan(cs coreSpan) {
+	if cs.h == nil {
+		return
+	}
+	cs.ctx.SetValue(schemas.BifrostContextKeySpanID, cs.prev)
+	bifrost.getTracer().EndSpan(cs.h, schemas.SpanStatusOk, "")
+}
+
+// startQueueWaitSpan opens a nil-safe "queue-wait" internal span measuring how long
+// the message sits in the provider queue before a worker dequeues it. The handle is
+// stored on the message; endQueueWaitSpan closes it on dequeue, and
+// releaseChannelMessage closes it if the send never reached a worker. When no trace
+// is active StartSpanID returns a nil handle, so the phase simply folds into the residual.
+func startQueueWaitSpan(ctx *schemas.BifrostContext, tracer schemas.Tracer, msg *ChannelMessage) {
+	if tracer == nil {
+		return
+	}
+	_, msg.queueSpan = tracer.StartSpanID(ctx, "queue-wait", schemas.SpanKindInternal)
+}
+
+// endQueueWaitSpan closes the queue-wait span once (nil-safe, idempotent): it clears
+// the handle so a later releaseChannelMessage does not double-close it.
+func (bifrost *Bifrost) endQueueWaitSpan(msg *ChannelMessage) {
+	if msg == nil || msg.queueSpan == nil {
+		return
+	}
+	bifrost.getTracer().EndSpan(msg.queueSpan, schemas.SpanStatusOk, "")
+	msg.queueSpan = nil
+}
+
 // getChannelMessage gets a ChannelMessage from the pool and configures it with the request.
 // It also gets response and error channels from their respective pools.
 func (bifrost *Bifrost) getChannelMessage(req schemas.BifrostRequest) *ChannelMessage {
@@ -8123,6 +9064,11 @@ func (bifrost *Bifrost) getChannelMessage(req schemas.BifrostRequest) *ChannelMe
 	msg.BifrostRequest = req
 	msg.Response = responseChan
 	msg.Err = errorChan
+	msg.handoff.Store(handoffOpen)
+	// Clear the previous user's send timestamp so a reused message can't report a
+	// stale worker-handoff duration on a path that never re-stamps it (e.g. the
+	// shutdown-drain error sends). The worker sets sentAt fresh before each normal send.
+	msg.sentAt = time.Time{}
 
 	// Conditionally allocate ResponseStream for streaming requests only
 	if IsStreamRequestType(req.RequestType) {
@@ -8157,9 +9103,13 @@ func (bifrost *Bifrost) drainQueueWithErrors(pq *ProviderQueue) {
 	for {
 		select {
 		case r := <-pq.queue:
+			// Draining a still-open queue-wait span: close it before discarding.
+			bifrost.endQueueWaitSpan(r)
 			provKey, mod, _ := r.GetRequestFields()
-			select {
-			case r.Err <- schemas.BifrostError{
+			// r.Err is a buffered channel of size 1 drained on acquire, so the send
+			// completes immediately; sendWorkerError handles a caller that has already
+			// abandoned the handoff (bills and releases instead of sending).
+			bifrost.sendWorkerError(r, schemas.BifrostError{
 				IsBifrostError: false,
 				Error:          &schemas.ErrorField{Message: "provider is shutting down"},
 				ExtraFields: schemas.BifrostErrorExtraFields{
@@ -8167,12 +9117,7 @@ func (bifrost *Bifrost) drainQueueWithErrors(pq *ProviderQueue) {
 					Provider:               provKey,
 					OriginalModelRequested: mod,
 				},
-			}:
-			case <-r.Context.Done():
-				// No time.After needed: r.Err is a buffered channel of size 1 freshly
-				// allocated per request, so the send always completes immediately unless
-				// the caller already cancelled. ctx.Done() is the only valid escape.
-			}
+			})
 		default:
 			return
 		}
@@ -8181,6 +9126,10 @@ func (bifrost *Bifrost) drainQueueWithErrors(pq *ProviderQueue) {
 
 // releaseChannelMessage returns a ChannelMessage and its channels to their respective pools.
 func (bifrost *Bifrost) releaseChannelMessage(msg *ChannelMessage) {
+	// Close the queue-wait span if the message never reached a worker (send failed
+	// on a shutdown/drop path). No-op when the worker already closed it.
+	bifrost.endQueueWaitSpan(msg)
+
 	// Drain any undelivered values before pooling so an idle pooled channel
 	// doesn't pin a full response/error until its next reuse. getChannelMessage
 	// drains again on acquire as defense in depth.
@@ -8221,6 +9170,7 @@ func (bifrost *Bifrost) releaseChannelMessage(msg *ChannelMessage) {
 	msg.Response = nil
 	msg.ResponseStream = nil
 	msg.Err = nil
+	msg.queueSpan = nil
 	bifrost.channelMessagePool.Put(msg)
 }
 
@@ -8239,6 +9189,7 @@ func resetBifrostRequest(req *schemas.BifrostRequest) {
 	req.CompactionRequest = nil
 	req.EmbeddingRequest = nil
 	req.RerankRequest = nil
+	req.DecisionRequest = nil
 	req.OCRRequest = nil
 	req.SpeechRequest = nil
 	req.TranscriptionRequest = nil
@@ -8246,6 +9197,7 @@ func resetBifrostRequest(req *schemas.BifrostRequest) {
 	req.ImageEditRequest = nil
 	req.ImageVariationRequest = nil
 	req.VideoGenerationRequest = nil
+	req.VideoEditRequest = nil
 	req.VideoRetrieveRequest = nil
 	req.VideoDownloadRequest = nil
 	req.VideoListRequest = nil
@@ -8429,9 +9381,9 @@ func (bifrost *Bifrost) getKeysForBatchAndFileOps(ctx *schemas.BifrostContext, p
 // via the keyProvider closure built by the caller.
 //
 // canRotate=false is returned for cases where the caller must always use the same key:
-//   - SkipKeySelection (provider allows keyless requests; empty slice returned)
+//   - SkipKeySelection (Claude Code OAuth passthrough to Anthropic; empty slice returned)
 //   - Explicit BifrostContextKeyAPIKeyID / APIKeyName (user pinned a specific key)
-//   - Session stickiness (key persisted in KV store for the session lifetime)
+//   - Session affinity (the registered policy named a key for the request's session)
 //   - Single-key pool (only one eligible key — rotation is a no-op, KV write skipped)
 //
 // canRotate=true is returned when there are two or more eligible keys and no pinning
@@ -8444,8 +9396,8 @@ func (bifrost *Bifrost) selectKeyFromProviderForModelWithPool(ctx *schemas.Bifro
 		}
 	}
 
-	// SkipKeySelection: provider allows keyless requests — return empty pool, no rotation.
-	if skipKeySelection, ok := ctx.Value(schemas.BifrostContextKeySkipKeySelection).(bool); ok && skipKeySelection && isKeySkippingAllowed(providerKey) {
+	// SkipKeySelection: the caller's OAuth token is the credential — return empty pool, no rotation.
+	if skipKeySelection, ok := ctx.Value(schemas.BifrostContextKeySkipKeySelection).(bool); ok && skipKeySelection && isKeySkippingAllowed(baseProviderType) {
 		return []schemas.Key{}, false, nil
 	}
 
@@ -8510,10 +9462,11 @@ func (bifrost *Bifrost) selectKeyFromProviderForModelWithPool(ctx *schemas.Bifro
 			// NOTE: Model filtering uses the original requested model (which may be an alias).
 			// key.Models and key.BlacklistedModels must therefore be expressed in alias keys.
 			// The provider-specific identifier is resolved later in the handler closure via key.Aliases.Resolve(model).
+			// vLLM also resolves a per-key copy below because ModelName contains the identifier served by that key.
 			modelSupported := hasValue && key.Models.IsAllowed(model) && !key.BlacklistedModels.IsBlocked(model)
 			if baseProviderType == schemas.VLLM && key.VLLMKeyConfig != nil {
 				if key.VLLMKeyConfig.ModelName != "" {
-					modelSupported = modelSupported && (key.VLLMKeyConfig.ModelName == model)
+					modelSupported = modelSupported && (key.VLLMKeyConfig.ModelName == key.Aliases.Resolve(model))
 				}
 			}
 			if modelSupported {
@@ -8554,103 +9507,23 @@ func (bifrost *Bifrost) selectKeyFromProviderForModelWithPool(ctx *schemas.Bifro
 		return []schemas.Key{supportedKeys[0]}, false, nil
 	}
 
-	// Session stickiness: on the first request for a session ID, the randomly selected key is
-	// persisted in the KV store. Subsequent requests reuse it for the session lifetime. The sticky
-	// key is intentionally kept fixed across all retry attempts — return it as a single-element
-	// pool with canRotate=false so rate-limit retries also stay on the same key.
-	sessionID := ""
-	if ctx != nil {
-		if id, ok := ctx.Value(schemas.BifrostContextKeySessionID).(string); ok && id != "" {
-			sessionID = id
-		}
-	}
-	fallbackIndex := 0
-	if ctx != nil {
-		fallbackIndex, _ = ctx.Value(schemas.BifrostContextKeyFallbackIndex).(int)
-	}
-	stickinessActive := sessionID != "" && bifrost.kvStore != nil && fallbackIndex == 0
-
-	if stickinessActive {
-		kvKey := buildSessionKey(providerKey, sessionID, model)
-		ttl, _ := ctx.Value(schemas.BifrostContextKeySessionTTL).(time.Duration)
-		if ttl <= 0 {
-			ttl = schemas.DefaultSessionStickyTTL
-		}
-
-		if cachedKey, found, stale := getCachedKeyFromStore(bifrost.kvStore, kvKey, supportedKeys); found {
-			if err := bifrost.kvStore.SetWithTTL(kvKey, cachedKey.ID, ttl); err != nil {
-				bifrost.logger.Warn("error setting session cache for provider=%s key_id=%s: %s", providerKey, cachedKey.ID, err.Error())
+	// Session affinity: a request that takes part and already has a key here stays on it. The
+	// policy decides what that means; core honors the key it names, for every attempt, as long
+	// as that key is one of the eligible ones. A policy naming anything else is ignored, so a
+	// disabled or model-incompatible key can never reach a request through it.
+	if schemas.IsSessionAffinityActive(ctx) {
+		if key, ok := bifrost.sessionAffinity.ResolveKey(ctx, providerKey, model, supportedKeys); ok {
+			for _, eligible := range supportedKeys {
+				if eligible.ID == key.ID {
+					return []schemas.Key{eligible}, false, nil
+				}
 			}
-			return []schemas.Key{cachedKey}, false, nil
-		} else if stale {
-			if _, err := bifrost.kvStore.Delete(kvKey); err != nil {
-				bifrost.logger.Warn("error deleting stale session cache for provider=%s: %s", providerKey, err.Error())
-			}
+			bifrost.logger.Warn("session affinity named key %s for provider %s, which is not in the eligible pool; selecting a key normally", key.ID, providerKey)
 		}
-
-		selectedKey, err := bifrost.keySelector(ctx, supportedKeys, providerKey, model)
-		if err != nil {
-			return nil, false, err
-		}
-
-		wasSet, err := bifrost.kvStore.SetNXWithTTL(kvKey, selectedKey.ID, ttl)
-		if err != nil {
-			bifrost.logger.Warn("error setting session cache for provider=%s key_id=%s: %s", providerKey, selectedKey.ID, err.Error())
-			return []schemas.Key{selectedKey}, false, nil
-		}
-		if wasSet {
-			return []schemas.Key{selectedKey}, false, nil
-		}
-
-		// Another concurrent request won the race — re-read the persisted key.
-		if currentKey, found, stale := getCachedKeyFromStore(bifrost.kvStore, kvKey, supportedKeys); found {
-			return []schemas.Key{currentKey}, false, nil
-		} else if stale {
-			if _, err := bifrost.kvStore.Delete(kvKey); err != nil {
-				bifrost.logger.Warn("error deleting stale session cache for provider=%s: %s", providerKey, err.Error())
-			}
-			return []schemas.Key{selectedKey}, false, nil
-		}
-
-		return []schemas.Key{selectedKey}, false, nil
 	}
 
 	// Normal case: return the full filtered pool with rotation enabled.
 	return supportedKeys, true, nil
-}
-
-// getCachedKeyFromStore retrieves a key ID from the KV store and looks it up in supportedKeys.
-// Returns the matching Key, found (true if key exists in supportedKeys), and stale (true if
-// KV contains an ID but it is not in supportedKeys—caller should delete before SetNXWithTTL).
-func getCachedKeyFromStore(kvStore schemas.KVStore, kvKey string, supportedKeys []schemas.Key) (schemas.Key, bool, bool) {
-	raw, err := kvStore.Get(kvKey)
-	if err != nil {
-		return schemas.Key{}, false, false
-	}
-
-	var cachedKeyID string
-	switch v := raw.(type) {
-	case string:
-		cachedKeyID = v
-	case []byte:
-		var s string
-		if err := sonic.Unmarshal(v, &s); err == nil {
-			cachedKeyID = s
-		} else {
-			cachedKeyID = string(v)
-		}
-	}
-
-	if cachedKeyID != "" {
-		for _, k := range supportedKeys {
-			if k.ID == cachedKeyID {
-				return k, true, false
-			}
-		}
-		return schemas.Key{}, false, true
-	}
-
-	return schemas.Key{}, false, false
 }
 
 // Shutdown gracefully stops all workers when triggered.

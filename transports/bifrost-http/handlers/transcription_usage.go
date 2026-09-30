@@ -27,8 +27,10 @@ var transcriptionUsageOutcomes = map[string]struct{}{
 }
 
 // TranscriptionUsageHandler records transcription usage that occurred outside Bifrost. Callers
-// must reuse x-request-id when retrying; the existing logging and governance
-// hooks use it for deduplication.
+// must reuse x-request-id when retrying: logging deduplicates by that ID, and
+// governance bills a retry with the same virtual key and x-request-id once
+// while the first report is still in its in-memory dedup window (see
+// stampUsageBillingNonce).
 type TranscriptionUsageHandler struct {
 	config               *lib.Config
 	loggingPluginName    string
@@ -135,6 +137,16 @@ func (h *TranscriptionUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 	}
 	response.PopulateExtraFields(schemas.TranscriptionRequest, provider, model, model)
 
+	// Hooks run in core's order (handleRequest): every PreRequestHook, then
+	// every PreLLMHook, then the PostLLMHooks in reverse. Governance's
+	// PreRequestHook stamps the request's provider before it resolves access,
+	// so provider-scoped grants apply.
+	if hookErr := loggingPlugin.PreRequestHook(bifrostCtx, request); hookErr != nil {
+		logger.Warn("transcription usage logging pre-request hook failed: %v", hookErr)
+	}
+	if hookErr := governancePlugin.PreRequestHook(bifrostCtx, request); hookErr != nil {
+		logger.Warn("transcription usage governance pre-request hook failed: %v", hookErr)
+	}
 	request, _, hookErr := loggingPlugin.PreLLMHook(bifrostCtx, request)
 	if hookErr != nil {
 		logger.Warn("transcription usage logging pre-hook failed: %v", hookErr)
@@ -143,6 +155,7 @@ func (h *TranscriptionUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 	if hookErr != nil {
 		logger.Warn("transcription usage governance pre-hook failed: %v", hookErr)
 	}
+	stampUsageBillingNonce(ctx, bifrostCtx)
 	if shortCircuit != nil {
 		response, bifrostErr := shortCircuit.Response, shortCircuit.Error
 		if bifrostErr != nil {

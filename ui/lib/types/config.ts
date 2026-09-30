@@ -74,6 +74,7 @@ export interface AliasConfig {
 	// Replicate overrides
 	use_deployments_endpoint?: boolean;
 	use_anthropic_endpoints?: boolean;
+	use_openai_endpoints?: boolean;
 }
 
 // AzureKeyConfig matching Go's schemas.AzureKeyConfig
@@ -120,6 +121,16 @@ export interface BatchS3Config {
 	buckets?: S3BucketConfig[];
 }
 
+// BedrockEndpoints matching Go's schemas.BedrockEndpoints. Each value is an interface VPC
+// endpoint's DNS name, dialled instead of the public regional host for that AWS service.
+export interface BedrockEndpoints {
+	runtime?: SecretVar;
+	control_plane?: SecretVar;
+	mantle?: SecretVar;
+	agent_runtime?: SecretVar;
+	s3?: SecretVar;
+}
+
 // BedrockKeyConfig matching Go's schemas.BedrockKeyConfig
 export interface BedrockKeyConfig {
 	access_key?: SecretVar;
@@ -129,6 +140,7 @@ export interface BedrockKeyConfig {
 	arn?: SecretVar;
 	project_id?: SecretVar;
 	batch_s3_config?: BatchS3Config;
+	endpoints?: BedrockEndpoints;
 }
 
 // Default BedrockKeyConfig
@@ -140,6 +152,7 @@ export const DefaultBedrockKeyConfig: BedrockKeyConfig = {
 	arn: { value: "", ref: "" },
 	project_id: { value: "", ref: "" },
 	batch_s3_config: undefined as unknown as BatchS3Config,
+	endpoints: undefined as unknown as BedrockEndpoints,
 } as const satisfies Required<BedrockKeyConfig>;
 
 // BedrockMantleKeyConfig matching Go's schemas.BedrockMantleKeyConfig
@@ -152,6 +165,7 @@ export interface BedrockMantleKeyConfig {
 	external_id?: SecretVar;
 	session_name?: SecretVar;
 	project_id?: SecretVar;
+	endpoints?: BedrockEndpoints;
 }
 
 // Default BedrockMantleKeyConfig
@@ -164,6 +178,7 @@ export const DefaultBedrockMantleKeyConfig: BedrockMantleKeyConfig = {
 	external_id: undefined as unknown as SecretVar,
 	session_name: undefined as unknown as SecretVar,
 	project_id: undefined as unknown as SecretVar,
+	endpoints: undefined as unknown as BedrockEndpoints,
 } as const satisfies Required<BedrockMantleKeyConfig>;
 
 // VLLMKeyConfig matching Go's schemas.VLLMKeyConfig
@@ -208,6 +223,45 @@ export const DefaultSGLKeyConfig: SGLKeyConfig = {
 	url: { value: "", ref: "" },
 } as const satisfies Required<SGLKeyConfig>;
 
+// DatabricksKeyConfig matching Go's schemas.DatabricksKeyConfig
+export interface DatabricksKeyConfig {
+	workspace_url: SecretVar;
+	api_format?: "auto" | "model_serving" | "ai_gateway";
+	client_id?: SecretVar;
+	client_secret?: SecretVar;
+	forward_gateway_tags?: boolean;
+	// UI-only discriminator; not sent to the API.
+	_auth_type?: "pat" | "oauth_m2m";
+}
+
+// Default DatabricksKeyConfig
+export const DefaultDatabricksKeyConfig: DatabricksKeyConfig = {
+	workspace_url: { value: "", ref: "" },
+	api_format: "auto",
+	client_id: { value: "", ref: "" },
+	client_secret: { value: "", ref: "" },
+	forward_gateway_tags: false,
+	_auth_type: "pat",
+} as const satisfies Required<DatabricksKeyConfig>;
+
+// GithubCopilotKeyConfig matching Go's schemas.GithubCopilotKeyConfig
+export interface GithubCopilotKeyConfig {
+	app_id: SecretVar;
+	installation_id: SecretVar;
+	repository_id: SecretVar;
+	private_key: SecretVar;
+	github_domain?: SecretVar;
+}
+
+// Default GithubCopilotKeyConfig
+export const DefaultGithubCopilotKeyConfig: GithubCopilotKeyConfig = {
+	app_id: { value: "", ref: "" },
+	installation_id: { value: "", ref: "" },
+	repository_id: { value: "", ref: "" },
+	private_key: { value: "", ref: "" },
+	github_domain: { value: "", ref: "" },
+} as const satisfies Required<GithubCopilotKeyConfig>;
+
 // Key structure matching Go's schemas.Key
 export interface ModelProviderKey {
 	id: string;
@@ -219,6 +273,7 @@ export interface ModelProviderKey {
 	enabled?: boolean;
 	use_for_batch_api?: boolean;
 	use_anthropic_endpoints?: boolean;
+	use_openai_endpoints?: boolean;
 	aliases?: Record<string, AliasConfig>;
 	azure_key_config?: AzureKeyConfig;
 	vertex_key_config?: VertexKeyConfig;
@@ -228,6 +283,8 @@ export interface ModelProviderKey {
 	replicate_key_config?: ReplicateKeyConfig;
 	ollama_key_config?: OllamaKeyConfig;
 	sgl_key_config?: SGLKeyConfig;
+	databricks_key_config?: DatabricksKeyConfig;
+	github_copilot_key_config?: GithubCopilotKeyConfig;
 	config_hash?: string; // Present when config is synced from config.json
 	status?: "unknown" | "success" | "list_models_failed";
 	description?: string;
@@ -312,6 +369,7 @@ export type RequestType =
 	| "ocr"
 	| "ocr_stream"
 	| "video_generation"
+	| "video_edit"
 	| "video_retrieve"
 	| "video_download"
 	| "video_delete"
@@ -322,6 +380,7 @@ export type RequestType =
 	| "batch_list"
 	| "batch_retrieve"
 	| "batch_cancel"
+	| "batch_delete"
 	| "batch_results"
 	| "file_upload"
 	| "file_list"
@@ -369,6 +428,7 @@ export interface AllowedRequests {
 	list_models: boolean;
 	rerank: boolean;
 	video_generation: boolean;
+	video_edit: boolean;
 	video_retrieve: boolean;
 	video_download: boolean;
 	video_delete: boolean;
@@ -382,6 +442,8 @@ export interface AllowedRequests {
 export interface CustomProviderConfig {
 	base_provider_type: KnownProvider;
 	is_key_less?: boolean;
+	does_not_send_done_marker?: boolean;
+	wait_for_usage?: boolean;
 	allowed_requests?: AllowedRequests;
 	request_path_overrides?: Record<string, string>;
 }
@@ -389,6 +451,24 @@ export interface CustomProviderConfig {
 // OpenAIConfig holds OpenAI-specific provider configuration.
 export interface OpenAIConfig {
 	disable_store?: boolean;
+}
+
+// CacheControlInjectionPoint names one place to add a cache breakpoint.
+// A point must set role, index, or both; a point with neither matches nothing.
+export interface CacheControlInjectionPoint {
+	location: "message";
+	role?: "system" | "developer" | "user" | "assistant";
+	// Negative values count from the end, so -1 is the last message.
+	index?: number;
+}
+
+// PromptCacheConfig opts a provider into synthesizing cache breakpoints for requests
+// that carry none. Off by default; requests that already carry their own markers are
+// never modified.
+export interface PromptCacheConfig {
+	auto_inject?: boolean;
+	ttl?: string;
+	cache_control_injection_points?: CacheControlInjectionPoint[];
 }
 
 // ProviderConfig matching Go's lib.ProviderConfig
@@ -401,6 +481,7 @@ export interface ModelProviderConfig {
 	store_raw_request_response?: boolean;
 	custom_provider_config?: CustomProviderConfig;
 	openai_config?: OpenAIConfig;
+	prompt_cache?: PromptCacheConfig;
 	status?: "unknown" | "success" | "list_models_failed";
 	description?: string;
 }
@@ -429,6 +510,7 @@ export interface AddProviderRequest {
 	store_raw_request_response?: boolean;
 	custom_provider_config?: CustomProviderConfig;
 	openai_config?: OpenAIConfig;
+	prompt_cache?: PromptCacheConfig;
 }
 
 // UpdateProviderRequest matching Go's UpdateProviderRequest
@@ -441,6 +523,7 @@ export interface UpdateProviderRequest {
 	store_raw_request_response?: boolean;
 	custom_provider_config?: CustomProviderConfig;
 	openai_config?: OpenAIConfig;
+	prompt_cache?: PromptCacheConfig;
 }
 
 export interface CreateProviderKeyRequest extends ModelProviderKey {}
@@ -495,6 +578,10 @@ export interface AuthConfig {
 	admin_username: SecretVar;
 	admin_password: SecretVar;
 	is_enabled: boolean;
+	/** Write-only: required only when this PUT request creates the very first admin account
+	 *  (no admin account exists yet). Provided by the operator via setup_token in config.json
+	 *  or the BIFROST_SETUP_TOKEN env var. Never persisted or returned by GET /api/config. */
+	setup_token?: string;
 }
 
 // Global proxy type (for global proxy configuration, not per-provider)
@@ -579,6 +666,7 @@ export interface CompatConfig {
 	convert_chat_to_responses: boolean;
 	should_drop_params: boolean;
 	should_convert_params: boolean;
+	azure_deepseek: boolean;
 }
 
 // Core Bifrost configuration types
@@ -592,6 +680,10 @@ export interface CoreConfig {
 	allow_per_request_content_storage_override: boolean;
 	allow_per_request_raw_override: boolean;
 	allow_direct_keys: boolean;
+	// Grace period after a virtual key rotation during which the previous value
+	// still authenticates. API returns int64 nanoseconds; writes accept a Go
+	// duration string like "5m". 0 = old value stops working immediately.
+	vk_rotation_cooldown?: number | string;
 	disable_db_pings_in_health: boolean;
 	dump_errors_in_console_logs: boolean;
 	log_retention_days: number;
@@ -612,6 +704,8 @@ export interface CoreConfig {
 	logging_headers: string[];
 	whitelisted_routes: string[];
 	hide_deleted_virtual_keys_in_filters: boolean;
+	// Request types excluded from Logs and Dashboard reads. Logs are still stored.
+	hidden_request_types: string[];
 	routing_chain_max_depth: number;
 	header_filter_config?: GlobalHeaderFilterConfig;
 	mcp_external_client_url?: SecretVar;
@@ -634,6 +728,7 @@ export const DefaultCoreConfig: CoreConfig = {
 	allow_per_request_content_storage_override: false,
 	allow_per_request_raw_override: false,
 	allow_direct_keys: false,
+	vk_rotation_cooldown: 0,
 	disable_db_pings_in_health: false,
 	dump_errors_in_console_logs: false,
 	log_retention_days: 365,
@@ -641,7 +736,13 @@ export const DefaultCoreConfig: CoreConfig = {
 	dual_credential_conflict_behavior: "prefer_idp",
 	allowed_origins: [],
 	max_request_body_size_mb: 100,
-	compat: { convert_text_to_chat: false, convert_chat_to_responses: false, should_drop_params: false, should_convert_params: false },
+	compat: {
+		convert_text_to_chat: false,
+		convert_chat_to_responses: false,
+		should_drop_params: false,
+		should_convert_params: false,
+		azure_deepseek: false,
+	},
 	mcp_agent_depth: 10,
 	mcp_tool_execution_timeout: 30,
 	mcp_code_mode_binding_level: "server",
@@ -654,6 +755,7 @@ export const DefaultCoreConfig: CoreConfig = {
 	logging_headers: [],
 	whitelisted_routes: [],
 	hide_deleted_virtual_keys_in_filters: false,
+	hidden_request_types: [],
 	routing_chain_max_depth: 10,
 };
 

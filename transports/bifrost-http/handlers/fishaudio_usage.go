@@ -20,8 +20,10 @@ const fishAudioUsagePath = "/v1/fishaudio/usage"
 
 // FishAudioUsageHandler records Fish Audio usage that occurred outside Bifrost,
 // such as playback of a cached TTS clip. Callers must reuse x-request-id when
-// retrying. Logging deduplicates by ID; governance only deduplicates briefly
-// in memory. Metronome uses a separate stable transaction ID for delivery.
+// retrying: logging deduplicates by that ID, and governance bills a retry with
+// the same virtual key and x-request-id once while the first report is still
+// in its in-memory dedup window (see stampUsageBillingNonce).
+// Metronome uses a separate stable transaction ID for delivery.
 type FishAudioUsageHandler struct {
 	config               *lib.Config
 	loggingPluginName    string
@@ -123,6 +125,16 @@ func (h *FishAudioUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 	}
 	response.PopulateExtraFields(schemas.SpeechRequest, provider, model, model)
 
+	// Hooks run in core's order (handleRequest): every PreRequestHook, then
+	// every PreLLMHook, then the PostLLMHooks in reverse. Governance's
+	// PreRequestHook stamps the request's provider before it resolves access,
+	// so provider-scoped grants apply.
+	if hookErr := loggingPlugin.PreRequestHook(bifrostCtx, request); hookErr != nil {
+		logger.Warn("Fish Audio usage logging pre-request hook failed: %v", hookErr)
+	}
+	if hookErr := governancePlugin.PreRequestHook(bifrostCtx, request); hookErr != nil {
+		logger.Warn("Fish Audio usage governance pre-request hook failed: %v", hookErr)
+	}
 	request, _, hookErr := loggingPlugin.PreLLMHook(bifrostCtx, request)
 	if hookErr != nil {
 		logger.Warn("Fish Audio usage logging pre-hook failed: %v", hookErr)
@@ -131,6 +143,7 @@ func (h *FishAudioUsageHandler) recordUsage(ctx *fasthttp.RequestCtx) {
 	if hookErr != nil {
 		logger.Warn("Fish Audio usage governance pre-hook failed: %v", hookErr)
 	}
+	stampUsageBillingNonce(ctx, bifrostCtx)
 	if shortCircuit != nil {
 		response, bifrostErr := shortCircuit.Response, shortCircuit.Error
 		if bifrostErr != nil {

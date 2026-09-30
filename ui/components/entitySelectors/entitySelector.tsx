@@ -21,6 +21,7 @@
 
 import { CheckIcon, ChevronDownIcon, PlusIcon } from "lucide-react";
 import { type ComponentType, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { components } from "react-select";
 
 import { AsyncMultiSelect } from "@/components/ui/asyncMultiselect";
 import { Button } from "@/components/ui/button";
@@ -97,6 +98,14 @@ export interface EntitySelectorCommonProps {
 	 * Single/add only — multi mode renders its chips inside the control.
 	 */
 	trigger?: ReactNode;
+	/** Add mode only: render the trigger full-width instead of the compact inline default. */
+	fullWidth?: boolean;
+	/**
+	 * Pinned below the option list — for the action a search that found nothing
+	 * leads to, typically "create a new one". Single/add only; multi mode's
+	 * react-select menu has no such slot.
+	 */
+	footer?: ReactNode;
 }
 
 interface EntitySelectorSingleProps {
@@ -121,7 +130,8 @@ interface EntitySelectorMultiProps {
  */
 interface EntitySelectorAddProps {
 	mode: "add";
-	onSelect: (option: EntitySelectorOption) => void;
+	/** The picked row, description included, so the caller can show more than its label. */
+	onSelect: (option: EntitySelectorEntry) => void;
 	multiple?: never;
 	value?: never;
 	onChange?: never;
@@ -188,6 +198,8 @@ export function EntitySelector(props: EntitySelectorProps) {
 		contentClassName,
 		excludeIds,
 		trigger,
+		fullWidth = false,
+		footer,
 	} = props;
 
 	const isAdd = props.mode === "add";
@@ -253,7 +265,7 @@ export function EntitySelector(props: EntitySelectorProps) {
 		cacheLabel(option);
 
 		if (props.mode === "add") {
-			props.onSelect({ value: option.value, label: option.label });
+			props.onSelect(option);
 		} else if (props.multiple !== true) {
 			props.onChange(option.value);
 		}
@@ -314,6 +326,10 @@ export function EntitySelector(props: EntitySelectorProps) {
 						if (props.multiple !== true) return;
 						props.onChange(selected.map((option) => option.value));
 					}}
+					// Dialog's centering transform turns the menu's `position: fixed`
+					// into relative-to-dialog instead of relative-to-viewport, which
+					// clips it; portaling to body escapes that ancestor entirely.
+					menuPortalTarget={typeof document !== "undefined" ? document.body : undefined}
 					// Clearing the input never reaches `reload`, so mirror every
 					// keystroke into the search state instead.
 					onInputChange={(inputValue) => onSearchChange(inputValue)}
@@ -325,24 +341,26 @@ export function EntitySelector(props: EntitySelectorProps) {
 					noOptionsMessage={() => (isError ? errorMessage : emptyMessage)}
 					views={{
 						option: (optionProps) => {
+							const { Option } = components;
 							const data = optionProps.data as Option<EntityOptionMeta>;
+							const isLast = optionProps.options[optionProps.options.length - 1] === optionProps.data;
 							return (
-								<div
+								<Option
+									{...optionProps}
 									className={cn(
 										"flex w-full cursor-pointer flex-col gap-0.5 rounded-sm p-2 text-sm",
-										optionProps.isFocused && "bg-background-highlight-primary/60",
-										optionProps.isSelected && "bg-background-highlight-primary/40",
+										optionProps.isFocused && "bg-accent",
+										isLast && "mb-2",
 									)}
-									onClick={() => optionProps.selectOption(optionProps.data)}
 								>
 									<div className="flex items-center justify-between">
-										<span className="text-content-primary font-medium">{data.label}</span>
-										{optionProps.isSelected && <span className="text-primary text-xs">Selected</span>}
+										<span className="font-medium">{data.label}</span>
+										<CheckIcon className={cn("ml-auto size-3.5 shrink-0", optionProps.isSelected ? "opacity-100" : "opacity-0")} />
 									</div>
 									{data.meta?.description && data.meta.description !== data.label && (
-										<span className="text-content-tertiary line-clamp-1 text-xs">{data.meta.description}</span>
+										<span className="text-muted-foreground line-clamp-1 text-xs">{data.meta.description}</span>
 									)}
-								</div>
+								</Option>
 							);
 						},
 					}}
@@ -357,34 +375,36 @@ export function EntitySelector(props: EntitySelectorProps) {
 
 	const triggerLabel = selectedIds.length > 0 ? labelFor(selectedIds[0]) : "";
 
-	// Add mode has no value to display, so it defaults to a compact action
-	// button rather than the full-width combobox.
-	const defaultTrigger = isAdd ? (
-		<Button type="button" variant="outline" size="sm" disabled={disabled} className="h-7.5 gap-1.5 px-2 py-1 text-sm font-medium">
-			<PlusIcon className="size-4" />
-			{placeholder ?? `Add ${entityLabel}`}
-		</Button>
-	) : (
-		<Button
-			type="button"
-			variant="outline"
-			role="combobox"
-			disabled={disabled}
-			className={cn(
-				"h-8 w-full justify-between !bg-transparent font-normal active:scale-none",
-				!triggerLabel && "text-muted-foreground",
-				triggerClassName,
-			)}
-		>
-			<span className="truncate">{triggerLabel || resolvedPlaceholder}</span>
-			<ChevronDownIcon className="ml-2 size-4 shrink-0 opacity-50" />
-		</Button>
-	);
+	// Add mode has no value to display, so it defaults to a compact action button rather than the
+	// full-width combobox — unless fullWidth is set, which uses the combobox trigger (showing the
+	// placeholder) for surfaces that want the picker to span the row.
+	const defaultTrigger =
+		isAdd && !fullWidth ? (
+			<Button type="button" variant="outline" size="sm" disabled={disabled} className="h-7.5 gap-1.5 px-2 py-1 text-sm font-medium">
+				<PlusIcon className="size-4" />
+				{placeholder ?? `Add ${entityLabel}`}
+			</Button>
+		) : (
+			<Button
+				type="button"
+				variant="outline"
+				role="combobox"
+				disabled={disabled}
+				className={cn(
+					"h-8 w-full justify-between !bg-transparent font-normal active:scale-none",
+					!triggerLabel && "text-muted-foreground",
+					triggerClassName,
+				)}
+			>
+				<span className="truncate">{triggerLabel || resolvedPlaceholder}</span>
+				<ChevronDownIcon className="ml-2 size-4 shrink-0 opacity-50" />
+			</Button>
+		);
 
 	return (
 		// Single wrapping element, so no vertical spacing utility here — it only
 		// ever holds the trigger and the (invisible) label resolvers.
-		<div className={cn(isAdd ? "inline-flex" : "w-full", className)}>
+		<div className={cn(isAdd && !fullWidth ? "inline-flex" : "w-full", className)}>
 			{labelResolvers}
 			<SearchSelect
 				async
@@ -403,6 +423,15 @@ export function EntitySelector(props: EntitySelectorProps) {
 					</>
 				)}
 				label={trigger ?? defaultTrigger}
+				// A footer action always leads somewhere else — a create sheet, another
+				// surface — so dismiss the picker on the way out rather than leaving a
+				// popover open behind whatever it opened.
+				//
+				// Capture, not bubble: footer is a public prop, and a footer whose own
+				// handler calls stopPropagation would otherwise never let this run,
+				// leaving the popover open behind whatever it opened. Capture fires on
+				// the way down, before the descendant can stop anything.
+				footer={footer && <div onClickCapture={() => onOpenChange(false)}>{footer}</div>}
 				open={open}
 				onOpenChange={onOpenChange}
 				onSearchChange={onSearchChange}
@@ -418,9 +447,9 @@ export function EntitySelector(props: EntitySelectorProps) {
 				// A compact trigger shouldn't dictate the popover width, so add
 				// mode keeps SearchSelect's own fixed width. Either default gives
 				// way to an explicit contentClassName.
-				align={isAdd ? "end" : "start"}
-				className={isAdd ? undefined : "w-full"}
-				contentClassName={contentClassName ?? (isAdd ? undefined : "w-(--radix-popover-trigger-width)")}
+				align={isAdd && !fullWidth ? "end" : "start"}
+				className={isAdd && !fullWidth ? undefined : "w-full"}
+				contentClassName={contentClassName ?? (isAdd && !fullWidth ? undefined : "w-(--radix-popover-trigger-width)")}
 				noPortal={noPortal}
 			/>
 		</div>

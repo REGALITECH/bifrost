@@ -58,6 +58,7 @@ type TableKey struct {
 	BedrockBatchRoleARN      *schemas.SecretVar `gorm:"type:text" json:"bedrock_batch_role_arn,omitempty"`
 	BedrockProjectID         *schemas.SecretVar `gorm:"type:text" json:"bedrock_project_id,omitempty"`
 	BedrockBatchS3ConfigJSON *string            `gorm:"type:text" json:"-"` // JSON serialized schemas.BatchS3Config
+	BedrockEndpointsJSON     *string            `gorm:"type:text" json:"-"` // JSON serialized schemas.BedrockEndpoints
 
 	// Bedrock Mantle config fields (embedded)
 	BedrockMantleAccessKey       *schemas.SecretVar `gorm:"type:text" json:"bedrock_mantle_access_key,omitempty"`
@@ -68,6 +69,7 @@ type TableKey struct {
 	BedrockMantleExternalID      *schemas.SecretVar `gorm:"type:text" json:"bedrock_mantle_external_id,omitempty"`
 	BedrockMantleRoleSessionName *schemas.SecretVar `gorm:"type:text" json:"bedrock_mantle_role_session_name,omitempty"`
 	BedrockMantleProjectID       *schemas.SecretVar `gorm:"type:text" json:"bedrock_mantle_project_id,omitempty"`
+	BedrockMantleEndpointsJSON   *string            `gorm:"type:text" json:"-"` // JSON serialized schemas.BedrockEndpoints
 
 	// VLLM config fields (embedded)
 	VLLMUrl       *schemas.SecretVar `gorm:"type:text" json:"vllm_url,omitempty"`
@@ -82,6 +84,13 @@ type TableKey struct {
 	// SGL config fields (embedded)
 	SGLUrl *schemas.SecretVar `gorm:"type:text" json:"sgl_url,omitempty"`
 
+	// Databricks config fields (embedded)
+	DatabricksWorkspaceURL       *schemas.SecretVar `gorm:"type:text" json:"databricks_workspace_url,omitempty"`
+	DatabricksClientID           *schemas.SecretVar `gorm:"type:text" json:"databricks_client_id,omitempty"`
+	DatabricksClientSecret       *schemas.SecretVar `gorm:"type:text" json:"databricks_client_secret,omitempty"`
+	DatabricksAPIFormat          *string            `gorm:"type:varchar(50)" json:"databricks_api_format,omitempty"`
+	DatabricksForwardGatewayTags *bool              `gorm:"column:databricks_forward_gateway_tags" json:"databricks_forward_gateway_tags,omitempty"`
+
 	// Batch API configuration
 	UseForBatchAPI *bool `gorm:"default:false" json:"use_for_batch_api,omitempty"` // Whether this key can be used for batch API operations
 
@@ -89,10 +98,22 @@ type TableKey struct {
 	// endpoints instead of its OpenAI-compatible ones.
 	UseAnthropicEndpoints *bool `gorm:"default:false" json:"use_anthropic_endpoints,omitempty"`
 
+	// UseOpenAIEndpoints routes Bedrock inference through the OpenAI-compatible endpoints
+	// instead of Converse. Column name is pinned: the default naming strategy does not
+	// split OpenAI the way the JSON tag does.
+	UseOpenAIEndpoints *bool `gorm:"column:use_openai_endpoints;default:false" json:"use_openai_endpoints,omitempty"`
+
 	Status      string `gorm:"type:varchar(50);default:'unknown'" json:"status"`
 	Description string `gorm:"type:text" json:"description,omitempty"`
 
 	EncryptionStatus string `gorm:"type:varchar(20);default:'plain_text'" json:"-"`
+
+	// GitHub Copilot config fields (embedded)
+	GithubCopilotAppID          *schemas.SecretVar `gorm:"type:text" json:"github_copilot_app_id,omitempty"`
+	GithubCopilotInstallationID *schemas.SecretVar `gorm:"type:text" json:"github_copilot_installation_id,omitempty"`
+	GithubCopilotRepositoryID   *schemas.SecretVar `gorm:"type:text" json:"github_copilot_repository_id,omitempty"`
+	GithubCopilotPrivateKey     *schemas.SecretVar `gorm:"type:text" json:"github_copilot_private_key,omitempty"`
+	GithubCopilotGithubDomain   *schemas.SecretVar `gorm:"type:text" json:"github_copilot_github_domain,omitempty"`
 
 	// Virtual fields for runtime use (not stored in DB)
 	Models                 schemas.WhiteList               `gorm:"-" json:"models"` // ["*"] allows all models; empty denies all (deny-by-default)
@@ -106,6 +127,8 @@ type TableKey struct {
 	ReplicateKeyConfig     *schemas.ReplicateKeyConfig     `gorm:"-" json:"replicate_key_config,omitempty"`
 	OllamaKeyConfig        *schemas.OllamaKeyConfig        `gorm:"-" json:"ollama_key_config,omitempty"`
 	SGLKeyConfig           *schemas.SGLKeyConfig           `gorm:"-" json:"sgl_key_config,omitempty"`
+	DatabricksKeyConfig    *schemas.DatabricksKeyConfig    `gorm:"-" json:"databricks_key_config,omitempty"`
+	GithubCopilotKeyConfig *schemas.GithubCopilotKeyConfig `gorm:"-" json:"github_copilot_key_config,omitempty"`
 }
 
 // TableName sets the table name for each model
@@ -144,6 +167,10 @@ func (k *TableKey) BeforeSave(tx *gorm.DB) error {
 	if k.UseAnthropicEndpoints == nil {
 		useAnthropicEndpoints := false // DB default
 		k.UseAnthropicEndpoints = &useAnthropicEndpoints
+	}
+	if k.UseOpenAIEndpoints == nil {
+		useOpenAIEndpoints := false // DB default
+		k.UseOpenAIEndpoints = &useOpenAIEndpoints
 	}
 	// IMPORTANT: All *SecretVar fields assigned from provider config structs (AzureKeyConfig,
 	// VertexKeyConfig, BedrockKeyConfig) MUST be value-copied before assignment. The caller
@@ -300,6 +327,16 @@ func (k *TableKey) BeforeSave(tx *gorm.DB) error {
 		} else {
 			k.BedrockBatchS3ConfigJSON = nil
 		}
+		if k.BedrockKeyConfig.Endpoints != nil {
+			data, err := sonic.Marshal(k.BedrockKeyConfig.Endpoints)
+			if err != nil {
+				return err
+			}
+			s := string(data)
+			k.BedrockEndpointsJSON = &s
+		} else {
+			k.BedrockEndpointsJSON = nil
+		}
 	} else {
 		k.BedrockAccessKey = nil
 		k.BedrockSecretKey = nil
@@ -312,6 +349,7 @@ func (k *TableKey) BeforeSave(tx *gorm.DB) error {
 		k.BedrockBatchRoleARN = nil
 		k.BedrockProjectID = nil
 		k.BedrockBatchS3ConfigJSON = nil
+		k.BedrockEndpointsJSON = nil
 	}
 
 	if k.BedrockMantleKeyConfig != nil {
@@ -364,6 +402,16 @@ func (k *TableKey) BeforeSave(tx *gorm.DB) error {
 		} else {
 			k.BedrockMantleProjectID = nil
 		}
+		if k.BedrockMantleKeyConfig.Endpoints != nil {
+			data, err := sonic.Marshal(k.BedrockMantleKeyConfig.Endpoints)
+			if err != nil {
+				return err
+			}
+			s := string(data)
+			k.BedrockMantleEndpointsJSON = &s
+		} else {
+			k.BedrockMantleEndpointsJSON = nil
+		}
 	} else {
 		k.BedrockMantleAccessKey = nil
 		k.BedrockMantleSecretKey = nil
@@ -373,6 +421,7 @@ func (k *TableKey) BeforeSave(tx *gorm.DB) error {
 		k.BedrockMantleExternalID = nil
 		k.BedrockMantleRoleSessionName = nil
 		k.BedrockMantleProjectID = nil
+		k.BedrockMantleEndpointsJSON = nil
 	}
 
 	if k.Aliases != nil {
@@ -423,6 +472,83 @@ func (k *TableKey) BeforeSave(tx *gorm.DB) error {
 		k.SGLUrl = &u
 	} else {
 		k.SGLUrl = nil
+	}
+
+	if k.DatabricksKeyConfig != nil {
+		if k.DatabricksKeyConfig.WorkspaceURL.IsSet() {
+			u := k.DatabricksKeyConfig.WorkspaceURL // Value-copy to prevent shared pointer mutation
+			k.DatabricksWorkspaceURL = &u
+		} else {
+			k.DatabricksWorkspaceURL = nil
+		}
+		if k.DatabricksKeyConfig.ClientID != nil {
+			cid := *k.DatabricksKeyConfig.ClientID // Value-copy to prevent shared pointer mutation
+			k.DatabricksClientID = &cid
+		} else {
+			k.DatabricksClientID = nil
+		}
+		if k.DatabricksKeyConfig.ClientSecret != nil {
+			cs := *k.DatabricksKeyConfig.ClientSecret
+			k.DatabricksClientSecret = &cs
+		} else {
+			k.DatabricksClientSecret = nil
+		}
+		if k.DatabricksKeyConfig.APIFormat != "" {
+			f := string(k.DatabricksKeyConfig.APIFormat)
+			k.DatabricksAPIFormat = &f
+		} else {
+			k.DatabricksAPIFormat = nil
+		}
+		t := k.DatabricksKeyConfig.ForwardGatewayTags
+		k.DatabricksForwardGatewayTags = &t
+	} else {
+		k.DatabricksWorkspaceURL = nil
+		k.DatabricksClientID = nil
+		k.DatabricksClientSecret = nil
+		k.DatabricksAPIFormat = nil
+		k.DatabricksForwardGatewayTags = nil
+	}
+	// GitHub Copilot. Every SecretVar is value-copied before assignment, per the invariant
+	// above: the caller may retain the config struct pointer, and encryption mutates in
+	// place, so sharing one would corrupt the caller's in-memory config.
+	if k.GithubCopilotKeyConfig != nil {
+		if k.GithubCopilotKeyConfig.AppID.IsSet() {
+			v := k.GithubCopilotKeyConfig.AppID
+			k.GithubCopilotAppID = &v
+		} else {
+			k.GithubCopilotAppID = nil
+		}
+		if k.GithubCopilotKeyConfig.InstallationID.IsSet() {
+			v := k.GithubCopilotKeyConfig.InstallationID
+			k.GithubCopilotInstallationID = &v
+		} else {
+			k.GithubCopilotInstallationID = nil
+		}
+		if k.GithubCopilotKeyConfig.RepositoryID.IsSet() {
+			v := k.GithubCopilotKeyConfig.RepositoryID
+			k.GithubCopilotRepositoryID = &v
+		} else {
+			k.GithubCopilotRepositoryID = nil
+		}
+		if k.GithubCopilotKeyConfig.PrivateKey.IsSet() {
+			v := k.GithubCopilotKeyConfig.PrivateKey
+			k.GithubCopilotPrivateKey = &v
+		} else {
+			k.GithubCopilotPrivateKey = nil
+		}
+		if k.GithubCopilotKeyConfig.GithubDomain.IsSet() {
+			v := k.GithubCopilotKeyConfig.GithubDomain
+			k.GithubCopilotGithubDomain = &v
+		} else {
+			k.GithubCopilotGithubDomain = nil
+		}
+	} else {
+		k.GithubCopilotAppID = nil
+		k.GithubCopilotInstallationID = nil
+		k.GithubCopilotRepositoryID = nil
+		k.GithubCopilotPrivateKey = nil
+		k.GithubCopilotGithubDomain = nil
+
 	}
 
 	// Store plaintext SecretVar columns into the vault and rewrite them to vault refs.
@@ -502,6 +628,9 @@ func (k *TableKey) BeforeSave(tx *gorm.DB) error {
 		if err := encryptString(k.BedrockBatchS3ConfigJSON); err != nil {
 			return fmt.Errorf("failed to encrypt bedrock batch s3 config: %w", err)
 		}
+		if err := encryptString(k.BedrockEndpointsJSON); err != nil {
+			return fmt.Errorf("failed to encrypt bedrock endpoints: %w", err)
+		}
 		// Bedrock Mantle
 		if err := encryptSecretVarPtr(&k.BedrockMantleAccessKey); err != nil {
 			return fmt.Errorf("failed to encrypt bedrock mantle access key: %w", err)
@@ -527,6 +656,9 @@ func (k *TableKey) BeforeSave(tx *gorm.DB) error {
 		if err := encryptSecretVarPtr(&k.BedrockMantleProjectID); err != nil {
 			return fmt.Errorf("failed to encrypt bedrock mantle project id: %w", err)
 		}
+		if err := encryptString(k.BedrockMantleEndpointsJSON); err != nil {
+			return fmt.Errorf("failed to encrypt bedrock mantle endpoints: %w", err)
+		}
 		// Aliases
 		if err := encryptString(k.AliasesJSON); err != nil {
 			return fmt.Errorf("failed to encrypt aliases: %w", err)
@@ -542,6 +674,33 @@ func (k *TableKey) BeforeSave(tx *gorm.DB) error {
 		// SGL
 		if err := encryptSecretVarPtr(&k.SGLUrl); err != nil {
 			return fmt.Errorf("failed to encrypt sgl url: %w", err)
+		}
+		// Databricks
+		if err := encryptSecretVarPtr(&k.DatabricksWorkspaceURL); err != nil {
+			return fmt.Errorf("failed to encrypt databricks workspace url: %w", err)
+		}
+		if err := encryptSecretVarPtr(&k.DatabricksClientID); err != nil {
+			return fmt.Errorf("failed to encrypt databricks client id: %w", err)
+		}
+		if err := encryptSecretVarPtr(&k.DatabricksClientSecret); err != nil {
+			return fmt.Errorf("failed to encrypt databricks client secret: %w", err)
+		}
+		// GitHub Copilot. The private key is the whole credential, so it must never sit
+		// in the database in plaintext when encryption is enabled.
+		if err := encryptSecretVarPtr(&k.GithubCopilotAppID); err != nil {
+			return fmt.Errorf("failed to encrypt github copilot app id: %w", err)
+		}
+		if err := encryptSecretVarPtr(&k.GithubCopilotInstallationID); err != nil {
+			return fmt.Errorf("failed to encrypt github copilot installation id: %w", err)
+		}
+		if err := encryptSecretVarPtr(&k.GithubCopilotRepositoryID); err != nil {
+			return fmt.Errorf("failed to encrypt github copilot repository id: %w", err)
+		}
+		if err := encryptSecretVarPtr(&k.GithubCopilotPrivateKey); err != nil {
+			return fmt.Errorf("failed to encrypt github copilot private key: %w", err)
+		}
+		if err := encryptSecretVarPtr(&k.GithubCopilotGithubDomain); err != nil {
+			return fmt.Errorf("failed to encrypt github copilot github domain: %w", err)
 		}
 		k.EncryptionStatus = EncryptionStatusEncrypted
 	}
@@ -617,6 +776,9 @@ func (k *TableKey) AfterFind(tx *gorm.DB) error {
 		if err := decryptString(k.BedrockBatchS3ConfigJSON); err != nil {
 			return fmt.Errorf("failed to decrypt bedrock batch s3 config: %w", err)
 		}
+		if err := decryptString(k.BedrockEndpointsJSON); err != nil {
+			return fmt.Errorf("failed to decrypt bedrock endpoints: %w", err)
+		}
 		// Bedrock Mantle
 		if err := decryptSecretVarPtr(&k.BedrockMantleAccessKey); err != nil {
 			return fmt.Errorf("failed to decrypt bedrock mantle access key: %w", err)
@@ -642,6 +804,9 @@ func (k *TableKey) AfterFind(tx *gorm.DB) error {
 		if err := decryptSecretVarPtr(&k.BedrockMantleProjectID); err != nil {
 			return fmt.Errorf("failed to decrypt bedrock mantle project id: %w", err)
 		}
+		if err := decryptString(k.BedrockMantleEndpointsJSON); err != nil {
+			return fmt.Errorf("failed to decrypt bedrock mantle endpoints: %w", err)
+		}
 		// Aliases
 		if err := decryptString(k.AliasesJSON); err != nil {
 			return fmt.Errorf("failed to decrypt aliases: %w", err)
@@ -657,6 +822,33 @@ func (k *TableKey) AfterFind(tx *gorm.DB) error {
 		// SGL
 		if err := decryptSecretVarPtr(&k.SGLUrl); err != nil {
 			return fmt.Errorf("failed to decrypt sgl url: %w", err)
+		}
+
+		// Databricks
+		if err := decryptSecretVarPtr(&k.DatabricksWorkspaceURL); err != nil {
+			return fmt.Errorf("failed to decrypt databricks workspace url: %w", err)
+		}
+		if err := decryptSecretVarPtr(&k.DatabricksClientID); err != nil {
+			return fmt.Errorf("failed to decrypt databricks client id: %w", err)
+		}
+		if err := decryptSecretVarPtr(&k.DatabricksClientSecret); err != nil {
+			return fmt.Errorf("failed to decrypt databricks client secret: %w", err)
+		}
+		// GitHub Copilot
+		if err := decryptSecretVarPtr(&k.GithubCopilotAppID); err != nil {
+			return fmt.Errorf("failed to decrypt github copilot app id: %w", err)
+		}
+		if err := decryptSecretVarPtr(&k.GithubCopilotInstallationID); err != nil {
+			return fmt.Errorf("failed to decrypt github copilot installation id: %w", err)
+		}
+		if err := decryptSecretVarPtr(&k.GithubCopilotRepositoryID); err != nil {
+			return fmt.Errorf("failed to decrypt github copilot repository id: %w", err)
+		}
+		if err := decryptSecretVarPtr(&k.GithubCopilotPrivateKey); err != nil {
+			return fmt.Errorf("failed to decrypt github copilot private key: %w", err)
+		}
+		if err := decryptSecretVarPtr(&k.GithubCopilotGithubDomain); err != nil {
+			return fmt.Errorf("failed to decrypt github copilot github domain: %w", err)
 		}
 	}
 
@@ -681,6 +873,10 @@ func (k *TableKey) AfterFind(tx *gorm.DB) error {
 	if k.UseAnthropicEndpoints == nil {
 		useAnthropicEndpoints := false // DB default
 		k.UseAnthropicEndpoints = &useAnthropicEndpoints
+	}
+	if k.UseOpenAIEndpoints == nil {
+		useOpenAIEndpoints := false // DB default
+		k.UseOpenAIEndpoints = &useOpenAIEndpoints
 	}
 	// Reconstruct Azure config if fields are present
 	if k.AzureEndpoint != nil || k.AzureClientID != nil || k.AzureClientSecret != nil || k.AzureTenantID != nil || (k.AzureScopesJSON != nil && *k.AzureScopesJSON != "") {
@@ -728,7 +924,7 @@ func (k *TableKey) AfterFind(tx *gorm.DB) error {
 		k.VertexKeyConfig = config
 	}
 	// Reconstruct Bedrock config if fields are present
-	if k.BedrockAccessKey != nil || k.BedrockSecretKey != nil || k.BedrockSessionToken != nil || k.BedrockRegion != nil || k.BedrockARN != nil || k.BedrockRoleARN != nil || k.BedrockExternalID != nil || k.BedrockRoleSessionName != nil || k.BedrockBatchRoleARN != nil || k.BedrockProjectID != nil || (k.BedrockBatchS3ConfigJSON != nil && *k.BedrockBatchS3ConfigJSON != "") {
+	if k.BedrockAccessKey != nil || k.BedrockSecretKey != nil || k.BedrockSessionToken != nil || k.BedrockRegion != nil || k.BedrockARN != nil || k.BedrockRoleARN != nil || k.BedrockExternalID != nil || k.BedrockRoleSessionName != nil || k.BedrockBatchRoleARN != nil || k.BedrockProjectID != nil || (k.BedrockBatchS3ConfigJSON != nil && *k.BedrockBatchS3ConfigJSON != "") || (k.BedrockEndpointsJSON != nil && *k.BedrockEndpointsJSON != "") {
 		bedrockConfig := &schemas.BedrockKeyConfig{}
 
 		if k.BedrockAccessKey != nil {
@@ -756,10 +952,18 @@ func (k *TableKey) AfterFind(tx *gorm.DB) error {
 			bedrockConfig.BatchS3Config = &batchS3Config
 		}
 
+		if k.BedrockEndpointsJSON != nil && *k.BedrockEndpointsJSON != "" {
+			var endpoints schemas.BedrockEndpoints
+			if err := json.Unmarshal([]byte(*k.BedrockEndpointsJSON), &endpoints); err != nil {
+				return err
+			}
+			bedrockConfig.Endpoints = &endpoints
+		}
+
 		k.BedrockKeyConfig = bedrockConfig
 	}
 	// Reconstruct Bedrock Mantle config if fields are present
-	if k.BedrockMantleAccessKey != nil || k.BedrockMantleSecretKey != nil || k.BedrockMantleSessionToken != nil || k.BedrockMantleRegion != nil || k.BedrockMantleRoleARN != nil || k.BedrockMantleExternalID != nil || k.BedrockMantleRoleSessionName != nil || k.BedrockMantleProjectID != nil {
+	if k.BedrockMantleAccessKey != nil || k.BedrockMantleSecretKey != nil || k.BedrockMantleSessionToken != nil || k.BedrockMantleRegion != nil || k.BedrockMantleRoleARN != nil || k.BedrockMantleExternalID != nil || k.BedrockMantleRoleSessionName != nil || k.BedrockMantleProjectID != nil || (k.BedrockMantleEndpointsJSON != nil && *k.BedrockMantleEndpointsJSON != "") {
 		mantleConfig := &schemas.BedrockMantleKeyConfig{}
 		if k.BedrockMantleAccessKey != nil {
 			mantleConfig.AccessKey = *k.BedrockMantleAccessKey
@@ -773,6 +977,13 @@ func (k *TableKey) AfterFind(tx *gorm.DB) error {
 		mantleConfig.ExternalID = k.BedrockMantleExternalID
 		mantleConfig.RoleSessionName = k.BedrockMantleRoleSessionName
 		mantleConfig.ProjectID = k.BedrockMantleProjectID
+		if k.BedrockMantleEndpointsJSON != nil && *k.BedrockMantleEndpointsJSON != "" {
+			var endpoints schemas.BedrockEndpoints
+			if err := json.Unmarshal([]byte(*k.BedrockMantleEndpointsJSON), &endpoints); err != nil {
+				return err
+			}
+			mantleConfig.Endpoints = &endpoints
+		}
 		k.BedrockMantleKeyConfig = mantleConfig
 	}
 	// Reconstruct Aliases
@@ -821,6 +1032,51 @@ func (k *TableKey) AfterFind(tx *gorm.DB) error {
 		}
 	} else {
 		k.SGLKeyConfig = nil
+	}
+
+	// Reconstruct Databricks config if fields are present
+	if k.DatabricksWorkspaceURL != nil || k.DatabricksClientID != nil || k.DatabricksClientSecret != nil ||
+		(k.DatabricksAPIFormat != nil && *k.DatabricksAPIFormat != "") || k.DatabricksForwardGatewayTags != nil {
+		databricksConfig := &schemas.DatabricksKeyConfig{
+			ClientID:     k.DatabricksClientID,
+			ClientSecret: k.DatabricksClientSecret,
+		}
+		if k.DatabricksWorkspaceURL != nil {
+			databricksConfig.WorkspaceURL = *k.DatabricksWorkspaceURL
+		}
+		if k.DatabricksAPIFormat != nil {
+			databricksConfig.APIFormat = schemas.DatabricksAPIFormat(*k.DatabricksAPIFormat)
+		}
+		if k.DatabricksForwardGatewayTags != nil {
+			databricksConfig.ForwardGatewayTags = *k.DatabricksForwardGatewayTags
+		}
+		k.DatabricksKeyConfig = databricksConfig
+	} else {
+		k.DatabricksKeyConfig = nil
+	}
+	// Reconstruct GitHub Copilot config if any field is present
+	if k.GithubCopilotAppID != nil || k.GithubCopilotInstallationID != nil ||
+		k.GithubCopilotRepositoryID != nil || k.GithubCopilotPrivateKey != nil ||
+		k.GithubCopilotGithubDomain != nil {
+		config := &schemas.GithubCopilotKeyConfig{}
+		if k.GithubCopilotAppID != nil {
+			config.AppID = *k.GithubCopilotAppID
+		}
+		if k.GithubCopilotInstallationID != nil {
+			config.InstallationID = *k.GithubCopilotInstallationID
+		}
+		if k.GithubCopilotRepositoryID != nil {
+			config.RepositoryID = *k.GithubCopilotRepositoryID
+		}
+		if k.GithubCopilotPrivateKey != nil {
+			config.PrivateKey = *k.GithubCopilotPrivateKey
+		}
+		if k.GithubCopilotGithubDomain != nil {
+			config.GithubDomain = *k.GithubCopilotGithubDomain
+		}
+		k.GithubCopilotKeyConfig = config
+	} else {
+		k.GithubCopilotKeyConfig = nil
 	}
 	return nil
 }
