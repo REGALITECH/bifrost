@@ -34,7 +34,7 @@ func (r *BifrostSpeechResponse) BackfillParams(request *BifrostSpeechRequest) {
 	if r.Usage == nil {
 		r.Usage = &SpeechUsage{}
 	}
-	r.Usage.InputChars = utf8.RuneCountInString(request.Input.Input)
+	r.Usage.InputChars = speechInputBillingUnits(request)
 }
 
 // SpeechAlignment represents character-level timing information for audio-text synchronization
@@ -153,7 +153,28 @@ func (r *BifrostSpeechStreamResponse) BackfillParams(request *BifrostSpeechReque
 	if r.Usage == nil {
 		r.Usage = &SpeechUsage{}
 	}
-	r.Usage.InputChars = utf8.RuneCountInString(request.Input.Input)
+	r.Usage.InputChars = speechInputBillingUnits(request)
+}
+
+// SpeechBillableInputUnits returns the input-text size in the unit the provider
+// bills on: UTF-8 bytes for Fish Audio (which bills per byte), Unicode
+// characters (runes) otherwise. It is the single source of truth for the speech
+// input billing unit, shared by the speech usage backfill below and by the
+// realtime turn usage accounting in the transport — so multibyte scripts (e.g.
+// Japanese, where bytes far exceed runes) are billed correctly without any
+// provider-specific pricing configuration.
+func SpeechBillableInputUnits(provider ModelProvider, text string) int {
+	if provider == FishAudio {
+		return len(text) // UTF-8 bytes
+	}
+	return utf8.RuneCountInString(text)
+}
+
+func speechInputBillingUnits(request *BifrostSpeechRequest) int {
+	if request == nil || request.Input == nil {
+		return 0
+	}
+	return SpeechBillableInputUnits(request.Provider, request.Input.Input)
 }
 
 type SpeechUsageInputTokenDetails struct {
@@ -161,7 +182,12 @@ type SpeechUsageInputTokenDetails struct {
 	AudioTokens int `json:"audio_tokens,omitempty"`
 }
 type SpeechUsage struct {
-	InputTokens       int                           `json:"input_tokens"`
+	InputTokens int `json:"input_tokens"`
+	// InputChars is the billable input-text size. It is the provider's billing
+	// unit: Unicode characters (runes) for most TTS providers, but UTF-8 bytes
+	// for providers that bill per byte (e.g. Fish Audio). Reporting it in the
+	// provider's own unit lets a configured per-character price match the
+	// provider's real billing without any provider-specific pricing logic.
 	InputChars        int                           `json:"input_chars,omitempty"`
 	InputTokenDetails *SpeechUsageInputTokenDetails `json:"input_token_details,omitempty"`
 	OutputTokens      int                           `json:"output_tokens"`

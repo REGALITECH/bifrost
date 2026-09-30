@@ -110,18 +110,18 @@ type BifrostRealtimeEvent struct {
 
 // RealtimeSession describes session configuration for the Realtime connection.
 type RealtimeSession struct {
-	ID               string                     `json:"id,omitempty"`
-	Model            string                     `json:"model,omitempty"`
-	Modalities       []string                   `json:"modalities,omitempty"`
-	Instructions     string                     `json:"instructions,omitempty"`
-	Voice            string                     `json:"voice,omitempty"`
-	Temperature      *float64                   `json:"temperature,omitempty"`
-	MaxOutputTokens  json.RawMessage            `json:"max_output_tokens,omitempty"`
-	TurnDetection    json.RawMessage            `json:"turn_detection,omitempty"`
-	InputAudioFormat string                     `json:"input_audio_format,omitempty"`
-	OutputAudioType  string                     `json:"output_audio_type,omitempty"`
-	Tools            json.RawMessage            `json:"tools,omitempty"`
-	ExtraParams      map[string]json.RawMessage `json:"extra_params,omitempty"`
+	ID                string                     `json:"id,omitempty"`
+	Model             string                     `json:"model,omitempty"`
+	Modalities        []string                   `json:"modalities,omitempty"`
+	Instructions      string                     `json:"instructions,omitempty"`
+	Voice             string                     `json:"voice,omitempty"`
+	Temperature       *float64                   `json:"temperature,omitempty"`
+	MaxOutputTokens   json.RawMessage            `json:"max_output_tokens,omitempty"`
+	TurnDetection     json.RawMessage            `json:"turn_detection,omitempty"`
+	InputAudioFormat  string                     `json:"input_audio_format,omitempty"`
+	OutputAudioFormat string                     `json:"output_audio_format,omitempty"`
+	Tools             json.RawMessage            `json:"tools,omitempty"`
+	ExtraParams       map[string]json.RawMessage `json:"extra_params,omitempty"`
 }
 
 // RealtimeItem represents a conversation item in the Realtime protocol.
@@ -193,6 +193,45 @@ type RealtimeProvider interface {
 	ShouldAccumulateRealtimeOutput(eventType RealtimeEventType) bool
 }
 
+// RealtimeBinaryProvider is an optional interface for realtime providers whose
+// upstream WebSocket speaks a binary wire format (e.g. Fish Audio's MessagePack
+// tts-live) rather than JSON text frames. When a provider implements this and
+// returns true, the realtime transport:
+//   - writes translated client events to the upstream as binary frames,
+//   - decodes inbound binary frames via ToBifrostRealtimeEvent, and
+//   - forwards canonical JSON to the client (taken from the event's RawData,
+//     which the provider populates with the client-facing payload).
+//
+// Providers that do not implement this interface keep the default JSON-text
+// pass-through behavior, so existing realtime providers are unaffected.
+type RealtimeBinaryProvider interface {
+	RealtimeUsesBinaryProtocol() bool
+}
+
+// RealtimeInputUsageProvider is an optional interface for realtime providers
+// that bill on the turn's input (rather than tokens) and don't report usage on
+// their terminal event — e.g. Fish Audio, which bills per UTF-8 byte of input
+// text. The realtime transport calls RealtimeInputUsage with the turn's
+// accumulated input text only when the provider supplied no usage, letting the
+// provider report its billable quantity (the transport has the input the
+// stateless per-frame provider can't accumulate).
+type RealtimeInputUsageProvider interface {
+	RealtimeInputUsage(inputText string) *BifrostLLMUsage
+}
+
+// RealtimeModelHeadersProvider is an optional interface for realtime providers
+// whose upstream handshake headers depend on the requested model — e.g. Fish
+// Audio, which selects the tts-live model with a "model" header rather than in
+// the URL. When a provider implements it, the realtime transport calls
+// RealtimeHeadersForModel with the requested model (after key alias
+// resolution) instead of RealtimeProvider.RealtimeHeaders.
+//
+// Providers that do not implement this interface keep using RealtimeHeaders,
+// so existing realtime providers are unaffected.
+type RealtimeModelHeadersProvider interface {
+	RealtimeHeadersForModel(ctx *BifrostContext, key Key, model string) (map[string]string, *BifrostError)
+}
+
 // RealtimeLegacyWebRTCProvider is an optional interface for providers that
 // support the beta WebRTC handshake (e.g., OpenAI's /v1/realtime).
 // Only checked for legacy integration routes via type assertion.
@@ -262,26 +301,22 @@ func ParseRealtimeEvent(raw []byte) (*BifrostRealtimeEvent, error) {
 		if len(savedSession) > 0 && Unmarshal(savedSession, &sessionRoot) == nil {
 			for _, key := range []string{
 				"id", "model", "modalities", "instructions", "voice", "temperature",
-				"max_output_tokens", "turn_detection", "input_audio_format", "output_audio_type", "tools",
+				"max_output_tokens", "turn_detection", "input_audio_format", "output_audio_format", "tools", "extra_params",
 			} {
 				delete(sessionRoot, key)
 			}
-			if len(sessionRoot) > 0 {
-				event.Session.ExtraParams = sessionRoot
-			}
+			event.Session.ExtraParams = mergeRealtimeExtraParams(event.Session.ExtraParams, sessionRoot)
 		}
 	}
 	if event.Item != nil {
 		var itemRoot map[string]json.RawMessage
 		if len(savedItem) > 0 && Unmarshal(savedItem, &itemRoot) == nil {
 			for _, key := range []string{
-				"id", "type", "role", "status", "content", "name", "call_id", "arguments", "output",
+				"id", "type", "role", "status", "content", "name", "call_id", "arguments", "output", "extra_params",
 			} {
 				delete(itemRoot, key)
 			}
-			if len(itemRoot) > 0 {
-				event.Item.ExtraParams = itemRoot
-			}
+			event.Item.ExtraParams = mergeRealtimeExtraParams(event.Item.ExtraParams, itemRoot)
 		}
 	}
 	if event.Error != nil {
@@ -297,4 +332,20 @@ func ParseRealtimeEvent(raw []byte) (*BifrostRealtimeEvent, error) {
 	}
 
 	return event, nil
+}
+
+// mergeRealtimeExtraParams combines the caller's explicit extra_params object
+// with the unknown top-level fields left over after the known keys are removed,
+// so both spellings reach the provider. An explicit entry wins a key collision:
+// naming the field inside extra_params is the more deliberate of the two.
+func mergeRealtimeExtraParams(explicit, topLevelExtras map[string]json.RawMessage) map[string]json.RawMessage {
+	if len(explicit) == 0 {
+		return topLevelExtras
+	}
+	for key, value := range topLevelExtras {
+		if _, exists := explicit[key]; !exists {
+			explicit[key] = value
+		}
+	}
+	return explicit
 }

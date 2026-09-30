@@ -526,6 +526,12 @@ func ModifyExpectationsForProvider(expectations ResponseExpectations, provider s
 		expectations.ShouldHaveTimestamps = false
 		expectations.ShouldHaveLatency = true
 
+	case schemas.FishAudio:
+		// Fish Audio is audio-only (TTS) — usage/timestamps do not apply
+		expectations.ShouldHaveUsageStats = false
+		expectations.ShouldHaveTimestamps = false
+		expectations.ShouldHaveLatency = true
+
 	case schemas.HuggingFace:
 		expectations.ShouldHaveUsageStats = false
 		expectations.ShouldHaveTimestamps = false

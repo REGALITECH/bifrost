@@ -33,6 +33,7 @@ import (
 	"github.com/maximhq/bifrost/framework/webhooks"
 	"github.com/maximhq/bifrost/plugins/governance"
 	"github.com/maximhq/bifrost/plugins/logging"
+	"github.com/maximhq/bifrost/plugins/metronome"
 	"github.com/maximhq/bifrost/plugins/otel"
 	"github.com/maximhq/bifrost/plugins/prompts"
 	"github.com/maximhq/bifrost/plugins/routing"
@@ -2080,6 +2081,16 @@ func (s *BifrostHTTPServer) UpsertModelPricingAttributes(ctx context.Context, en
 	var missing []string
 	err := s.Config.ConfigStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
 		for _, e := range entries {
+			if e.Provider == string(configstore.TranscriptionUsageProvider) {
+				if e.CreateIfMissing {
+					if err := configstore.EnsureTranscriptionModel(ctx, s.Config.ConfigStore, e.Model, tx); err != nil {
+						return err
+					}
+				}
+				if e.CreateIfMissing && e.AdditionalAttributes == nil {
+					continue
+				}
+			}
 			rows, err := s.Config.ConfigStore.UpsertModelPricingAttributes(ctx, e.Model, e.Provider, e.AdditionalAttributes, tx)
 			if err != nil {
 				return err
@@ -2167,6 +2178,9 @@ func (s *BifrostHTTPServer) GetLoadedPluginNames() []string {
 // by name in the ConfigMarshallers cache and calls MarshalConfigForStorage if found.
 // Returns nil, nil when the plugin is not loaded or does not implement ConfigMarshallerPlugin.
 func (s *BifrostHTTPServer) NormalizePluginConfig(name string, config map[string]any) (map[string]any, error) {
+	if name == metronome.PluginName {
+		return (&metronome.Plugin{}).MarshalConfigForStorage(config)
+	}
 	if m := s.Config.ConfigMarshallers.Load(); m != nil {
 		if cm, ok := (*m)[name]; ok {
 			return cm.MarshalConfigForStorage(config)
@@ -2179,6 +2193,9 @@ func (s *BifrostHTTPServer) NormalizePluginConfig(name string, config map[string
 // by name in the ConfigMarshallers cache and calls RedactConfig if found.
 // Returns nil, nil when the plugin is not loaded or does not implement ConfigMarshallerPlugin.
 func (s *BifrostHTTPServer) ExpandPluginConfigForAPI(name string, config map[string]any) (map[string]any, error) {
+	if name == metronome.PluginName {
+		return (&metronome.Plugin{}).RedactConfig(config)
+	}
 	if m := s.Config.ConfigMarshallers.Load(); m != nil {
 		if cm, ok := (*m)[name]; ok {
 			return cm.RedactConfig(config)
@@ -2393,6 +2410,8 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 		governancePluginName = name
 	}
 	governancePlugin, _ := lib.FindPluginAs[schemas.LLMPlugin](s.Config, governancePluginName)
+	fishAudioUsageHandler := handlers.NewFishAudioUsageHandler(s.Config, logging.PluginName, governancePluginName)
+	transcriptionUsageHandler := handlers.NewTranscriptionUsageHandler(s.Config, logging.PluginName, governancePluginName)
 	if governancePlugin != nil {
 		governanceHandler, err = handlers.NewGovernanceHandler(callbacks, s.Config.ConfigStore, govLogManager, s.ExternalQuotaBudgetResolver, s.VirtualKeyAssigneeResolver)
 		if err != nil {
@@ -2454,6 +2473,8 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	sessionHandler := handlers.NewSessionHandler(s.Config.ConfigStore, s.WSTicketStore)
 	promptsHandler := handlers.NewPromptsHandler(s.Config.ConfigStore, callbacks)
 	featureFlagsHandler := handlers.NewFeatureFlagsHandler(s.Config.FeatureFlags, s.Config.ConfigStore)
+	fishAudioUsageHandler.RegisterRoutes(s.Router, middlewares...)
+	transcriptionUsageHandler.RegisterRoutes(s.Router, middlewares...)
 	// Going ahead with API handlers
 	oauth2DiscoveryHandler := handlers.NewOAuth2DiscoveryHandler(s.Config)
 	oauth2IssuanceHandler := handlers.NewOAuth2IssuanceHandler(s.Config, s.TempTokens, s.OAuth2IdentityResolver)

@@ -188,6 +188,12 @@ updates:
     open-pull-requests-limit: 0
 
   - package-ecosystem: gomod
+    directory: /plugins/metronome
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 0
+
+  - package-ecosystem: gomod
     directory: /plugins/mocker
     schedule:
       interval: daily

@@ -150,6 +150,7 @@
                   "providers/supported-providers/deepseek",
                   "providers/supported-providers/elevenlabs",
                   "providers/supported-providers/fireworks",
+                  "providers/supported-providers/fishaudio",
                   "providers/supported-providers/gemini",
                   "providers/supported-providers/github-copilot",
                   "providers/supported-providers/groq",
@@ -221,6 +222,7 @@
             "icon": "puzzle-piece",
             "pages": [
               "plugins/getting-started",
+              "plugins/metronome",
               "plugins/building-dynamic-binary",
               "plugins/sequencing",
               {
@@ -249,6 +251,7 @@
                 "icon": "user-lock",
                 "pages": [
                   "features/governance/virtual-keys",
+                  "features/transcription-usage-models",
                   "features/governance/routing",
                   "features/governance/budget-and-limits",
                   "features/governance/model-limits",

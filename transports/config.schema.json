@@ -492,6 +492,9 @@
         },
         "github-copilot": {
           "$ref": "#/$defs/provider_with_github_copilot_config"
+        },
+        "fishaudio": {
+          "$ref": "#/$defs/provider"
         }
       },
       "additionalProperties": true
@@ -2468,6 +2471,61 @@
           }
         },
         "allOf": [
+          {
+            "if": {
+              "properties": {
+                "name": {
+                  "const": "metronome"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "config"
+              ],
+              "properties": {
+                "config": {
+                  "type": "object",
+                  "description": "Configuration for the builtin Metronome usage exporter",
+                  "properties": {
+                    "api_key": {
+                      "type": "string",
+                      "pattern": "^env\\..+$",
+                      "default": "env.METRONOME_API_KEY",
+                      "description": "Environment variable reference for the Metronome API key, e.g. env.METRONOME_API_KEY. Required when enabled; the variable must be nonempty in the Bifrost process. Literal keys and vault references are not supported."
+                    },
+                    "model_mapping": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "description": "Bifrost provider/model to exact Metronome model name"
+                    },
+                    "provider_mapping": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "description": "Bifrost provider to exact Metronome provider name"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "if": {
+                "properties": {
+                  "enabled": { "const": true }
+                }
+              },
+              "then": {
+                "properties": {
+                  "config": { "required": ["api_key"] }
+                }
+              }
+            }
+          },
           {
             "if": {
               "properties": {
@@ -8795,6 +8853,8 @@
             "github-copilot",
             "openrouter",
             "elevenlabs",
+            "fishaudio",
+            "transcription",
             "huggingface",
             "nebius",
             "xai",

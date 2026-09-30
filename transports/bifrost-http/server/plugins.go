@@ -11,6 +11,7 @@ import (
 	"github.com/maximhq/bifrost/plugins/governance"
 	"github.com/maximhq/bifrost/plugins/logging"
 	"github.com/maximhq/bifrost/plugins/maxim"
+	"github.com/maximhq/bifrost/plugins/metronome"
 	"github.com/maximhq/bifrost/plugins/modelcatalogresolver"
 	"github.com/maximhq/bifrost/plugins/otel"
 	"github.com/maximhq/bifrost/plugins/prompts"
@@ -129,6 +130,13 @@ func loadBuiltinPlugin(ctx context.Context, name string, pluginConfig any, bifro
 			return nil, fmt.Errorf("routing plugin requires the governance plugin: %w", err)
 		}
 		return routing.Init(ctx, routingConfig, logger, bifrostConfig.ConfigStore, governancePlugin)
+
+	case metronome.PluginName:
+		config, err := MarshalPluginConfig[metronome.Config](pluginConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal metronome plugin config: %w", err)
+		}
+		return metronome.Init(config, logger)
 
 	case maxim.PluginName:
 		maximConfig, err := MarshalPluginConfig[maxim.Config](pluginConfig)
@@ -309,6 +317,15 @@ func (s *BifrostHTTPServer) loadBuiltinPlugins(ctx context.Context) error {
 		s.markPluginDisabled(maxim.PluginName)
 	}
 	s.Config.SetPluginOrderInfo(maxim.PluginName, builtinPlacement, schemas.Ptr(9))
+
+	// Metronome (opt-in usage export). Order 10, right after maxim (9).
+	metronomeConfig := s.getPluginConfig(metronome.PluginName)
+	if metronomeConfig != nil && metronomeConfig.Enabled {
+		s.registerPluginWithStatus(ctx, metronome.PluginName, nil, metronomeConfig.Config, false)
+	} else {
+		s.markPluginDisabled(metronome.PluginName)
+	}
+	s.Config.SetPluginOrderInfo(metronome.PluginName, builtinPlacement, schemas.Ptr(10))
 
 	// 10. ModelCatalogResolver (last routing layer — fills req.Provider from catalog only when
 	// no earlier routing plugin (governance routing rules, governance VK LB, enterprise LB)

@@ -613,6 +613,12 @@ func (p *LoggerPlugin) applyNonStreamingOutputToEntry(entry *logstore.Log, resul
 			CompletionTokens: result.SpeechResponse.Usage.OutputTokens,
 			TotalTokens:      result.SpeechResponse.Usage.TotalTokens,
 		}
+		// Speech providers bill on input characters/bytes (InputChars), not
+		// tokens; surface that as PromptTokens so speech usage shows in the
+		// dashboard instead of 0.
+		if usage.PromptTokens == 0 {
+			usage.PromptTokens = result.SpeechResponse.Usage.InputChars
+		}
 		if usage.TotalTokens == 0 {
 			usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 		}

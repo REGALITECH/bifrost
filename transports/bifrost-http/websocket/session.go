@@ -44,6 +44,17 @@ type Session struct {
 	// latest finalized input event.
 	realtimeTurnInputs []RealtimeTurnInput
 
+	// realtimeTurnStartedAt is stamped when the first input of a turn arrives, so the
+	// finalize step can report real turn latency for providers that have no explicit
+	// turn-start signal (e.g. Fish Audio). Reset when the turn's inputs are consumed.
+	realtimeTurnStartedAt time.Time
+
+	// realtimeFirstOutputAt is stamped when the first output (audio/text delta) of a
+	// turn arrives. Paired with realtimeTurnStartedAt it yields input->first-output
+	// latency (TTFB) for providers that stream continuously and only signal turn
+	// completion at disconnect (e.g. Fish Audio). Reset when inputs are consumed.
+	realtimeFirstOutputAt time.Time
+
 	// realtimeConsumedTurnItemIDs tracks finalized item IDs that have already been
 	// attached to a persisted turn, so late transcript updates do not pollute later turns.
 	realtimeConsumedTurnItemIDs map[string]struct{}
@@ -246,11 +257,46 @@ func (s *Session) AddRealtimeInput(summary, raw string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.markRealtimeTurnStartLocked()
 	s.realtimeTurnInputs = append(s.realtimeTurnInputs, RealtimeTurnInput{
 		Role:    string(schemas.ChatMessageRoleUser),
 		Summary: summary,
 		Raw:     raw,
 	})
+}
+
+// markRealtimeTurnStartLocked stamps the turn-start time when the first input of a
+// new turn arrives (the input list is currently empty). Caller must hold s.mu.
+func (s *Session) markRealtimeTurnStartLocked() {
+	if len(s.realtimeTurnInputs) == 0 {
+		s.realtimeTurnStartedAt = time.Now()
+	}
+}
+
+// RealtimeTurnStartedAt returns the time the current turn's first input arrived,
+// or the zero time if no input has been recorded since the last consume.
+func (s *Session) RealtimeTurnStartedAt() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.realtimeTurnStartedAt
+}
+
+// MarkRealtimeFirstOutput stamps the arrival of the turn's first output (audio or
+// text delta) once. No-op after the first call until the turn's inputs are consumed.
+func (s *Session) MarkRealtimeFirstOutput() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.realtimeFirstOutputAt.IsZero() {
+		s.realtimeFirstOutputAt = time.Now()
+	}
+}
+
+// RealtimeFirstOutputAt returns the time the current turn's first output arrived,
+// or the zero time if no output has arrived since the last consume.
+func (s *Session) RealtimeFirstOutputAt() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.realtimeFirstOutputAt
 }
 
 // RecordRealtimeInput stores or updates a finalized user turn event keyed by item ID.
@@ -266,6 +312,7 @@ func (s *Session) AddRealtimeToolOutput(summary, raw string) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.markRealtimeTurnStartLocked()
 	s.realtimeTurnInputs = append(s.realtimeTurnInputs, RealtimeTurnInput{
 		Role:    string(schemas.ChatMessageRoleTool),
 		Summary: summary,
@@ -315,6 +362,7 @@ func (s *Session) recordRealtimeTurnInput(itemID, role, summary, raw string) {
 		}
 	}
 
+	s.markRealtimeTurnStartLocked()
 	s.realtimeTurnInputs = append(s.realtimeTurnInputs, RealtimeTurnInput{
 		ItemID:  itemID,
 		Role:    role,
@@ -339,6 +387,8 @@ func (s *Session) ConsumeRealtimeTurnInputs() []RealtimeTurnInput {
 		}
 	}
 	s.realtimeTurnInputs = nil
+	s.realtimeTurnStartedAt = time.Time{}
+	s.realtimeFirstOutputAt = time.Time{}
 	return inputs
 }
 

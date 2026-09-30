@@ -499,7 +499,7 @@ func (h *WSRealtimeHandler) runRealtimeSession(
 		clientConn.writeRealtimeError(urlErr)
 		return
 	}
-	realtimeHeaders, headerErr := rtProvider.RealtimeHeaders(bifrostCtx, key)
+	realtimeHeaders, headerErr := realtimeHeadersForModel(bifrostCtx, rtProvider, key, model)
 	if headerErr != nil {
 		clientConn.writeRealtimeError(headerErr)
 		return
@@ -533,9 +533,31 @@ func (h *WSRealtimeHandler) runRealtimeSession(
 	_ = clientConn.Close()
 	secondErr := <-errCh
 
+	// Binary-protocol providers (e.g. Fish Audio) don't emit a per-utterance
+	// terminal event and close by dropping the socket, so their turns are
+	// finalized here instead of in the relay. Both relay goroutines have exited,
+	// so this runs single-threaded (no race on the session turn state). Gated on
+	// binary providers + pending input so it is a complete no-op for JSON
+	// realtime providers (OpenAI/Azure/ElevenLabs), which finalize per turn and
+	// have already consumed their inputs.
+	if realtimeUsesBinary(rtProvider) && len(session.PeekRealtimeTurnInputs()) > 0 {
+		transcriptionSession := intent == "transcription"
+		_ = finalizeRealtimeTurnHooks(h.client, bifrostCtx, session, rtProvider, providerKey, model, &key, nil, session.ConsumeRealtimeOutputText(), realtimeTurnFinalEvent(rtProvider, transcriptionSession), transcriptionSession)
+	}
+
 	if logErr := selectRealtimeRelayError(firstErr, secondErr); logErr != nil {
 		logger.Warn("realtime websocket relay ended for %s/%s on %s: %v", providerKey, model, path, logErr)
 	}
+}
+
+// realtimeUsesBinary reports whether the provider's upstream WebSocket speaks a
+// binary wire format (e.g. Fish Audio's MessagePack). Providers that don't
+// implement RealtimeBinaryProvider keep the default JSON-text behavior.
+func realtimeUsesBinary(provider schemas.RealtimeProvider) bool {
+	if bp, ok := provider.(schemas.RealtimeBinaryProvider); ok {
+		return bp.RealtimeUsesBinaryProtocol()
+	}
+	return false
 }
 
 func (h *WSRealtimeHandler) relayClientToRealtimeProvider(
@@ -550,6 +572,7 @@ func (h *WSRealtimeHandler) relayClientToRealtimeProvider(
 	transcriptionSession bool,
 	buffered []realtimeWebSocketFrame,
 ) error {
+	binaryUpstream := realtimeUsesBinary(provider)
 	for _, frame := range buffered {
 		if stop, err := h.processRealtimeClientMessage(clientConn, session, upstream, provider, bifrostCtx, providerKey, model, key, transcriptionSession, frame.messageType, frame.data); stop {
 			return err
@@ -558,6 +581,11 @@ func (h *WSRealtimeHandler) relayClientToRealtimeProvider(
 	for {
 		messageType, message, err := clientConn.ReadMessage()
 		if err != nil {
+			// Binary-protocol providers (Fish): leave the turn for the session
+			// teardown to finalize + bill, regardless of how the client closed.
+			if binaryUpstream {
+				return nil
+			}
 			finalizeRealtimeTurnHooksOnTransportError(
 				h.client,
 				bifrostCtx,
@@ -657,8 +685,28 @@ func (h *WSRealtimeHandler) processRealtimeClientMessage(
 	// session.update events must not affect later turn logs.
 	updateRealtimeSessionFromEvent(session, event)
 
+	// Binary-protocol providers (e.g. Fish Audio's MessagePack) must receive
+	// binary frames; the client always speaks JSON text.
+	binaryUpstream := realtimeUsesBinary(provider)
+	upstreamMsgType := messageType
+	if binaryUpstream {
+		upstreamMsgType = ws.BinaryMessage
+	}
+
 	// Record tool output / input only after the event passed validation.
 	if !startsTurn {
+		// Binary streaming providers (e.g. Fish Audio) emit a terminal event
+		// only at disconnect, so without segmentation the whole session
+		// collapses into one turn (one log row, one latency value). Treat a
+		// new client input that arrives after output was produced as a turn
+		// boundary: finalize the in-progress turn — giving it its own row and
+		// input->first-output latency — before recording the new input.
+		if binaryUpstream && (inputSummary != "" || toolSummary != "") && !session.RealtimeFirstOutputAt().IsZero() {
+			if finErr := finalizeRealtimeTurnHooks(h.client, bifrostCtx, session, provider, providerKey, model, &key, nil, session.ConsumeRealtimeOutputText(), realtimeTurnFinalEvent(provider, transcriptionSession), transcriptionSession); finErr != nil {
+				clientConn.writeRealtimeError(finErr)
+				return true, nil
+			}
+		}
 		if toolSummary != "" {
 			session.RecordRealtimeToolOutput(toolItemID, toolSummary, string(message))
 		}
@@ -667,7 +715,12 @@ func (h *WSRealtimeHandler) processRealtimeClientMessage(
 		}
 	}
 
-	if err := upstream.WriteMessage(messageType, providerEvent); err != nil {
+	// Binary-protocol providers may map a client event to no upstream frame
+	// (e.g. an unmapped event); skip the write in that case.
+	if binaryUpstream && len(providerEvent) == 0 {
+		return false, nil
+	}
+	if err := upstream.WriteMessage(upstreamMsgType, providerEvent); err != nil {
 		finalizeRealtimeTurnHooksWithError(
 			h.client,
 			bifrostCtx,
@@ -765,10 +818,21 @@ func (h *WSRealtimeHandler) relayRealtimeProviderToClient(
 	key schemas.Key,
 	transcriptionSession bool,
 ) error {
+	binaryUpstream := realtimeUsesBinary(provider)
 	for {
 		disconnectAfterWrite := false
 		messageType, message, err := upstream.ReadMessage()
 		if err != nil {
+			// Binary-protocol upstreams (e.g. Fish Audio) end the session by
+			// dropping the socket — a clean close OR an abrupt 1006/unexpected EOF
+			// after `stop` — with no per-utterance terminal event. Don't
+			// error-finalize/consume the turn here: it is finalized + billed at
+			// session teardown so usage is captured regardless of how the socket
+			// closed. (Isolated to binary providers; JSON providers below are
+			// unchanged.)
+			if binaryUpstream {
+				return nil
+			}
 			finalizeRealtimeTurnHooksOnTransportError(
 				h.client,
 				bifrostCtx,
@@ -798,7 +862,11 @@ func (h *WSRealtimeHandler) relayRealtimeProviderToClient(
 			return err
 		}
 
-		if messageType == ws.TextMessage {
+		// Client always receives JSON text. For binary-protocol providers the
+		// translated event is sent as text (canonical JSON from RawData); for
+		// JSON providers the original frame type is preserved.
+		clientMsgType := messageType
+		if messageType == ws.TextMessage || (binaryUpstream && messageType == ws.BinaryMessage) {
 			event, err := provider.ToBifrostRealtimeEvent(message)
 			if err != nil {
 				finalizeRealtimeTurnHooksWithError(
@@ -821,9 +889,13 @@ func (h *WSRealtimeHandler) relayRealtimeProviderToClient(
 				}
 				// Track session tool definitions from session.created/session.updated.
 				updateRealtimeSessionFromEvent(session, event)
-				if event.Delta != nil && provider.ShouldAccumulateRealtimeOutput(event.Type) {
-					session.AppendRealtimeOutputText(event.Delta.Text)
-					session.AppendRealtimeOutputText(event.Delta.Transcript)
+				if event.Delta != nil {
+					// First audio/text delta marks input->first-output latency (TTFB).
+					session.MarkRealtimeFirstOutput()
+					if provider.ShouldAccumulateRealtimeOutput(event.Type) {
+						session.AppendRealtimeOutputText(event.Delta.Text)
+						session.AppendRealtimeOutputText(event.Delta.Transcript)
+					}
 				}
 				if provider.ShouldStartRealtimeTurn(event) && session.PeekRealtimeTurnHooks() == nil {
 					if bifrostErr := startRealtimeTurnHooks(h.client, bifrostCtx, session, provider, providerKey, model, &key, event); bifrostErr != nil {
@@ -873,7 +945,11 @@ func (h *WSRealtimeHandler) relayRealtimeProviderToClient(
 						session.RecordRealtimeInput(inputItemID, inputSummary, string(message))
 					}
 				}
-				if len(event.RawData) == 0 {
+				if binaryUpstream {
+					// Client speaks canonical JSON; the provider placed it in RawData.
+					clientMsgType = ws.TextMessage
+					message = event.RawData
+				} else if len(event.RawData) == 0 {
 					message, err = provider.ToProviderRealtimeEvent(event)
 					if err != nil {
 						clientConn.writeRealtimeError(newRealtimeWireBifrostError(502, "server_error", "failed to encode translated realtime event"))
@@ -883,7 +959,12 @@ func (h *WSRealtimeHandler) relayRealtimeProviderToClient(
 			}
 		}
 
-		if err := clientConn.WriteMessage(messageType, message); err != nil {
+		// Nothing to forward (e.g. a binary provider produced no client payload).
+		if binaryUpstream && len(message) == 0 {
+			continue
+		}
+
+		if err := clientConn.WriteMessage(clientMsgType, message); err != nil {
 			finalizeRealtimeTurnHooksOnTransportError(
 				h.client,
 				bifrostCtx,

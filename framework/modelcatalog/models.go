@@ -1,9 +1,11 @@
 package modelcatalog
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
@@ -29,6 +31,12 @@ var providersWithPartialListModels = map[schemas.ModelProvider]bool{
 //
 // Memoized; returns a fresh clone the caller may mutate.
 func (mc *ModelCatalog) GetModelsForProvider(provider schemas.ModelProvider) []string {
+	// Registered transcription usage models live in the config store, not in
+	// the datasheet/live/keyconfig stores whose write counters stamp the memo,
+	// so they bypass it: a model registered at runtime is visible at once.
+	if provider == configstore.TranscriptionUsageProvider {
+		return mc.getTranscriptionModels()
+	}
 	return mc.modelsForProvider.GetOrCompute(string(provider), func() []string {
 		return mc.computeModelsForProvider(provider)
 	})
@@ -128,6 +136,9 @@ func (mc *ModelCatalog) appendAllowedDatasheetModels(out []string, models []stri
 // GetUnfilteredModelsForProvider returns the raw catalog view (no gate
 // applied): union of live unfiltered entries and the datasheet view.
 func (mc *ModelCatalog) GetUnfilteredModelsForProvider(provider schemas.ModelProvider) []string {
+	if provider == configstore.TranscriptionUsageProvider {
+		return mc.getTranscriptionModels()
+	}
 	liveModels := mc.live.UnfilteredModelsForProvider(provider)
 	datasheetModels := mc.datasheet.DatasheetModelsForProvider(provider)
 	if len(liveModels) == 0 {
@@ -302,6 +313,12 @@ func (mc *ModelCatalog) computeProvidersForModel(model string) []schemas.ModelPr
 //   - explicit allowedModels: direct or provider-prefixed match against the
 //     provider's catalog.
 func (mc *ModelCatalog) IsModelAllowedForProvider(provider schemas.ModelProvider, model string, providerConfig *configstore.ProviderConfig, allowedModels schemas.WhiteList) bool {
+	if provider == configstore.TranscriptionUsageProvider {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_, err := configstore.GetTranscriptionModel(ctx, mc.configStore, model)
+		return err == nil && (allowedModels.IsAllowed(model) || allowedModels.IsAllowed(string(provider)+"/"+model))
+	}
 	isCustomProvider := false
 	hasListModelsEndpointDisabled := false
 	if providerConfig != nil && providerConfig.CustomProviderConfig != nil {
@@ -441,4 +458,18 @@ func (mc *ModelCatalog) refineNestedProviderModel(provider schemas.ModelProvider
 	default:
 		return "", fmt.Errorf("multiple compatible models found for model %s: %v", model, candidateModels)
 	}
+}
+
+func (mc *ModelCatalog) getTranscriptionModels() []string {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	states, err := configstore.ListTranscriptionModels(ctx, mc.configStore)
+	if err != nil {
+		return []string{}
+	}
+	names := make([]string, 0, len(states))
+	for _, state := range states {
+		names = append(names, state.Model)
+	}
+	return names
 }
