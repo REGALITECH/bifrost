@@ -352,3 +352,39 @@ func TestFishAudioRealtimeDelivery(t *testing.T) {
 		t.Fatal("realtime Fish usage was not sent")
 	}
 }
+
+func TestFishAudioSpeechTransactionID(t *testing.T) {
+	p := &Plugin{logger: testLogger{}, queue: make(chan Event[any], 4)}
+	speech := &schemas.BifrostResponse{SpeechResponse: &schemas.BifrostSpeechResponse{Usage: &schemas.SpeechUsage{InputChars: 54}}}
+	speech.PopulateExtraFields(schemas.SpeechRequest, schemas.FishAudio, "s2-pro", "s2-pro")
+	export := func(ctx *schemas.BifrostContext) Event[any] {
+		t.Helper()
+		p.PostLLMHook(ctx, speech, nil)
+		if len(p.queue) != 1 {
+			t.Fatalf("queued %d events, want one", len(p.queue))
+		}
+		return <-p.queue
+	}
+	ctx := audioContext("vk-1", "source-event-1")
+	p.PreLLMHook(ctx, nil)
+	event := export(ctx)
+	if len(event.TransactionID) > 128 || export(ctx).TransactionID != event.TransactionID {
+		t.Fatalf("unstable speech transaction ID: %s", event.TransactionID)
+	}
+	// The caller's x-request-id never identifies the event: an external report
+	// with the same request ID, and another request reusing it, stay distinct.
+	external, err := p.fishAudioEvent(ctx, audioUsage(t, audioBody))
+	if err != nil || external.TransactionID == event.TransactionID {
+		t.Fatalf("speech ID collides with external report: %v", err)
+	}
+	reused := audioContext("vk-1", "source-event-1")
+	p.PreLLMHook(reused, nil)
+	if export(reused).TransactionID == event.TransactionID {
+		t.Fatal("requests reusing x-request-id share a transaction ID")
+	}
+	// A core retry is a separate upstream call, as for token events.
+	ctx.SetValue(schemas.BifrostContextKeyNumberOfRetries, 1)
+	if export(ctx).TransactionID == event.TransactionID {
+		t.Fatal("retry reused the transaction ID")
+	}
+}

@@ -27,6 +27,8 @@ func TestHooksAfterCleanupQueueNothing(t *testing.T) {
 	for _, resp := range []*schemas.BifrostResponse{
 		realtimeTurn(schemas.FishAudio, "s2.1-pro", fishTurnUsage()),
 		tokenIdentityResponse(),
+		speechResponse(schemas.Gemini, "gemini-2.5-flash-preview-tts", &schemas.SpeechUsage{InputTokens: 12, OutputTokens: 340}),
+		speechResponse(schemas.FishAudio, "s2-pro", &schemas.SpeechUsage{InputChars: 54}),
 	} {
 		got, upstreamErr, err := p.PostLLMHook(ctx, resp, nil)
 		if err != nil || upstreamErr != nil || got != resp {
@@ -81,6 +83,9 @@ func TestServedModelRouting(t *testing.T) {
 		{"key alias", routed(realtimeTurn(schemas.FishAudio, "voice-alias", fishTurnUsage()),
 			schemas.RoutingInfo{Provider: schemas.FishAudio, Model: "voice-alias", ResolvedKeyAlias: &schemas.ResolvedKeyAlias{ModelID: "s2.1-pro"}}),
 			"fishaudio-usage", "fishaudio", "fishaudio/s2.1-pro"},
+		// Fish speech must not take the token path, where it has no tokens and would be lost.
+		{"speech routed to fish", routed(speechResponse(schemas.OpenAI, "tts-1", &schemas.SpeechUsage{InputChars: 54}),
+			schemas.RoutingInfo{Provider: schemas.FishAudio, Model: "s2-pro"}), "fishaudio-usage", "fishaudio", "fishaudio/s2-pro"},
 		{"server-side fallback", routed(tokenIdentityResponse(),
 			schemas.RoutingInfo{Provider: schemas.Anthropic, Model: "claude-primary", ServerSideFallbackModel: &fallback}),
 			"token-billing", "anthropic", "anthropic/claude-fallback"},

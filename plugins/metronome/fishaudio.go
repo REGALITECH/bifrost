@@ -77,14 +77,20 @@ func fishAudioTransactionID(prefix string, identity ...string) (string, error) {
 }
 
 // exportFishAudio queues fishaudio-usage for synthesis Bifrost performed itself:
-// a Fish Audio realtime turn. Fish bills UTF-8 input bytes, which the realtime
-// turn pipeline reports as input tokens; they are never exported as tokens.
-// Delivery shares the token queue, so the realtime relay never waits on Metronome.
+// a Fish Audio realtime turn or speech request. Fish bills UTF-8 input bytes,
+// which the realtime turn pipeline reports as input tokens and speech as
+// InputChars (bytes when the provider is fishaudio); they are never exported as
+// tokens. Delivery shares the token queue, so the realtime relay and speech
+// responses never wait on Metronome.
 func (p *Plugin) exportFishAudio(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, extra *schemas.BifrostResponseExtraFields) {
 	source, billableBytes := "", 0
 	switch {
 	case extra.RequestType == schemas.RealtimeRequest && resp.ResponsesResponse != nil && resp.ResponsesResponse.Usage != nil:
 		source, billableBytes = "realtime", resp.ResponsesResponse.Usage.InputTokens
+	case resp.SpeechResponse != nil && resp.SpeechResponse.Usage != nil:
+		source, billableBytes = "speech", resp.SpeechResponse.Usage.InputChars
+	case resp.SpeechStreamResponse != nil && resp.SpeechStreamResponse.Usage != nil:
+		source, billableBytes = "speech", resp.SpeechStreamResponse.Usage.InputChars
 	}
 	if billableBytes <= 0 {
 		return
@@ -99,8 +105,8 @@ func (p *Plugin) exportFishAudio(ctx *schemas.BifrostContext, resp *schemas.Bifr
 		return
 	}
 	// Like token events, identify the attempt by the UUID this plugin's pre-hook
-	// mints (once per realtime turn), never by a request ID that another
-	// component or a caller may choose: a collision would make Metronome drop
+	// mints (once per realtime turn or speech attempt), never by a request ID
+	// such as a caller's x-request-id: a collision would make Metronome drop
 	// real usage as a duplicate.
 	attempt, _ := ctx.Value(attemptKey).(string)
 	if attempt == "" {
@@ -122,7 +128,7 @@ func (p *Plugin) exportFishAudio(ctx *schemas.BifrostContext, resp *schemas.Bifr
 	if strings.TrimSpace(subID) == "" {
 		subID = turnID
 	}
-	// Bifrost does not measure Fish output audio; failed turns carry no usage.
+	// Bifrost does not measure Fish output audio; failed requests carry no usage.
 	props := fishAudioProperties{SchemaVersion: 1, UsageSource: source, BillableBytes: int64(billableBytes),
 		Outcome: "completed", TurnID: turnID, SubID: subID}
 	props.Provider, props.Model = p.rateCardNames(provider, model)

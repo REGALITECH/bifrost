@@ -137,20 +137,25 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 		return resp, upstreamErr, nil
 	}
 	switch extra.RequestType {
-	case schemas.ChatCompletionStreamRequest, schemas.TextCompletionStreamRequest, schemas.ResponsesStreamRequest:
+	case schemas.ChatCompletionStreamRequest, schemas.TextCompletionStreamRequest, schemas.ResponsesStreamRequest, schemas.SpeechStreamRequest:
 		final, _ := ctx.Value(schemas.BifrostContextKeyStreamEndIndicator).(bool)
 		if !final {
 			return resp, upstreamErr, nil
 		}
-	case schemas.ChatCompletionRequest, schemas.TextCompletionRequest, schemas.ResponsesRequest:
+	case schemas.ChatCompletionRequest, schemas.TextCompletionRequest, schemas.ResponsesRequest, schemas.SpeechRequest:
 	case schemas.RealtimeRequest:
-		// Only Fish Audio turns are exported, as byte usage (see fishaudio.go).
-		// Other providers' realtime audio tokens don't fit the four token counters.
-		if provider, _ := servedModel(extra); provider == string(schemas.FishAudio) {
-			p.exportFishAudio(ctx, resp, extra)
+		// Only Fish Audio turns are exported (below). Other providers' realtime
+		// audio tokens don't fit the four token counters.
+		if provider, _ := servedModel(extra); provider != string(schemas.FishAudio) {
+			return resp, upstreamErr, nil
 		}
-		return resp, upstreamErr, nil
 	default:
+		return resp, upstreamErr, nil
+	}
+	// Fish Audio bills UTF-8 input bytes, not tokens: its speech and realtime
+	// usage becomes fishaudio-usage, never token-billing (see fishaudio.go).
+	if provider, _ := servedModel(extra); provider == string(schemas.FishAudio) {
+		p.exportFishAudio(ctx, resp, extra)
 		return resp, upstreamErr, nil
 	}
 	usage, ok := extractUsage(resp)
@@ -242,6 +247,7 @@ func (p *Plugin) rateCardNames(provider, model string) (string, string) {
 func extractUsage(resp *schemas.BifrostResponse) (TokenUsage, bool) {
 	var chat *schemas.BifrostLLMUsage
 	var responses *schemas.ResponsesResponseUsage
+	var speech *schemas.SpeechUsage
 	switch {
 	case resp.ChatResponse != nil:
 		chat = resp.ChatResponse.Usage
@@ -251,6 +257,10 @@ func extractUsage(resp *schemas.BifrostResponse) (TokenUsage, bool) {
 		responses = resp.ResponsesResponse.Usage
 	case resp.ResponsesStreamResponse != nil && resp.ResponsesStreamResponse.Response != nil:
 		responses = resp.ResponsesStreamResponse.Response.Usage
+	case resp.SpeechResponse != nil:
+		speech = resp.SpeechResponse.Usage
+	case resp.SpeechStreamResponse != nil:
+		speech = resp.SpeechStreamResponse.Usage
 	}
 	u := TokenUsage{}
 	if chat != nil {
@@ -263,6 +273,10 @@ func extractUsage(resp *schemas.BifrostResponse) (TokenUsage, bool) {
 		if d := responses.InputTokensDetails; d != nil {
 			u.CachedInputTokens, u.CachedWriteTokens = d.CachedReadTokens, d.CachedWriteTokens
 		}
+	} else if speech != nil {
+		// Speech has no cache counters. Character-billed TTS reports no tokens
+		// (only InputChars) and is skipped as zero usage.
+		u.InputTokens, u.OutputTokens = speech.InputTokens, speech.OutputTokens
 	} else {
 		return u, false
 	}
