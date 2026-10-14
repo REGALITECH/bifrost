@@ -51,28 +51,19 @@ func (p *Plugin) fishAudioEvent(ctx *schemas.BifrostContext, usage *FishAudioUsa
 	if usage.OccurredAt == "" {
 		return event, fmt.Errorf("external usage requires occurred_at in RFC3339 format")
 	}
-	// This ID survives application retries, plugin reloads and process restarts.
-	// Never include a timestamp generated at receipt, usage counts, or a new
-	// attempt UUID here.
-	id, err := fishAudioTransactionID("bf-fishaudio-", "bifrost", "fishaudio-usage", vkID, requestID)
+	// Length-delimited JSON avoids ambiguous concatenation. This ID survives
+	// application retries, plugin reloads and process restarts. Never include a
+	// timestamp generated at receipt, usage counts, or a new attempt UUID here.
+	identity, err := schemas.MarshalSorted([]string{"bifrost", "fishaudio-usage", vkID, requestID})
 	if err != nil {
 		return event, err
 	}
+	id := sha256.Sum256(identity)
 	props := fishAudioProperties{SchemaVersion: 1, UsageSource: "external", BillableBytes: *usage.BillableBytes,
 		AudioMS: *usage.AudioMS, Outcome: usage.Outcome, TurnID: usage.TurnID, SubID: usage.SubID}
 	props.Provider, props.Model = p.rateCardNames(string(provider), model)
-	return Event[fishAudioProperties]{TransactionID: id, CustomerID: vkID,
+	return Event[fishAudioProperties]{TransactionID: fmt.Sprintf("bf-fishaudio-%x", id), CustomerID: vkID,
 		EventType: "fishaudio-usage", Timestamp: usage.OccurredAt, Properties: props}, nil
-}
-
-// fishAudioTransactionID hashes length-delimited JSON, which avoids ambiguous
-// concatenation of the identity parts.
-func fishAudioTransactionID(prefix string, identity ...string) (string, error) {
-	encoded, err := schemas.MarshalSorted(identity)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%s%x", prefix, sha256.Sum256(encoded)), nil
 }
 
 // exportFishAudio queues fishaudio-usage for synthesis Bifrost performed itself:
