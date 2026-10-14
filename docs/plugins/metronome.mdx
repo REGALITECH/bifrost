@@ -12,6 +12,14 @@ input tokens only, because their output tokens are free answer bookkeeping
 rather than generated output; a decision emulated through an LLM keeps the
 output tokens that LLM generated.
 
+A hosted System One decision priced from credits (see the TypeSafe provider
+page) carries its exact USD spend in the same event as `cost_usd` (a decimal
+string) with its token counts zeroed, so token metrics do not also charge it.
+Other events have no `cost_usd`. Because its tokens are zero, **the token
+metrics bill such a decision at $0**: the `cost_usd` billable metric described
+in [Hosted System One spend](#hosted-system-one-spend) is required before
+`usd_per_credit` is configured on any provider.
+
 A TypeSafe decision sent with an `Idempotency-Key` uses a deterministic
 transaction ID derived from the virtual key, provider, model, and key. A replay whose
 first event was delivered is deduplicated by Metronome; a replay whose first
@@ -154,6 +162,41 @@ Do not regenerate IDs or timestamps when replaying a saved report during migrati
 
 The API hostname is shared between sandbox and production; the API key determines
 the instance. This plugin cannot infer the instance from an opaque API key.
+
+## Hosted System One spend
+
+Hosted System One decisions are billed only through `cost_usd`; their token
+properties are always zero. Before setting `typesafe_config.usd_per_credit` on
+any provider, set up and verify this metric in each Metronome environment that
+receives the events, or those decisions are invoiced at $0.
+
+1. **Billable metric:** create a SUM billable metric (for example
+   "System One spend (USD)") over the `cost_usd` property, filtered by
+   `event_type = token-billing`, `request_type = decisions`, and `cost_usd`
+   exists. Add `model` and `provider` as group keys if the rate card prices
+   by them. `cost_usd` is sent as a decimal string to keep it exact; step 4
+   confirms the metric sums it as a number.
+2. **Product:** create a usage product on that metric (for example
+   "System One decisions"). One unit is one USD of upstream spend.
+3. **Rate:** add the product to the rate card at the pass-through price of
+   1.00 USD per unit (or at your markup, such as 1.20 per unit), and attach the
+   rate card to the customer contracts.
+4. **Sandbox verification (before configuring `usd_per_credit`):** in the
+   Metronome sandbox, ingest a test event for a sandbox customer's ingest alias
+   with the shape Bifrost sends:
+
+   ```json
+   [{"transaction_id": "system-one-cost-check-1", "customer_id": "SANDBOX_VK_UUID",
+     "event_type": "token-billing", "timestamp": "2026-01-01T00:00:00Z",
+     "properties": {"model": "typesafe/jev-1.13.0", "provider": "typesafe",
+       "input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0,
+       "cached_write_tokens": 0, "request_type": "decisions", "cost_usd": "0.031"}}]
+   ```
+
+   Confirm that the metric shows 0.031 for that customer, that the draft
+   invoice shows the expected charge for the product, and that ingesting the
+   same `transaction_id` again does not change either. Only then configure
+   `usd_per_credit`.
 
 ## Model mapping
 
