@@ -82,7 +82,7 @@ func fishAudioTransactionID(prefix string, identity ...string) (string, error) {
 // InputChars (bytes when the provider is fishaudio); they are never exported as
 // tokens. Delivery shares the token queue, so the realtime relay and speech
 // responses never wait on Metronome.
-func (p *Plugin) exportFishAudio(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, extra *schemas.BifrostResponseExtraFields) {
+func (p *Plugin) exportFishAudio(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, extra *schemas.BifrostResponseExtraFields, provider, model string) {
 	source, billableBytes := "", 0
 	switch {
 	case extra.RequestType == schemas.RealtimeRequest && resp.ResponsesResponse != nil && resp.ResponsesResponse.Usage != nil:
@@ -100,7 +100,6 @@ func (p *Plugin) exportFishAudio(ctx *schemas.BifrostContext, resp *schemas.Bifr
 		p.logger.Warn("[metronome] skipped Fish Audio usage: missing authenticated virtual-key ID")
 		return
 	}
-	provider, model := servedModel(extra)
 	if model == "" {
 		return
 	}

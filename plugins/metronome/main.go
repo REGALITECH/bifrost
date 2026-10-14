@@ -136,6 +136,7 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 	if extra == nil || (extra.CacheDebug != nil && extra.CacheDebug.CacheHit) {
 		return resp, upstreamErr, nil
 	}
+	provider, model := servedModel(extra)
 	switch extra.RequestType {
 	case schemas.ChatCompletionStreamRequest, schemas.TextCompletionStreamRequest, schemas.ResponsesStreamRequest, schemas.SpeechStreamRequest:
 		final, _ := ctx.Value(schemas.BifrostContextKeyStreamEndIndicator).(bool)
@@ -146,7 +147,7 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 	case schemas.RealtimeRequest:
 		// Only Fish Audio turns are exported (below). Other providers' realtime
 		// audio tokens don't fit the four token counters.
-		if provider, _ := servedModel(extra); provider != string(schemas.FishAudio) {
+		if provider != string(schemas.FishAudio) {
 			return resp, upstreamErr, nil
 		}
 	default:
@@ -154,8 +155,8 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 	}
 	// Fish Audio bills UTF-8 input bytes, not tokens: its speech and realtime
 	// usage becomes fishaudio-usage, never token-billing (see fishaudio.go).
-	if provider, _ := servedModel(extra); provider == string(schemas.FishAudio) {
-		p.exportFishAudio(ctx, resp, extra)
+	if provider == string(schemas.FishAudio) {
+		p.exportFishAudio(ctx, resp, extra, provider, model)
 		return resp, upstreamErr, nil
 	}
 	usage, ok := extractUsage(resp)
@@ -174,7 +175,6 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 		p.logger.Warn("[metronome] skipped usage: missing authenticated virtual-key ID")
 		return resp, upstreamErr, nil
 	}
-	provider, model := servedModel(extra)
 	if provider == "" || model == "" {
 		return resp, upstreamErr, nil
 	}
