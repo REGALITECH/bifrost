@@ -11,7 +11,7 @@ import (
 func TestUsageCustomerIsAuthenticatedVirtualKeyID(t *testing.T) {
 	for _, vkID := range []string{"4e1606af-85a9-4cea-8c65-faa4eacb2031", "c0b62c29-b682-4e60-bcf1-ec4214b0058d"} {
 		t.Run(vkID, func(t *testing.T) {
-			p := &Plugin{logger: testLogger{}, queue: make(chan Event[TokenUsage], 1), ctx: context.Background()}
+			p := &Plugin{logger: testLogger{}, queue: make(chan Event[any], 1), ctx: context.Background()}
 			ctx := audioContext(vkID, "same-request-id")
 			ctx.SetValue(schemas.BifrostContextKeyVirtualKey, "sk-bf-secret-must-not-be-exported")
 			ctx.SetValue(schemas.BifrostContextKeyDimensions, map[string]string{"customer_id": "another-customer", "tenant_id": "another-tenant"})
@@ -39,7 +39,7 @@ func TestUsageCustomerIsAuthenticatedVirtualKeyID(t *testing.T) {
 
 func TestUsageRequiresAuthenticatedVirtualKeyID(t *testing.T) {
 	for _, vkID := range []string{"", " \t\n"} {
-		p := &Plugin{logger: testLogger{}, queue: make(chan Event[TokenUsage], 1)}
+		p := &Plugin{logger: testLogger{}, queue: make(chan Event[any], 1)}
 		ctx := audioContext(vkID, "request")
 		ctx.SetValue(schemas.BifrostContextKeyVirtualKey, "sk-bf-secret")
 		ctx.SetValue(schemas.BifrostContextKeyDimensions, map[string]string{"customer_id": "claimed-customer"})
@@ -53,7 +53,7 @@ func TestUsageRequiresAuthenticatedVirtualKeyID(t *testing.T) {
 			t.Fatal("unauthenticated Fish usage accepted")
 		}
 	}
-	p := &Plugin{logger: testLogger{}, queue: make(chan Event[TokenUsage], 1)}
+	p := &Plugin{logger: testLogger{}, queue: make(chan Event[any], 1)}
 	p.PostLLMHook(nil, tokenIdentityResponse(), nil)
 	if _, err := p.fishAudioEvent(nil, audioUsage(t, audioBody)); err == nil || len(p.queue) != 0 {
 		t.Fatal("nil context accepted")

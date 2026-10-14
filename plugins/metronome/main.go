@@ -57,7 +57,7 @@ type Plugin struct {
 	config Config
 	apiKey string
 	client *http.Client
-	queue  chan Event[TokenUsage]
+	queue  chan Event[any]
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -109,7 +109,7 @@ func Init(config *Config, logger schemas.Logger) (*Plugin, error) {
 		return nil, fmt.Errorf("metronome api_key is required")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	p := &Plugin{ingestURL: defaultIngestURL, config: cfg, logger: logger, apiKey: key, queue: make(chan Event[TokenUsage], 1000), ctx: ctx, cancel: cancel,
+	p := &Plugin{ingestURL: defaultIngestURL, config: cfg, logger: logger, apiKey: key, queue: make(chan Event[any], 1000), ctx: ctx, cancel: cancel,
 		client: &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	p.wg.Add(1)
 	go p.run()
@@ -143,6 +143,13 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 			return resp, upstreamErr, nil
 		}
 	case schemas.ChatCompletionRequest, schemas.TextCompletionRequest, schemas.ResponsesRequest:
+	case schemas.RealtimeRequest:
+		// Only Fish Audio turns are exported, as byte usage (see fishaudio.go).
+		// Other providers' realtime audio tokens don't fit the four token counters.
+		if provider, _ := servedModel(extra); provider == string(schemas.FishAudio) {
+			p.exportFishAudio(ctx, resp, extra)
+		}
+		return resp, upstreamErr, nil
 	default:
 		return resp, upstreamErr, nil
 	}
@@ -162,6 +169,42 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 		p.logger.Warn("[metronome] skipped usage: missing authenticated virtual-key ID")
 		return resp, upstreamErr, nil
 	}
+	provider, model := servedModel(extra)
+	if provider == "" || model == "" {
+		return resp, upstreamErr, nil
+	}
+	usage.Provider, usage.Model = p.rateCardNames(provider, model)
+	attempt, _ := ctx.Value(attemptKey).(string)
+	if attempt == "" {
+		p.logger.Warn("[metronome] skipped usage: missing pre-hook attempt ID")
+		return resp, upstreamErr, nil
+	}
+	retries, _ := ctx.Value(schemas.BifrostContextKeyNumberOfRetries).(int)
+	id := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%s:%s", attempt, retries, provider, model)))
+	p.enqueue(Event[any]{TransactionID: fmt.Sprintf("bifrost-%x", id), CustomerID: customer, EventType: "token-billing", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Properties: usage})
+	return resp, upstreamErr, nil
+}
+
+// enqueue never blocks the hook; a full queue drops the event. Events hold
+// scalar copies only: Bifrost may release pooled responses after the hook.
+func (p *Plugin) enqueue(event Event[any]) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.closed {
+		// For example, a realtime turn finalized during shutdown.
+		p.logger.Warn("[metronome] plugin closed; dropped transaction=%s", event.TransactionID)
+		return
+	}
+	select {
+	case p.queue <- event:
+	default:
+		p.logger.Warn("[metronome] queue full; dropped transaction=%s", event.TransactionID)
+	}
+}
+
+// servedModel names the provider and model that handled the request, before
+// rate-card mappings.
+func servedModel(extra *schemas.BifrostResponseExtraFields) (string, string) {
 	provider, model := string(extra.RoutingInfo.Provider), extra.RoutingInfo.Model
 	if provider == "" {
 		provider = string(extra.Provider)
@@ -178,39 +221,22 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 	if served := extra.RoutingInfo.ServerSideFallbackModel; served != nil && *served != "" {
 		model = *served
 	}
-	if provider == "" || model == "" {
-		return resp, upstreamErr, nil
-	}
-	usage.Provider = provider
+	return provider, model
+}
+
+// rateCardNames applies provider_mapping and model_mapping to a served model.
+func (p *Plugin) rateCardNames(provider, model string) (string, string) {
+	mappedProvider, mappedModel := provider, model
 	if mapped := p.config.ProviderMapping[provider]; mapped != "" {
-		usage.Provider = mapped
+		mappedProvider = mapped
 	}
-	usage.Model = model
 	if mapped := p.config.ModelMapping[provider+"/"+model]; mapped != "" {
-		usage.Model = mapped
+		mappedModel = mapped
 	} else if !strings.Contains(model, "/") {
 		// For hosted/cloud/custom providers, configure model_mapping explicitly.
-		usage.Model = usage.Provider + "/" + model
+		mappedModel = mappedProvider + "/" + model
 	}
-	attempt, _ := ctx.Value(attemptKey).(string)
-	if attempt == "" {
-		p.logger.Warn("[metronome] skipped usage: missing pre-hook attempt ID")
-		return resp, upstreamErr, nil
-	}
-	retries, _ := ctx.Value(schemas.BifrostContextKeyNumberOfRetries).(int)
-	id := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%s:%s", attempt, retries, provider, model)))
-	event := Event[TokenUsage]{TransactionID: fmt.Sprintf("bifrost-%x", id), CustomerID: customer, EventType: "token-billing", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Properties: usage}
-	// Copy scalar usage before returning: Bifrost may release pooled responses.
-	p.mu.RLock()
-	if !p.closed {
-		select {
-		case p.queue <- event:
-		default:
-			p.logger.Warn("[metronome] queue full; dropped transaction=%s", event.TransactionID)
-		}
-	}
-	p.mu.RUnlock()
-	return resp, upstreamErr, nil
+	return mappedProvider, mappedModel
 }
 
 func extractUsage(resp *schemas.BifrostResponse) (TokenUsage, bool) {
@@ -253,7 +279,7 @@ func (p *Plugin) run() {
 			p.logger.Warn("[metronome] shutdown deadline reached; pending events dropped")
 			return
 		}
-		payload, err := schemas.MarshalSorted([]Event[TokenUsage]{event})
+		payload, err := schemas.MarshalSorted([]Event[any]{event})
 		if err != nil {
 			p.logger.Warn("[metronome] unable to encode event")
 			continue
@@ -265,7 +291,7 @@ func (p *Plugin) run() {
 }
 
 // send retries the identical serialized payload. External usage propagates errors
-// to its caller; token usage still uses its background queue.
+// to its caller; usage observed by the hooks still uses the background queue.
 func (p *Plugin) send(ctx context.Context, id string, payload []byte) error {
 	for attempt := 0; attempt < 3; attempt++ {
 		if err := ctx.Err(); err != nil {

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,27 +52,82 @@ func (p *Plugin) fishAudioEvent(ctx *schemas.BifrostContext, usage *FishAudioUsa
 	if usage.OccurredAt == "" {
 		return event, fmt.Errorf("external usage requires occurred_at in RFC3339 format")
 	}
-	// Length-delimited JSON avoids ambiguous concatenation. This ID survives
-	// application retries, plugin reloads and process restarts. Never include a
-	// timestamp generated at receipt, usage counts, or a new attempt UUID here.
-	identity, err := schemas.MarshalSorted([]string{"bifrost", "fishaudio-usage", vkID, requestID})
+	// This ID survives application retries, plugin reloads and process restarts.
+	// Never include a timestamp generated at receipt, usage counts, or a new
+	// attempt UUID here.
+	id, err := fishAudioTransactionID("bf-fishaudio-", "bifrost", "fishaudio-usage", vkID, requestID)
 	if err != nil {
 		return event, err
 	}
-	id := sha256.Sum256(identity)
-	props := fishAudioProperties{SchemaVersion: 1, Provider: string(provider), Model: model,
-		UsageSource: "external", BillableBytes: *usage.BillableBytes, AudioMS: *usage.AudioMS,
-		Outcome: usage.Outcome, TurnID: usage.TurnID, SubID: usage.SubID}
-	if mapped := p.config.ProviderMapping[string(provider)]; mapped != "" {
-		props.Provider = mapped
-	}
-	if mapped := p.config.ModelMapping[string(provider)+"/"+model]; mapped != "" {
-		props.Model = mapped
-	} else if !strings.Contains(model, "/") {
-		props.Model = props.Provider + "/" + model
-	}
-	return Event[fishAudioProperties]{TransactionID: fmt.Sprintf("bf-fishaudio-%x", id), CustomerID: vkID,
+	props := fishAudioProperties{SchemaVersion: 1, UsageSource: "external", BillableBytes: *usage.BillableBytes,
+		AudioMS: *usage.AudioMS, Outcome: usage.Outcome, TurnID: usage.TurnID, SubID: usage.SubID}
+	props.Provider, props.Model = p.rateCardNames(string(provider), model)
+	return Event[fishAudioProperties]{TransactionID: id, CustomerID: vkID,
 		EventType: "fishaudio-usage", Timestamp: usage.OccurredAt, Properties: props}, nil
+}
+
+// fishAudioTransactionID hashes length-delimited JSON, which avoids ambiguous
+// concatenation of the identity parts.
+func fishAudioTransactionID(prefix string, identity ...string) (string, error) {
+	encoded, err := schemas.MarshalSorted(identity)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s%x", prefix, sha256.Sum256(encoded)), nil
+}
+
+// exportFishAudio queues fishaudio-usage for synthesis Bifrost performed itself:
+// a Fish Audio realtime turn. Fish bills UTF-8 input bytes, which the realtime
+// turn pipeline reports as input tokens; they are never exported as tokens.
+// Delivery shares the token queue, so the realtime relay never waits on Metronome.
+func (p *Plugin) exportFishAudio(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, extra *schemas.BifrostResponseExtraFields) {
+	source, billableBytes := "", 0
+	switch {
+	case extra.RequestType == schemas.RealtimeRequest && resp.ResponsesResponse != nil && resp.ResponsesResponse.Usage != nil:
+		source, billableBytes = "realtime", resp.ResponsesResponse.Usage.InputTokens
+	}
+	if billableBytes <= 0 {
+		return
+	}
+	vkID, _ := ctx.Value(schemas.BifrostContextKeyGovernanceVirtualKeyID).(string)
+	if strings.TrimSpace(vkID) == "" {
+		p.logger.Warn("[metronome] skipped Fish Audio usage: missing authenticated virtual-key ID")
+		return
+	}
+	provider, model := servedModel(extra)
+	if model == "" {
+		return
+	}
+	// Like token events, identify the attempt by the UUID this plugin's pre-hook
+	// mints (once per realtime turn), never by a request ID that another
+	// component or a caller may choose: a collision would make Metronome drop
+	// real usage as a duplicate.
+	attempt, _ := ctx.Value(attemptKey).(string)
+	if attempt == "" {
+		p.logger.Warn("[metronome] skipped Fish Audio usage: missing pre-hook attempt ID")
+		return
+	}
+	retries, _ := ctx.Value(schemas.BifrostContextKeyNumberOfRetries).(int)
+	id, err := fishAudioTransactionID("bf-fishaudio-"+source+"-", "bifrost", "fishaudio-"+source, vkID, attempt, strconv.Itoa(retries), provider, model)
+	if err != nil {
+		p.logger.Warn("[metronome] unable to identify Fish Audio usage")
+		return
+	}
+	// Observation only: the Bifrost request (log entry) ID and its session.
+	turnID, _ := ctx.Value(schemas.BifrostContextKeyRequestID).(string)
+	if strings.TrimSpace(turnID) == "" {
+		turnID = attempt
+	}
+	subID, _ := ctx.Value(schemas.BifrostContextKeyParentRequestID).(string)
+	if strings.TrimSpace(subID) == "" {
+		subID = turnID
+	}
+	// Bifrost does not measure Fish output audio; failed turns carry no usage.
+	props := fishAudioProperties{SchemaVersion: 1, UsageSource: source, BillableBytes: int64(billableBytes),
+		Outcome: "completed", TurnID: turnID, SubID: subID}
+	props.Provider, props.Model = p.rateCardNames(provider, model)
+	p.enqueue(Event[any]{TransactionID: id, CustomerID: vkID, EventType: "fishaudio-usage",
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Properties: props})
 }
 
 // Receipt is returned only after successful ingestion.

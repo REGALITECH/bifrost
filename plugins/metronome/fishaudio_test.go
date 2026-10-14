@@ -68,6 +68,19 @@ func TestFishAudioEvent(t *testing.T) {
 	}
 }
 
+// Saved external reports are replayed unchanged, so their transaction ID formula
+// must never change: SHA-256 of ["bifrost","fishaudio-usage",vk,x-request-id].
+func TestFishAudioEventTransactionIDIsStable(t *testing.T) {
+	p := &Plugin{logger: testLogger{}, config: Config{}}
+	event, err := p.fishAudioEvent(audioContext("vk-1", "source-event-1"), audioUsage(t, audioBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "bf-fishaudio-815caca2e87c1f7d11b64a13d85c595b3497844695a81e53234d3b4277b8f697"; event.TransactionID != want {
+		t.Fatalf("external transaction ID changed: %s", event.TransactionID)
+	}
+}
+
 func TestFishAudioEventRejectsInvalidReports(t *testing.T) {
 	p := &Plugin{logger: testLogger{}, config: Config{}}
 	cases := []struct{ name, vk, id, body string }{
@@ -203,4 +216,139 @@ func audioUsage(t *testing.T, body string) *FishAudioUsage {
 		t.Fatal(err)
 	}
 	return &usage
+}
+
+// realtimeTurn mirrors buildRealtimeTurnPostResponse in the transport: a Fish turn
+// arrives as a Responses response whose input tokens are the turn's UTF-8 bytes.
+func realtimeTurn(provider schemas.ModelProvider, model string, usage *schemas.ResponsesResponseUsage) *schemas.BifrostResponse {
+	resp := &schemas.BifrostResponse{ResponsesResponse: &schemas.BifrostResponsesResponse{Object: "response", Model: model, Usage: usage}}
+	resp.PopulateExtraFields(schemas.RealtimeRequest, provider, model, model)
+	return resp
+}
+
+func realtimeContext(vk, turnID string) *schemas.BifrostContext {
+	ctx := audioContext(vk, turnID)
+	ctx.SetValue(schemas.BifrostContextKeyParentRequestID, "session-1")
+	ctx.SetValue(schemas.BifrostContextKeyStreamEndIndicator, true)
+	return ctx
+}
+
+func TestFishAudioRealtimeTurnUsage(t *testing.T) {
+	p := &Plugin{logger: testLogger{}, queue: make(chan Event[any], 4)}
+	ctx := realtimeContext("vk-1", "turn-request-1")
+	p.PreLLMHook(ctx, nil)
+	turn := realtimeTurn(schemas.FishAudio, "s2.1-pro", &schemas.ResponsesResponseUsage{InputTokens: 54, TotalTokens: 54})
+	got, upstreamErr, err := p.PostLLMHook(ctx, turn, nil)
+	if err != nil || upstreamErr != nil || got != turn {
+		t.Fatalf("changed realtime result: %v / %v", upstreamErr, err)
+	}
+	if len(p.queue) != 1 {
+		t.Fatalf("queued %d events, want exactly one", len(p.queue))
+	}
+	event := <-p.queue
+	props, ok := event.Properties.(fishAudioProperties)
+	if !ok || event.EventType != "fishaudio-usage" || event.CustomerID != "vk-1" {
+		t.Fatalf("realtime turn not exported as Fish usage: %+v", event)
+	}
+	want := fishAudioProperties{SchemaVersion: 1, Provider: "fishaudio", Model: "fishaudio/s2.1-pro", UsageSource: "realtime",
+		BillableBytes: 54, Outcome: "completed", TurnID: "turn-request-1", SubID: "session-1"}
+	if props != want {
+		t.Fatalf("realtime properties = %+v, want %+v", props, want)
+	}
+	if !strings.HasPrefix(event.TransactionID, "bf-fishaudio-realtime-") || len(event.TransactionID) > 128 {
+		t.Fatalf("bad realtime transaction ID: %s", event.TransactionID)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, event.Timestamp); err != nil {
+		t.Fatalf("bad timestamp %q", event.Timestamp)
+	}
+	// An external report whose x-request-id equals the turn ID is a different event.
+	external, err := p.fishAudioEvent(audioContext("vk-1", "turn-request-1"), audioUsage(t, audioBody))
+	if err != nil || external.TransactionID == event.TransactionID {
+		t.Fatalf("realtime ID collides with external report: %v", err)
+	}
+	// Retrying delivery of the same turn keeps its ID; a new turn gets a new one.
+	p.PostLLMHook(ctx, turn, nil)
+	if again := <-p.queue; again.TransactionID != event.TransactionID {
+		t.Fatal("same turn changed transaction ID")
+	}
+	next := realtimeContext("vk-1", "turn-request-1")
+	p.PreLLMHook(next, nil)
+	p.PostLLMHook(next, turn, nil)
+	if other := <-p.queue; other.TransactionID == event.TransactionID {
+		t.Fatal("separate turns share a transaction ID")
+	}
+	// Mappings apply as for external reports.
+	p.config.ProviderMapping = map[string]string{"fishaudio": "fish"}
+	p.config.ModelMapping = map[string]string{"fishaudio/s2.1-pro": "voice/pro"}
+	p.PostLLMHook(ctx, turn, nil)
+	mapped := <-p.queue
+	if props := mapped.Properties.(fishAudioProperties); props.Provider != "fish" || props.Model != "voice/pro" || mapped.TransactionID != event.TransactionID {
+		t.Fatalf("bad mapping: %+v", mapped)
+	}
+}
+
+func TestFishAudioRealtimeTurnSkipped(t *testing.T) {
+	usage := func(bytes int) *schemas.ResponsesResponseUsage {
+		return &schemas.ResponsesResponseUsage{InputTokens: bytes, TotalTokens: bytes}
+	}
+	cases := []struct {
+		name     string
+		vk       string
+		preHook  bool
+		resp     *schemas.BifrostResponse
+		upstream *schemas.BifrostError
+	}{
+		{"nil usage", "vk-1", true, realtimeTurn(schemas.FishAudio, "s2.1-pro", nil), nil},
+		{"zero bytes", "vk-1", true, realtimeTurn(schemas.FishAudio, "s2.1-pro", usage(0)), nil},
+		{"missing virtual key", "", true, realtimeTurn(schemas.FishAudio, "s2.1-pro", usage(54)), nil},
+		{"blank virtual key", " \t", true, realtimeTurn(schemas.FishAudio, "s2.1-pro", usage(54)), nil},
+		{"missing attempt", "vk-1", false, realtimeTurn(schemas.FishAudio, "s2.1-pro", usage(54)), nil},
+		// A response with valid usage alongside an error is still a failure.
+		{"failed turn", "vk-1", true, realtimeTurn(schemas.FishAudio, "s2.1-pro", usage(54)), &schemas.BifrostError{Error: &schemas.ErrorField{Message: "fish error"}}},
+		{"openai turn", "vk-1", true, realtimeTurn(schemas.OpenAI, "gpt-realtime", usage(54)), nil},
+		{"elevenlabs turn", "vk-1", true, realtimeTurn(schemas.Elevenlabs, "eleven_flash_v2_5", usage(54)), nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Plugin{logger: testLogger{}, queue: make(chan Event[any], 1)}
+			ctx := realtimeContext(tc.vk, "turn-request-1")
+			if tc.preHook {
+				p.PreLLMHook(ctx, nil)
+			}
+			if _, _, err := p.PostLLMHook(ctx, tc.resp, tc.upstream); err != nil || len(p.queue) != 0 {
+				t.Fatalf("realtime turn exported: %v", err)
+			}
+		})
+	}
+}
+
+func TestFishAudioRealtimeDelivery(t *testing.T) {
+	t.Setenv("METRONOME_TEST_KEY", "test-memory-only-key")
+	p, err := Init(&Config{APIKey: schemas.NewSecretVar("env.METRONOME_TEST_KEY")}, testLogger{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = p.Cleanup() })
+	sent := make(chan []byte, 2)
+	p.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, _ := io.ReadAll(r.Body)
+		sent <- body
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}, nil
+	})}
+	ctx := realtimeContext("vk-1", "turn-request-1")
+	p.PreLLMHook(ctx, nil)
+	p.PostLLMHook(ctx, realtimeTurn(schemas.FishAudio, "s2.1-pro", &schemas.ResponsesResponseUsage{InputTokens: 54, TotalTokens: 54}), nil)
+	select {
+	case body := <-sent:
+		var events []Event[fishAudioProperties]
+		if err := json.Unmarshal(body, &events); err != nil || len(events) != 1 || events[0].EventType != "fishaudio-usage" ||
+			events[0].Properties.BillableBytes != 54 || events[0].Properties.UsageSource != "realtime" {
+			t.Fatalf("invalid wire event: %s", body)
+		}
+		if strings.Contains(string(body), "input_tokens") {
+			t.Fatalf("Fish bytes exported as tokens: %s", body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("realtime Fish usage was not sent")
+	}
 }

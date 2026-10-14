@@ -8,7 +8,7 @@ import (
 )
 
 func TestTokenUsageStillUsesLLMQueue(t *testing.T) {
-	p := &Plugin{logger: testLogger{}, queue: make(chan Event[TokenUsage], 4), ctx: context.Background()}
+	p := &Plugin{logger: testLogger{}, queue: make(chan Event[any], 4), ctx: context.Background()}
 	ctx := audioContext("vk-1", "request")
 	p.PreLLMHook(ctx, nil)
 	response := &schemas.BifrostResponse{ChatResponse: &schemas.BifrostChatResponse{Usage: &schemas.BifrostLLMUsage{
@@ -21,7 +21,8 @@ func TestTokenUsageStillUsesLLMQueue(t *testing.T) {
 	}
 	select {
 	case event := <-p.queue:
-		if event.CustomerID != "vk-1" || event.EventType != "token-billing" || event.Properties.InputTokens != 75 || event.Properties.OutputTokens != 10 || event.Properties.CachedInputTokens != 20 || event.Properties.CachedWriteTokens != 5 {
+		usage, _ := event.Properties.(TokenUsage)
+		if event.CustomerID != "vk-1" || event.EventType != "token-billing" || usage.InputTokens != 75 || usage.OutputTokens != 10 || usage.CachedInputTokens != 20 || usage.CachedWriteTokens != 5 {
 			t.Fatalf("changed token accounting: %+v", event)
 		}
 	default:
@@ -44,5 +45,18 @@ func TestTokenUsageStillUsesLLMQueue(t *testing.T) {
 	p.PostLLMHook(ctx, response, nil)
 	if len(p.queue) != 1 {
 		t.Fatal("final stream usage missing")
+	}
+}
+
+// The queue carries any event type; token events must still encode exactly as before.
+func TestQueuedTokenEventEncodingUnchanged(t *testing.T) {
+	usage := TokenUsage{Model: "openai/test-model", Provider: "openai", InputTokens: 75, OutputTokens: 10, CachedInputTokens: 20, CachedWriteTokens: 5}
+	typed, err := schemas.MarshalSorted([]Event[TokenUsage]{{TransactionID: "bifrost-1", CustomerID: "vk-1", EventType: "token-billing", Timestamp: "2026-10-14T00:00:00Z", Properties: usage}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, err := schemas.MarshalSorted([]Event[any]{{TransactionID: "bifrost-1", CustomerID: "vk-1", EventType: "token-billing", Timestamp: "2026-10-14T00:00:00Z", Properties: usage}})
+	if err != nil || string(queued) != string(typed) {
+		t.Fatalf("token wire format changed: %s / %s", queued, typed)
 	}
 }
