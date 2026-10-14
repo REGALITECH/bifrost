@@ -167,135 +167,98 @@ Speech models are exported like any other model, for example Gemini TTS as
 Prompt, response text, raw virtual keys and provider/API secrets are never part
 of an event.
 
+## Supported usage
+
+| Request | Event | Usage |
+| --- | --- | --- |
+| Chat Completions, Text Completions, Responses | `token-billing` | Input, output and cached tokens |
+| Speech with reported tokens, such as Gemini TTS or streamed OpenAI `gpt-4o-mini-tts` | `token-billing` | Input and output tokens; no cached counters |
+| Fish Audio speech | `fishaudio-usage` | UTF-8 input bytes; `usage_source: "speech"` |
+| Fish Audio realtime | `fishaudio-usage` | Logged input bytes; `usage_source: "realtime"` |
+| Speech without reported tokens: non-streamed OpenAI, OpenAI `tts-1`, ElevenLabs and all Azure speech | Not exported | No token usage available to the plugin |
+| Other realtime providers, STT, embeddings and images | Not exported | Outside the prototype's scope |
+
+Automatic export requires a successful request or a completed stream with usage
+on the final hook. Failed/cancelled requests and semantic-cache hits are excluded;
+[Fish realtime disconnect behavior](#fish-audio-usage-synthesized-by-bifrost) is
+described below. Missing or inconsistent usage is not estimated. Advanced token
+categories (audio/image/cache TTL/tier) are not separately priced by the
+four-counter `token-billing` format.
+
 ## Prototype boundaries
 
 - No pricing changes, contract/customer provisioning, Stripe payment setup or
   database migration is performed by the plugin.
-- STT, embeddings, images, failed/cancelled requests and semantic-cache hits
-  are excluded in this first LLM prototype. WebSocket Realtime is exported only
-  for Fish Audio (see
-  [Fish Audio usage synthesized by Bifrost](#fish-audio-usage-synthesized-by-bifrost));
-  OpenAI, Azure and ElevenLabs realtime turns stay excluded because their
-  audio-token usage does not fit this format. Advanced token categories
-  (audio/image/cache TTL/tier) are not separately priced by this four-counter
-  event format.
-- Speech exports the input and output tokens that the provider reports, such as
-  Gemini TTS text input and audio output tokens; speech has no cached counters.
-  Speech without reported tokens is skipped as zero usage. This includes
-  character-billed TTS such as OpenAI `tts-1` and ElevenLabs, non-streamed
-  OpenAI speech, whose response carries no usage, and all Azure speech: its
-  non-streamed response has no usage and Bifrost's Azure stream discards the
-  provider's usage event. A token-billed model such as `gpt-4o-mini-tts` is
-  therefore exported only when streamed through OpenAI. Fish Audio speech is
-  exported as `fishaudio-usage` instead.
-- Only completed streams with usage on the final hook are exported. Missing or
-  inconsistent usage is not estimated. Cancellation billing and provider-specific
-  final-usage behavior need integration checks before production use.
-- For token events and Fish Audio usage synthesized by Bifrost, a bounded
-  in-memory queue keeps HTTP calls out of the hook. Up to three attempts
+- Token events and Fish Audio usage synthesized by Bifrost use a shared
+  1,000-event in-memory queue, so responses do not wait on Metronome. Events are
+  sent one at a time; slow ingestion reduces throughput. Up to three attempts
   reuse the identical payload and transaction ID for network errors, 429 and 5xx.
-  Other HTTP errors are logged without retry. A fresh gateway request gets a new
-  event ID, even if it is an application-level retry.
-- For queued events there is no durable outbox: queue overflow, retry exhaustion, process failure
-  or shutdown exceeding five seconds can lose events. This is a sandbox prototype,
-  not a production billing ledger. Existing Bifrost governance remains active.
-- One background sender delivers queued events one per ingest request, so
-  sustained throughput is about one event per Metronome round trip, and less
-  while ingestion is slow or failing. Fish realtime adds an event per
-  synthesized turn, so voice traffic fills the 1,000-event queue sooner; overflow
-  drops events with a warning. Batched ingestion or parallel senders are
-  follow-up work before production use.
+  Other HTTP errors are logged without retry.
+- Each new inference attempt, including a fallback, gets a new event ID even
+  when the caller reuses `x-request-id`.
+- There is no durable outbox: queue overflow, retry exhaustion, process failure
+  or shutdown exceeding five seconds can lose queued events. Queue overflow is
+  logged. This is a sandbox prototype, not a production billing ledger.
+  Existing Bifrost governance remains active. Cancellation and provider-specific
+  final-usage behavior need integration checks before production use.
 
 API reference: https://docs.metronome.com/api-reference/usage/ingest-events
 
-Tests cover token and speech accounting, Fish Audio speech and realtime export,
+`make test-metronome` covers token and speech accounting, Fish Audio export,
 instance isolation, secret references, audio conversion, HTTP retries, builtin
-loading, and the real handler/exporter path.
-The `Metronome Tests` PR workflow runs these without credentials or a skip flag.
-Live Sandbox ingestion is a separate validation step.
+loading, and the handler/exporter path without credentials. Live Sandbox ingestion
+is a separate validation step.
 
 ## Fish Audio usage synthesized by Bifrost
 
-Fish Audio bills UTF-8 input bytes, not tokens. Fish Audio usage that Bifrost
-synthesizes is therefore exported as `fishaudio-usage` and never as
-`token-billing`:
+Fish Audio uses byte-based accounting. For `/v1/audio/speech` and
+`/v1/realtime?model=fishaudio/<model>`, Bifrost sends one `fishaudio-usage` event
+per successful request, completed stream or successfully finalized turn. These
+events use the [shared event properties](#event-and-pricing), with:
 
-- **Realtime turns** (`/v1/realtime?model=fishaudio/<model>`): one event per
-  completed turn with `usage_source: "realtime"`. `billable_bytes` is the
-  turn's input byte count as the realtime logs record it (as the turn's input
-  tokens): the UTF-8 bytes of the turn's `user` text, with each text fragment
-  trimmed and fragments joined by a space. It can differ from what Fish bills;
-  see the known limits below.
-- **Speech** (`/v1/audio/speech` with `fishaudio/<model>`): one event per
-  successful request, or per completed stream, with `usage_source: "speech"`.
-  `billable_bytes` is the UTF-8 byte count of the input text (the usage's
-  `input_chars`, which Bifrost counts in bytes for Fish Audio).
-
-These events use the [external report properties](#event-and-pricing), with:
-
-- `outcome: "completed"` and `audio_ms: 0`. Bifrost does not measure Fish output
-  audio, and requests that fail carry no usage.
+- `billable_bytes`: UTF-8 input bytes for speech, or the logged `user` text's
+  byte count for realtime (subject to the limits below).
+- `outcome: "completed"` and `audio_ms: 0`; output audio duration is not measured.
 - `turn_id`: the Bifrost request ID, which is also the log entry ID. For speech
   this is the caller's `x-request-id` when one is sent. `sub_id`: the session ID
   (the realtime session, or the caller's `baggage` session ID when one is sent),
   or the request ID when there is none. Both identify Bifrost records, not the
   calling application's turns.
-- `customer_id`: the authenticated VK UUID, as for other events. Usage without
-  one is skipped with a warning.
 
-They go through the same in-memory queue as token events, so neither the
-realtime relay nor a speech response waits on Metronome, and the queue's
-delivery limits apply (see [Prototype boundaries](#prototype-boundaries)). The
-transaction ID is SHA-256 of
-`["bifrost", "fishaudio-<source>", authenticated_vk_uuid, attempt_uuid, retries, provider, model]`,
-prefixed with `bf-fishaudio-<source>-`, where `<source>` is `realtime` or
-`speech`. The plugin's pre-hook mints the attempt UUID once per realtime turn or
-speech request (fallbacks get a new one), so retried deliveries keep the ID and
-separate turns or requests never share one, even when callers reuse an
-`x-request-id`. It never matches an external report's ID.
+Realtime limits:
 
-Not exported, or exported with known limits:
+- Only `user` text counts. Fish can also synthesize `assistant`, `system` or
+  role-less input, but that text is absent from Metronome usage, governance
+  budgets and logged usage. Turns without counted input are skipped.
+- Logged text trims each fragment and joins fragments with a space; Fish receives
+  raw text with content blocks concatenated. Reported bytes can therefore be
+  higher or lower than Fish's billable input.
+- Turns finalized as errors (Fish errors, upstream or client write failures,
+  or upstream-event translation failures) are not exported, even if some audio
+  was synthesized. Fish may still charge for that synthesis.
+- A disconnect handled as successful turn finalization exports the full recorded
+  input as `completed`, including barge-in. A disconnect handled as an error is
+  not exported. Reconnecting and resending text creates a new attempt and does
+  not deduplicate a previously exported turn.
+- Governance checks run at turn finalization, after audio may already have been
+  delivered. Rejected turns are not recorded as governance usage or exported to
+  Metronome; this does not prevent Fish from charging for the synthesis.
+- In-progress turns at gateway shutdown and turns finalized after plugin cleanup
+  are not exported.
 
-- Turns that end in a Fish error, an upstream write failure or a translation
-  failure are not exported, and neither are failed or cancelled speech
-  requests. Partial synthesis before the error is not billed.
-- Turns with no `user` text carry no usage and are skipped. Fish synthesizes
-  the text of every `conversation.item.create` whatever its role, but only
-  `user` items count, so text sent with role `assistant` or `system`, or with no
-  role, is synthesized without usage in Metronome, governance budgets or logs.
-  ETLA's gofish sends role `user`. Counting exactly what Fish receives needs a
-  Fish provider or realtime transport change (follow-up).
-- The logged input trims whitespace around each text fragment and joins
-  fragments with a space, while Fish receives the raw text with content blocks
-  concatenated. Text with leading or trailing whitespace, or several content
-  blocks in one item, can be billed a few bytes more or less than Fish charges.
-- Turns still in progress when the gateway shuts down are not exported: closing
-  the realtime sessions clears their pending input, so the turn is never
-  finalized, and a turn finalized after the plugin's cleanup is dropped with a
-  warning.
-- Governance checks a Fish turn when the turn is finalized, after its audio was
-  delivered. A turn rejected then (for example, by an exhausted budget) is not
-  billed anywhere.
-- A turn finalized because the client disconnected (barge-in) cannot be told
-  apart from a completed one and is billed for its full input, matching how Fish
-  bills submitted text.
-- A client that reconnects and resends text after an upstream drop is billed for
-  both turns.
+For both speech and realtime:
+
 - Custom providers that wrap Fish Audio under another provider key are not
   exported.
-
-`/v1/fishaudio/usage` remains for Fish Audio usage outside Bifrost, such as
-cached playback. Do not also report usage that Bifrost synthesized there: the
-two transaction IDs differ, so Metronome would bill it twice.
+- `/v1/fishaudio/usage` is for usage outside Bifrost, such as cached playback.
+  Do not also report usage that Bifrost synthesized: automatic and external
+  reports use different transaction IDs and would be counted twice.
 
 ## External Fish Audio usage prototype
 
-The transport resolves only the configured `metronome` plugin for each report.
-After input validation, governance authentication and the existing accounting /
-logging hooks, it calls the builtin instance’s `ReportFishAudio` method with
-validated typed usage. There is no HTTP header acknowledgment contract.
-It does not run other HTTP/LLM plugins or make a provider call. No new core types,
-provider methods, plugin-loader support, or database migrations are needed.
+Reports pass through validation, governance authentication and local usage
+accounting/logging before delivery to the configured `metronome` plugin. They
+do not run other HTTP/LLM plugins or make a provider call.
 
 ### Request and acknowledgment
 
@@ -332,12 +295,6 @@ behavior and omits these fields. **202 without `metronome_status: "sent"` does
 not confirm Metronome delivery.** Ingest acceptance also does not prove that a
 customer, billable metric, or invoice matched; verify those in Sandbox.
 
-The Metronome plugin uses the authenticated governance VK UUID as the customer
-ingest alias. Do not use a caller header, secret VK value, or submitted customer
-field as the billing identity. Register the reporting
-key's UUID as an alias on the intended Sandbox customer before sending live usage.
-These instructions do not change any live aliases or credentials.
-
 ### Event and pricing
 
 `fishaudio-usage` properties contain numeric `billable_bytes` (UTF-8 input bytes,
@@ -349,10 +306,11 @@ and `"realtime"` or `"speech"` for
 Model/provider mappings also apply to these events. No text, audio bytes, secret
 headers, or arbitrary caller dimensions are forwarded.
 
-The plugin preserves all four outcomes (`completed`, `barged_in`, `failed`,
-`cache_hit`) and zero quantities. It does not infer free usage from an outcome or
-estimate missing quantities. A failed or interrupted generation may still have
-billable bytes. For cached playback without new generation, submit zero bytes.
+For external reports, the plugin preserves all four outcomes (`completed`,
+`barged_in`, `failed`, `cache_hit`) and zero quantities. It does not infer free
+usage from an outcome or estimate missing quantities. A failed or interrupted
+generation may still have billable bytes. For cached playback without new
+generation, submit zero bytes.
 Define whether `audio_ms` measures generated or actually played audio in the
 reporting application; the exporter preserves the reported measurement.
 
@@ -363,16 +321,10 @@ contract before sending test events. This plugin does not create them.
 
 ### Retry guarantees and prototype limits
 
-Token events and Fish Audio usage synthesized by Bifrost identify an actual
-inference attempt (a fresh UUID), while external reports identify an already
-completed event (the caller’s saved request ID).
-Using the caller ID for token events would collapse separate billable inference
-attempts. Both event types use the same generic event envelope.
-
-The external transaction ID is SHA-256 of the JSON array
-`["bifrost", "fishaudio-usage", authenticated_vk_uuid, x_request_id]`, prefixed
-with `bf-fishaudio-`. It stays stable across identical client retries and process
-restarts; the caller-supplied timestamp is normalized to UTC, never regenerated.
+External transaction IDs identify a completed event using the authenticated VK
+UUID and the caller's saved `x-request-id`. They stay stable across identical
+client retries and process restarts. The caller-supplied timestamp is normalized
+to UTC, never regenerated.
 Metronome deduplicates the transaction ID within its 34-day window:
 https://docs.metronome.com/api-reference/idempotency
 
