@@ -46,7 +46,7 @@ func TestFishAudio(t *testing.T) {
 			TranscriptionStream:   false,
 			Embedding:             false,
 			Reasoning:             false,
-			ListModels:            true,
+			ListModels:            false, // No TTS model-list API: the default ["*"] key returns no models; TestFishAudioIntegration covers key validation.
 			Realtime:              false,
 		},
 	}
