@@ -194,8 +194,9 @@ four-counter `token-billing` format.
   sent one at a time; slow ingestion reduces throughput. Up to three attempts
   reuse the identical payload and transaction ID for network errors, 429 and 5xx.
   Other HTTP errors are logged without retry.
-- Each new inference attempt, including a fallback, gets a new event ID even
-  when the caller reuses `x-request-id`.
+- Automatic events use the UUID created at request or realtime-turn start.
+  A new request, turn or fallback gets a fresh UUID even when `x-request-id` is
+  reused. Provider retries share the UUID; only successful final usage is exported.
 - There is no durable outbox: queue overflow, retry exhaustion, process failure
   or shutdown exceeding five seconds can lose queued events. Queue overflow is
   logged. This is a sandbox prototype, not a production billing ledger.

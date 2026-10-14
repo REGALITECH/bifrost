@@ -2,7 +2,6 @@ package metronome
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/maximhq/bifrost/core/schemas"
@@ -32,6 +31,7 @@ func TestTokenUsageStillUsesLLMQueue(t *testing.T) {
 	// Fish speech bills bytes: one fishaudio-usage event and no token event.
 	speech := &schemas.BifrostResponse{SpeechResponse: &schemas.BifrostSpeechResponse{Usage: &schemas.SpeechUsage{InputChars: 54}}}
 	speech.PopulateExtraFields(schemas.SpeechRequest, schemas.FishAudio, "s2-pro", "s2-pro")
+	p.PreLLMHook(ctx, nil)
 	p.PostLLMHook(ctx, speech, nil)
 	if len(p.queue) != 1 {
 		t.Fatalf("Fish speech queued %d events, want one", len(p.queue))
@@ -40,6 +40,7 @@ func TestTokenUsageStillUsesLLMQueue(t *testing.T) {
 		t.Fatalf("Fish speech exported as %s", event.EventType)
 	}
 	response.PopulateExtraFields(schemas.ChatCompletionStreamRequest, schemas.OpenAI, "test-model", "test-model")
+	p.PreLLMHook(ctx, nil)
 	p.PostLLMHook(ctx, response, nil)
 	if len(p.queue) != 0 {
 		t.Fatal("non-final stream exported")
@@ -135,12 +136,12 @@ func TestSpeechUsage(t *testing.T) {
 			if event.CustomerID != "vk-1" || event.Properties != tc.want {
 				t.Fatalf("speech event = %+v, want properties %+v", event, tc.want)
 			}
-			wantType, wantPrefix := "token-billing", "bifrost-"
+			wantType := "token-billing"
 			if _, fish := tc.want.(fishAudioProperties); fish {
-				wantType, wantPrefix = "fishaudio-usage", "bf-fishaudio-speech-"
+				wantType = "fishaudio-usage"
 			}
-			if event.EventType != wantType || !strings.HasPrefix(event.TransactionID, wantPrefix) {
-				t.Fatalf("speech event %s / %s, want %s / %s*", event.EventType, event.TransactionID, wantType, wantPrefix)
+			if event.EventType != wantType {
+				t.Fatalf("speech event type = %s, want %s", event.EventType, wantType)
 			}
 		})
 	}

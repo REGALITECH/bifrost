@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"math"
-	"strconv"
 	"strings"
 	"time"
 
@@ -103,19 +102,11 @@ func (p *Plugin) exportFishAudio(ctx *schemas.BifrostContext, resp *schemas.Bifr
 	if model == "" {
 		return
 	}
-	// Like token events, identify the attempt by the UUID this plugin's pre-hook
-	// mints (once per realtime turn or speech attempt), never by a request ID
-	// such as a caller's x-request-id: a collision would make Metronome drop
-	// real usage as a duplicate.
+	// Reuse the pre-hook UUID, as token events do. Caller-supplied request IDs
+	// can be reused for separate synthesis requests and must not identify usage.
 	attempt, _ := ctx.Value(attemptKey).(string)
 	if attempt == "" {
 		p.logger.Warn("[metronome] skipped Fish Audio usage: missing pre-hook attempt ID")
-		return
-	}
-	retries, _ := ctx.Value(schemas.BifrostContextKeyNumberOfRetries).(int)
-	id, err := fishAudioTransactionID("bf-fishaudio-"+source+"-", "bifrost", "fishaudio-"+source, vkID, attempt, strconv.Itoa(retries), provider, model)
-	if err != nil {
-		p.logger.Warn("[metronome] unable to identify Fish Audio usage")
 		return
 	}
 	// Observation only: the Bifrost request (log entry) ID and its session.
@@ -131,7 +122,7 @@ func (p *Plugin) exportFishAudio(ctx *schemas.BifrostContext, resp *schemas.Bifr
 	props := fishAudioProperties{SchemaVersion: 1, UsageSource: source, BillableBytes: int64(billableBytes),
 		Outcome: "completed", TurnID: turnID, SubID: subID}
 	props.Provider, props.Model = p.rateCardNames(provider, model)
-	p.enqueue(Event[any]{TransactionID: id, CustomerID: vkID, EventType: "fishaudio-usage",
+	p.enqueue(Event[any]{TransactionID: attempt, CustomerID: vkID, EventType: "fishaudio-usage",
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Properties: props})
 }
 

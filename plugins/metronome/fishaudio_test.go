@@ -255,9 +255,6 @@ func TestFishAudioRealtimeTurnUsage(t *testing.T) {
 	if props != want {
 		t.Fatalf("realtime properties = %+v, want %+v", props, want)
 	}
-	if !strings.HasPrefix(event.TransactionID, "bf-fishaudio-realtime-") || len(event.TransactionID) > 128 {
-		t.Fatalf("bad realtime transaction ID: %s", event.TransactionID)
-	}
 	if _, err := time.Parse(time.RFC3339Nano, event.Timestamp); err != nil {
 		t.Fatalf("bad timestamp %q", event.Timestamp)
 	}
@@ -266,7 +263,7 @@ func TestFishAudioRealtimeTurnUsage(t *testing.T) {
 	if err != nil || external.TransactionID == event.TransactionID {
 		t.Fatalf("realtime ID collides with external report: %v", err)
 	}
-	// Retrying delivery of the same turn keeps its ID; a new turn gets a new one.
+	// Repeated final hooks for the same turn keep its ID; a new turn gets a new one.
 	p.PostLLMHook(ctx, turn, nil)
 	if again := <-p.queue; again.TransactionID != event.TransactionID {
 		t.Fatal("same turn changed transaction ID")
@@ -381,10 +378,5 @@ func TestFishAudioSpeechTransactionID(t *testing.T) {
 	p.PreLLMHook(reused, nil)
 	if export(reused).TransactionID == event.TransactionID {
 		t.Fatal("requests reusing x-request-id share a transaction ID")
-	}
-	// A core retry is a separate upstream call, as for token events.
-	ctx.SetValue(schemas.BifrostContextKeyNumberOfRetries, 1)
-	if export(ctx).TransactionID == event.TransactionID {
-		t.Fatal("retry reused the transaction ID")
 	}
 }

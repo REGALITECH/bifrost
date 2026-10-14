@@ -63,8 +63,8 @@ func TestFullQueueDoesNotBlockHooks(t *testing.T) {
 	}
 }
 
-// The served provider decides between fishaudio-usage and token-billing, and the
-// served model is part of the exported identity.
+// The served provider decides between fishaudio-usage and token-billing, and
+// routing metadata determines the provider/model properties.
 func TestServedModelRouting(t *testing.T) {
 	fallback := "claude-fallback"
 	routed := func(resp *schemas.BifrostResponse, routing schemas.RoutingInfo) *schemas.BifrostResponse {
@@ -115,15 +115,6 @@ func TestServedModelRouting(t *testing.T) {
 			}
 			if event.EventType != tc.eventType || provider != tc.provider || model != tc.model {
 				t.Fatalf("exported %s %s/%s, want %s %s/%s", event.EventType, provider, model, tc.eventType, tc.provider, tc.model)
-			}
-			// Without routing metadata the same attempt is another model (or
-			// not exported at all), so it never shares the transaction ID.
-			tc.resp.GetExtraFields().RoutingInfo = schemas.RoutingInfo{}
-			p.PostLLMHook(ctx, tc.resp, nil)
-			if len(p.queue) == 1 {
-				if unrouted := <-p.queue; unrouted.TransactionID == event.TransactionID {
-					t.Fatal("served model is not part of the transaction ID")
-				}
 			}
 		})
 	}

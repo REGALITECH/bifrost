@@ -5,8 +5,73 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/maximhq/bifrost/core/schemas"
 )
+
+func TestAutomaticUsageUsesPreHookUUID(t *testing.T) {
+	cases := []struct {
+		name string
+		resp *schemas.BifrostResponse
+	}{
+		{"tokens", tokenIdentityResponse()},
+		{"speech tokens", speechResponse(schemas.Gemini, "tts-model", &schemas.SpeechUsage{InputTokens: 12, OutputTokens: 340})},
+		{"streamed speech tokens", speechChunk(schemas.Gemini, "tts-model", schemas.SpeechStreamResponseTypeDone, &schemas.SpeechUsage{InputTokens: 12, OutputTokens: 340})},
+		{"fish speech", speechResponse(schemas.FishAudio, "s2-pro", &schemas.SpeechUsage{InputChars: 54})},
+		{"fish speech stream", speechChunk(schemas.FishAudio, "s2-pro", schemas.SpeechStreamResponseTypeDone, &schemas.SpeechUsage{InputChars: 54})},
+		{"fish realtime", realtimeTurn(schemas.FishAudio, "s2-pro", fishTurnUsage())},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Plugin{logger: testLogger{}, queue: make(chan Event[any], 1)}
+			ctx := realtimeContext("vk-1", "same-request-id")
+			p.PreLLMHook(ctx, nil)
+			id, _ := ctx.Value(attemptKey).(string)
+			if _, err := uuid.Parse(id); err != nil {
+				t.Fatalf("pre-hook did not create a UUID: %v", err)
+			}
+
+			// Failed provider attempts are not usage events. The successful retry
+			// and repeated final hooks retain the request's existing UUID.
+			p.PostLLMHook(ctx, tc.resp, &schemas.BifrostError{Error: &schemas.ErrorField{Message: "retryable upstream failure"}})
+			if len(p.queue) != 0 {
+				t.Fatal("failed attempt was exported")
+			}
+			ctx.SetValue(schemas.BifrostContextKeyNumberOfRetries, 1)
+			for range 2 {
+				p.PostLLMHook(ctx, tc.resp, nil)
+				select {
+				case event := <-p.queue:
+					if event.TransactionID != id {
+						t.Fatalf("transaction ID = %q, want pre-hook UUID %q", event.TransactionID, id)
+					}
+				default:
+					t.Fatal("successful usage was not exported")
+				}
+			}
+
+			// Fallbacks rerun the pre-hook on the same context. New requests and
+			// realtime turns also get fresh UUIDs even if x-request-id is reused.
+			for _, next := range []*schemas.BifrostContext{ctx, realtimeContext("vk-1", "same-request-id")} {
+				p.PreLLMHook(next, nil)
+				nextID, _ := next.Value(attemptKey).(string)
+				if nextID == id {
+					t.Fatal("new pre-hook reused the previous UUID")
+				}
+				p.PostLLMHook(next, tc.resp, nil)
+				select {
+				case event := <-p.queue:
+					if event.TransactionID != nextID {
+						t.Fatalf("new usage ID = %q, want %q", event.TransactionID, nextID)
+					}
+				default:
+					t.Fatal("new usage was not exported")
+				}
+				id = nextID
+			}
+		})
+	}
+}
 
 func TestUsageCustomerIsAuthenticatedVirtualKeyID(t *testing.T) {
 	for _, vkID := range []string{"4e1606af-85a9-4cea-8c65-faa4eacb2031", "c0b62c29-b682-4e60-bcf1-ec4214b0058d"} {

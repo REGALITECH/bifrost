@@ -4,7 +4,6 @@ package metronome
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -121,7 +120,8 @@ func (p *Plugin) PreRequestHook(_ *schemas.BifrostContext, _ *schemas.BifrostReq
 }
 
 func (p *Plugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (*schemas.BifrostRequest, *schemas.LLMPluginShortCircuit, error) {
-	// A small scalar only: no request or stream content is retained in context.
+	// One UUID per request, fallback or realtime turn. Provider retries share it:
+	// only successful final usage is exported. Context retains only this scalar ID.
 	if ctx != nil {
 		ctx.SetValue(attemptKey, uuid.NewString())
 	}
@@ -184,9 +184,7 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 		p.logger.Warn("[metronome] skipped usage: missing pre-hook attempt ID")
 		return resp, upstreamErr, nil
 	}
-	retries, _ := ctx.Value(schemas.BifrostContextKeyNumberOfRetries).(int)
-	id := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%s:%s", attempt, retries, provider, model)))
-	p.enqueue(Event[any]{TransactionID: fmt.Sprintf("bifrost-%x", id), CustomerID: customer, EventType: "token-billing", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Properties: usage})
+	p.enqueue(Event[any]{TransactionID: attempt, CustomerID: customer, EventType: "token-billing", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Properties: usage})
 	return resp, upstreamErr, nil
 }
 
