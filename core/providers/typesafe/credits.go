@@ -9,6 +9,7 @@ import (
 
 	schemas "github.com/maximhq/bifrost/core/schemas"
 	"github.com/valyala/fasthttp"
+	"golang.org/x/net/idna"
 )
 
 const (
@@ -84,13 +85,21 @@ func (p *creditPrice) cost(credits string) (string, float64, error) {
 // isHostedEndpoint reports whether rawURL targets hosted System One: the
 // parsed host is system-one.dev or a subdomain of it. A substring match never
 // qualifies (evil-system-one.dev.example.com does not), and a base URL that
-// proxies to system-one.dev under another host is not hosted.
+// proxies to system-one.dev under another host is not hosted. The host is
+// normalized with IDNA lookup mapping first, because Go dials Unicode forms
+// such as fullwidth letters or an ideographic full stop as system-one.dev. A
+// URL or host that cannot be parsed or converted counts as hosted, so it fails
+// closed.
 func isHostedEndpoint(rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return false
+		return true
 	}
-	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	host, err := idna.Lookup.ToASCII(u.Hostname())
+	if err != nil {
+		return true
+	}
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
 	return host == hostedDomain || strings.HasSuffix(host, "."+hostedDomain)
 }
 

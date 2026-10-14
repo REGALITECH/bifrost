@@ -67,6 +67,11 @@ func TestIsHostedEndpointMatchesParsedHostOnly(t *testing.T) {
 		"https://user@example.com/?h=system-one.dev": false,
 		"https://api.typesafe.ai/v1/systemone":       false,
 		"http://127.0.0.1:8080/v1/systemone":         false,
+		"https://ｓｙｓｔｅｍ-one.dev/v1":                  true,
+		"https://system-one。dev/v1":                  true,
+		"https://api.system-one。dev。/v1":             true,
+		"https://xn--a.example/v1":                   true, // invalid punycode fails closed
+		"https://exa mple.com/v1":                    true, // unparsable URL fails closed
 	} {
 		if got := isHostedEndpoint(u); got != want {
 			t.Errorf("isHostedEndpoint(%q)=%v want %v", u, got, want)

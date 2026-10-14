@@ -55,7 +55,8 @@ Configure TypeSafe as a provider with a bearer API key:
 ### Hosted System One credit pricing
 
 Hosted System One (`system-one.dev` and its subdomains, matched on the parsed
-host) bills in credits, which it reports only in the `X-System-One-Credits`
+host after IDNA normalization, so Unicode spellings that resolve to it count;
+a host that cannot be parsed or normalized is treated as hosted) bills in credits, which it reports only in the `X-System-One-Credits`
 response header. Set the USD price of one credit as an exact decimal string in
 `typesafe_config` (provider config, also in the `typesafe_config` field of the
 provider API):
