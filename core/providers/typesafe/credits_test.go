@@ -150,12 +150,44 @@ func TestHostedDecisionMalformedCreditsFails(t *testing.T) {
 	}
 }
 
-func TestHostedDecisionWithoutCreditsHeaderKeepsTokenUsage(t *testing.T) {
-	calls := 0
-	p := hostedProvider(t, "0.01", creditsHandler("", &calls))
-	resp, err := hostedDecision(t, p)
-	if err != nil || resp.Usage == nil || resp.Usage.CreditCostUSD != "" || resp.Usage.Cost != nil {
-		t.Fatalf("resp=%+v err=%v", resp, err)
+func TestHostedDecisionCreditsHeaderRequirement(t *testing.T) {
+	for _, tc := range []struct {
+		name, credits, replayed string
+		wantErr                 bool
+		wantCost                string
+	}{
+		{name: "missing header fails closed", wantErr: true},
+		{name: "replayed false still requires header", replayed: "false", wantErr: true},
+		{name: "replay without header keeps token usage", replayed: "true"},
+		{name: "present header priced", credits: "2", wantCost: "0.02"},
+		{name: "replay with header priced", credits: "2", replayed: "true", wantCost: "0.02"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := hostedProvider(t, "0.01", func(w http.ResponseWriter, r *http.Request) {
+				if tc.credits != "" {
+					w.Header().Set(creditsHeader, tc.credits)
+				}
+				if tc.replayed != "" {
+					w.Header().Set(replayedHeader, tc.replayed)
+				}
+				w.Header().Set(requestIDHeader, "req-1")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(fixtureSuccessBody))
+			})
+			resp, err := hostedDecision(t, p)
+			if tc.wantErr {
+				if err == nil || resp != nil || !strings.Contains(err.Error.Message, creditsHeader) {
+					t.Fatalf("resp=%v err=%+v", resp, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err.Error.Message)
+			}
+			if resp.Usage == nil || resp.Usage.CreditCostUSD != tc.wantCost || (tc.wantCost == "") != (resp.Usage.Cost == nil) {
+				t.Fatalf("usage = %+v", resp.Usage)
+			}
+		})
 	}
 }
 

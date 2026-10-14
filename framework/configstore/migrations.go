@@ -359,7 +359,6 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"make_base_pricing_columns_nullable"}, run: migrationMakeBasePricingColumnsNullable},
 	{IDs: []string{"add_allow_on_all_virtual_keys_column"}, run: migrationAddAllowOnAllVirtualKeysColumn},
 	{IDs: []string{"add_open_ai_config_json_column"}, run: migrationAddOpenAIConfigJSONColumn},
-	{IDs: []string{"add_typesafe_config_json_column"}, run: migrationAddTypesafeConfigJSONColumn},
 	{IDs: []string{"add_key_blacklisted_models_json_column"}, run: migrationAddKeyBlacklistedModelsJSONColumn},
 	{IDs: []string{"add_chain_rule_column_to_routing_rules"}, run: migrationAddChainRuleColumnToRoutingRules},
 	{IDs: []string{"drop_deployment_columns_and_add_aliases"}, run: migrationDropDeploymentColumnsAndAddAliases},
@@ -461,6 +460,7 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_live_models_sync_interval_column"}, run: migrationAddLiveModelsSyncIntervalColumn},
 	{IDs: []string{"add_pricing_override_user_id_column"}, run: migrationAddPricingOverrideUserIDColumn},
 	{IDs: []string{"add_budget_reset_config_column"}, run: migrationAddBudgetResetConfigColumn},
+	{IDs: []string{"add_typesafe_config_json_column"}, run: migrationAddTypesafeConfigJSONColumn},
 }
 
 // quoteSQLiteIdentifier quotes a SQLite identifier, escaping any double quotes.

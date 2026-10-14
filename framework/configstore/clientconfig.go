@@ -468,10 +468,10 @@ type ProviderConfig struct {
 	StoreRawRequestResponse  bool                              `json:"store_raw_request_response"`            // Capture raw request/response for internal logging only; strip from API responses returned to clients
 	CustomProviderConfig     *schemas.CustomProviderConfig     `json:"custom_provider_config,omitempty"`      // Custom provider configuration
 	OpenAIConfig             *schemas.OpenAIConfig             `json:"openai_config,omitempty"`               // OpenAI-specific configuration
-	TypesafeConfig           *schemas.TypesafeConfig           `json:"typesafe_config,omitempty"`
-	ConfigHash               string                            `json:"config_hash,omitempty"` // Hash of config.json version, used for change detection
-	Status                   string                            `json:"status,omitempty"`      // Model discovery status for keyless providers
-	Description              string                            `json:"description,omitempty"` // Model discovery error message for keyless providers
+	TypesafeConfig           *schemas.TypesafeConfig           `json:"typesafe_config,omitempty"`             // TypeSafe-specific configuration
+	ConfigHash               string                            `json:"config_hash,omitempty"`                 // Hash of config.json version, used for change detection
+	Status                   string                            `json:"status,omitempty"`                      // Model discovery status for keyless providers
+	Description              string                            `json:"description,omitempty"`                 // Model discovery error message for keyless providers
 }
 
 // Redacted returns a redacted copy of the provider configuration.

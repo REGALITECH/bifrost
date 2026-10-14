@@ -1657,11 +1657,11 @@ type BifrostLLMUsage struct {
 	TotalTokens             int                          `json:"total_tokens"`
 	Cost                    *BifrostCost                 `json:"cost,omitempty"` // Only for the providers which support cost calculation
 
-	// Laya decision usage: state token accounting and truncation, reported on /v1/decisions.
 	// CreditCostUSD is the exact decimal USD cost of a hosted System One
 	// decision priced from credits. Empty otherwise. Kept out of API payloads.
 	CreditCostUSD string `json:"-"`
 
+	// Laya decision usage: state token accounting and truncation, reported on /v1/decisions.
 	StateTokens        *int     `json:"state_tokens,omitempty"`
 	StateTokensDropped *int     `json:"state_tokens_dropped,omitempty"`
 	Truncated          *bool    `json:"truncated,omitempty"`

@@ -330,7 +330,7 @@ func (provider *TypesafeProvider) Decision(ctx *schemas.BifrostContext, key sche
 	}
 
 	if hosted {
-		if err := applyCredits(resp, provider.creditPrice, bifrostResp); err != nil {
+		if err := applyCredits(provider.logger, resp, provider.creditPrice, bifrostResp); err != nil {
 			return nil, providerUtils.EnrichError(ctx, providerUtils.NewBifrostOperationError(err.Error(), nil), jsonData, respBody, sendBackRawRequest, sendBackRawResponse, latency)
 		}
 	}

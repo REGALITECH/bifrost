@@ -96,11 +96,11 @@ type ProviderResponse struct {
 	StoreRawRequestResponse  bool                             `json:"store_raw_request_response"`       // Capture raw request/response for internal logging only
 	CustomProviderConfig     *schemas.CustomProviderConfig    `json:"custom_provider_config,omitempty"` // Custom provider configuration
 	OpenAIConfig             *schemas.OpenAIConfig            `json:"openai_config,omitempty"`          // OpenAI-specific configuration
-	TypesafeConfig           *schemas.TypesafeConfig          `json:"typesafe_config,omitempty"`
-	ProviderStatus           ProviderStatus                   `json:"provider_status"`       // Health/initialization status of the provider
-	Status                   string                           `json:"status,omitempty"`      // Operational status (e.g., list_models_failed)
-	Description              string                           `json:"description,omitempty"` // Error/status description
-	ConfigHash               string                           `json:"config_hash,omitempty"` // Hash of config.json version, used for change detection
+	TypesafeConfig           *schemas.TypesafeConfig          `json:"typesafe_config,omitempty"`        // TypeSafe-specific configuration
+	ProviderStatus           ProviderStatus                   `json:"provider_status"`                  // Health/initialization status of the provider
+	Status                   string                           `json:"status,omitempty"`                 // Operational status (e.g., list_models_failed)
+	Description              string                           `json:"description,omitempty"`            // Error/status description
+	ConfigHash               string                           `json:"config_hash,omitempty"`            // Hash of config.json version, used for change detection
 }
 
 // ListProvidersResponse represents the response for listing all providers

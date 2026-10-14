@@ -83,7 +83,8 @@ func (p *creditPrice) cost(credits string) (string, float64, error) {
 
 // isHostedEndpoint reports whether rawURL targets hosted System One: the
 // parsed host is system-one.dev or a subdomain of it. A substring match never
-// qualifies (evil-system-one.dev.example.com does not).
+// qualifies (evil-system-one.dev.example.com does not), and a base URL that
+// proxies to system-one.dev under another host is not hosted.
 func isHostedEndpoint(rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -93,16 +94,33 @@ func isHostedEndpoint(rawURL string) bool {
 	return host == hostedDomain || strings.HasSuffix(host, "."+hostedDomain)
 }
 
-// applyCredits prices a hosted decision from the credits header. Without the
-// header the native token usage stands. A malformed header is an error: the
-// request was charged upstream, so guessing a price is not safe.
-func applyCredits(resp *fasthttp.Response, price *creditPrice, out *schemas.BifrostDecisionResponse) error {
-	raw := resp.Header.Peek(creditsHeader)
-	if len(raw) == 0 {
-		return nil
+// replayedHeader marks a response System One served from a saved
+// idempotent result; such a replay is not charged again and may omit credits.
+const replayedHeader = "X-Idempotency-Replayed"
+
+// requestIDHeader is System One's upstream request ID, logged so lost credits
+// can be reconciled against the provider's records.
+const requestIDHeader = "X-Typesafe-Request-Id"
+
+// applyCredits prices a hosted decision from the credits header. A hosted
+// response must carry the header unless it is an idempotent replay
+// (X-Idempotency-Replayed: true), which keeps its token usage. A missing or
+// malformed header otherwise fails the request: the decision was charged
+// upstream, so guessing a price is not safe. Failures are logged with the
+// upstream request ID and the raw header value for reconciliation.
+func applyCredits(logger schemas.Logger, resp *fasthttp.Response, price *creditPrice, out *schemas.BifrostDecisionResponse) error {
+	raw := string(resp.Header.Peek(creditsHeader))
+	requestID := string(resp.Header.Peek(requestIDHeader))
+	if raw == "" {
+		if strings.EqualFold(strings.TrimSpace(string(resp.Header.Peek(replayedHeader))), "true") {
+			return nil
+		}
+		logger.Error("[typesafe] hosted decision response missing %s: request_id=%q", creditsHeader, requestID)
+		return fmt.Errorf("hosted System One response is missing the %s header; the decision cannot be priced", creditsHeader)
 	}
-	exact, f, err := price.cost(string(raw))
+	exact, f, err := price.cost(raw)
 	if err != nil {
+		logger.Error("[typesafe] hosted decision response has malformed %s: request_id=%q value=%q", creditsHeader, requestID, raw)
 		return fmt.Errorf("invalid %s header: %w", creditsHeader, err)
 	}
 	if out.Usage == nil {
