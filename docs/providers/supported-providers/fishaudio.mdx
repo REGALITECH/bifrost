@@ -99,6 +99,30 @@ case schemas.FishAudio:
 
 For text-to-speech calls, the Bifrost `model` is the Fish Audio model variant (`s1` or `s2-pro`, default `s2-pro`), and the Bifrost `voice` is the Fish `reference_id` (voice model ID).
 
+### Registering TTS models
+
+When a virtual key has `allowed_models: ["*"]` for `fishaudio`, it allows the models listed in the Fish Audio provider key's `models`. Adding a model to that list registers it in Bifrost. Key updates apply immediately, without a restart.
+
+If the provider key's `models` is `["*"]`, the allowed set falls back to the datasheet's derived `fishaudio/*` rows: `s1`, `s2-pro`, and `s2.1-pro` (see [Pricing](#pricing)). `"*"` cannot be combined with other entries in `models`. To register a model that is not in the datasheet, switch the provider key to an explicit list:
+
+```json
+{
+  "name": "fishaudio-key-1",
+  "value": "env.FISH_AUDIO_API_KEY",
+  "models": ["s1", "s2-pro", "s2.1-pro", "<new-model>"],
+  "weight": 1.0
+}
+```
+
+A model that is neither registered nor derived from the datasheet is rejected with `model_blocked`. A governance pricing override works even without a datasheet row, so register a pricing override to price the new model.
+
+Roll out each new Fish Audio model in this order in each environment:
+
+1. In Bifrost, add the model to the Fish Audio provider key's `models` and register its pricing override.
+2. Then switch the TTS service (gofish) to the new model using `FISH_SPEECH_MODEL_VARIANT`.
+
+Switching gofish first causes TTS to fail with `model_blocked` if the model is not registered, or records no cost if the model has no pricing.
+
 ---
 
 ## Pricing
@@ -285,7 +309,9 @@ model: s2-pro
 
 ## Request Parameters
 
-By default, ListModels returns the **account's own** voice models (`GET /model?self=true`), which is bounded. You can list **public** voices and narrow the (very large) catalog with Fish filters, passed as query params (forwarded via `ExtraParams`):
+By default, with no Fish query parameters (`ExtraParams` empty), ListModels makes exactly one `GET /model?self=true&page_size=1&page_number=1` request per key to validate it. A non-200 response marks the key as failed. The returned voices are ignored; ListModels returns only the models and aliases configured on the provider key, prefixed with `fishaudio/` (`fishaudio/<model>`). A key with `models: ["*"]` and no aliases returns no models. Bifrost also stores this result as the provider's live model list.
+
+Passing any of the Fish query parameters below (forwarded via `ExtraParams`) opts into paginated voice listing. In this mode, `self` defaults to `true` for the **account's own** voices; `self=false` lists the **public** catalog. Use Fish filters to narrow the (very large) catalog:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -298,14 +324,19 @@ By default, ListModels returns the **account's own** voice models (`GET /model?s
 Pagination is capped at 20 pages (≈2000 models); when a public listing is truncated, a warning is logged suggesting you narrow it with a filter.
 
 ```bash
-# Own voices (default)
-curl "http://localhost:8080/v1/models?provider=fishaudio"
+# Own voices
+curl "http://localhost:8080/v1/models?provider=fishaudio&self=true"
 
 # Public English voices, searched by title
 curl "http://localhost:8080/v1/models?provider=fishaudio&self=false&language=en&title=news"
+
+# Configured models only (key validation)
+curl "http://localhost:8080/v1/models?provider=fishaudio"
 ```
 
 ## Response Conversion
+
+For explicit voice listing only, Fish Audio returns voice entries such as:
 
 ```json
 {
@@ -322,7 +353,7 @@ curl "http://localhost:8080/v1/models?provider=fishaudio&self=false&language=en&
 }
 ```
 
-Each item's `_id` becomes the Bifrost model ID (`fishaudio/<_id>`) and `title` becomes the display name.
+In explicit voice listing, each item's `_id` becomes the Bifrost model ID (`fishaudio/<_id>`) and `title` becomes the display name. This mapping does not apply to the default configured-models response.
 
 ---
 
