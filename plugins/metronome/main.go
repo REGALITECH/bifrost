@@ -4,7 +4,6 @@ package metronome
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -60,7 +59,7 @@ type Plugin struct {
 	config Config
 	apiKey string
 	client *http.Client
-	queue  chan Event[TokenUsage]
+	queue  chan Event[any]
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -112,7 +111,7 @@ func Init(config *Config, logger schemas.Logger) (*Plugin, error) {
 		return nil, fmt.Errorf("metronome api_key is required")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	p := &Plugin{ingestURL: defaultIngestURL, config: cfg, logger: logger, apiKey: key, queue: make(chan Event[TokenUsage], 1000), ctx: ctx, cancel: cancel,
+	p := &Plugin{ingestURL: defaultIngestURL, config: cfg, logger: logger, apiKey: key, queue: make(chan Event[any], 1000), ctx: ctx, cancel: cancel,
 		client: &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	p.wg.Add(1)
 	go p.run()
@@ -124,7 +123,8 @@ func (p *Plugin) PreRequestHook(_ *schemas.BifrostContext, _ *schemas.BifrostReq
 }
 
 func (p *Plugin) PreLLMHook(ctx *schemas.BifrostContext, req *schemas.BifrostRequest) (*schemas.BifrostRequest, *schemas.LLMPluginShortCircuit, error) {
-	// A small scalar only: no request or stream content is retained in context.
+	// One UUID per request, fallback or realtime turn. Provider retries share it:
+	// only successful final usage is exported. Context retains only this scalar ID.
 	if ctx != nil {
 		ctx.SetValue(attemptKey, uuid.NewString())
 	}
@@ -139,15 +139,27 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 	if extra == nil || (extra.CacheDebug != nil && extra.CacheDebug.CacheHit) {
 		return resp, upstreamErr, nil
 	}
+	provider, model := servedModel(extra)
 	switch extra.RequestType {
-	case schemas.ChatCompletionStreamRequest, schemas.TextCompletionStreamRequest, schemas.ResponsesStreamRequest:
+	case schemas.ChatCompletionStreamRequest, schemas.TextCompletionStreamRequest, schemas.ResponsesStreamRequest, schemas.SpeechStreamRequest:
 		final, _ := ctx.Value(schemas.BifrostContextKeyStreamEndIndicator).(bool)
 		if !final {
 			return resp, upstreamErr, nil
 		}
-	case schemas.ChatCompletionRequest, schemas.TextCompletionRequest, schemas.ResponsesRequest:
-	case schemas.DecisionRequest:
+	case schemas.ChatCompletionRequest, schemas.TextCompletionRequest, schemas.ResponsesRequest, schemas.SpeechRequest, schemas.DecisionRequest:
+	case schemas.RealtimeRequest:
+		// Only Fish Audio turns are exported (below). Other providers' realtime
+		// audio tokens don't fit the four token counters.
+		if provider != string(schemas.FishAudio) {
+			return resp, upstreamErr, nil
+		}
 	default:
+		return resp, upstreamErr, nil
+	}
+	// Fish Audio bills UTF-8 input bytes, not tokens: its speech and realtime
+	// usage becomes fishaudio-usage, never token-billing (see fishaudio.go).
+	if provider == string(schemas.FishAudio) {
+		p.exportFishAudio(ctx, resp, extra, provider, model)
 		return resp, upstreamErr, nil
 	}
 	usage, ok := extractUsage(resp)
@@ -176,6 +188,48 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 		p.logger.Warn("[metronome] skipped usage: missing authenticated virtual-key ID")
 		return resp, upstreamErr, nil
 	}
+	if provider == "" || model == "" {
+		return resp, upstreamErr, nil
+	}
+	usage.Provider, usage.Model = p.rateCardNames(provider, model)
+	attempt, _ := ctx.Value(attemptKey).(string)
+	if attempt == "" {
+		p.logger.Warn("[metronome] skipped usage: missing pre-hook attempt ID")
+		return resp, upstreamErr, nil
+	}
+	transactionID := attempt
+	// Replayed TypeSafe decisions share an ID scoped to the authenticated
+	// virtual key, served provider/model and Idempotency-Key. Other requests
+	// retain their pre-hook UUID.
+	if extra.RequestType == schemas.DecisionRequest && schemas.ResolveBaseProvider(ctx, extra.Provider) == schemas.Typesafe {
+		if key := schemas.DecisionIdempotencyKey(ctx); key != "" {
+			transactionID = "bifrost-idem-" + schemas.DecisionIdempotencyScope(customer, provider, model, key)
+		}
+	}
+	p.enqueue(Event[any]{TransactionID: transactionID, CustomerID: customer, EventType: "token-billing", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Properties: usage})
+	return resp, upstreamErr, nil
+}
+
+// enqueue never blocks the hook; a full queue drops the event. Events hold
+// scalar copies only: Bifrost may release pooled responses after the hook.
+func (p *Plugin) enqueue(event Event[any]) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.closed {
+		// For example, a realtime turn finalized during shutdown.
+		p.logger.Warn("[metronome] plugin closed; dropped transaction=%s", event.TransactionID)
+		return
+	}
+	select {
+	case p.queue <- event:
+	default:
+		p.logger.Warn("[metronome] queue full; dropped transaction=%s", event.TransactionID)
+	}
+}
+
+// servedModel names the provider and model that handled the request, before
+// rate-card mappings.
+func servedModel(extra *schemas.BifrostResponseExtraFields) (string, string) {
 	provider, model := string(extra.RoutingInfo.Provider), extra.RoutingInfo.Model
 	if provider == "" {
 		provider = string(extra.Provider)
@@ -192,67 +246,43 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 	if served := extra.RoutingInfo.ServerSideFallbackModel; served != nil && *served != "" {
 		model = *served
 	}
-	if provider == "" || model == "" {
-		return resp, upstreamErr, nil
-	}
-	usage.Provider = provider
+	return provider, model
+}
+
+// rateCardNames applies provider_mapping and model_mapping to a served model.
+func (p *Plugin) rateCardNames(provider, model string) (string, string) {
+	mappedProvider, mappedModel := provider, model
 	if mapped := p.config.ProviderMapping[provider]; mapped != "" {
-		usage.Provider = mapped
+		mappedProvider = mapped
 	}
-	usage.Model = model
 	if mapped := p.config.ModelMapping[provider+"/"+model]; mapped != "" {
-		usage.Model = mapped
+		mappedModel = mapped
 	} else if !strings.Contains(model, "/") {
 		// For hosted/cloud/custom providers, configure model_mapping explicitly.
-		usage.Model = usage.Provider + "/" + model
+		mappedModel = mappedProvider + "/" + model
 	}
-	attempt, _ := ctx.Value(attemptKey).(string)
-	if attempt == "" {
-		p.logger.Warn("[metronome] skipped usage: missing pre-hook attempt ID")
-		return resp, upstreamErr, nil
-	}
-	retries, _ := ctx.Value(schemas.BifrostContextKeyNumberOfRetries).(int)
-	id := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%s:%s", attempt, retries, provider, model)))
-	transactionID := fmt.Sprintf("bifrost-%x", id)
-	// A System One decision with an Idempotency-Key is billed at most once per
-	// (virtual key, provider, key): a replay whose first event was delivered
-	// is deduplicated by Metronome, while a replay whose first response was
-	// lost is still billed because no event exists yet. Without a key, every
-	// attempt keeps its own ID.
-	if extra.RequestType == schemas.DecisionRequest && schemas.ResolveBaseProvider(ctx, extra.Provider) == schemas.Typesafe {
-		if key := schemas.DecisionIdempotencyKey(ctx); key != "" {
-			transactionID = "bifrost-idem-" + schemas.DecisionIdempotencyScope(customer, provider, model, key)
-		}
-	}
-	event := Event[TokenUsage]{TransactionID: transactionID, CustomerID: customer, EventType: "token-billing", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Properties: usage}
-	// Copy scalar usage before returning: Bifrost may release pooled responses.
-	p.mu.RLock()
-	if !p.closed {
-		select {
-		case p.queue <- event:
-		default:
-			p.logger.Warn("[metronome] queue full; dropped transaction=%s", event.TransactionID)
-		}
-	}
-	p.mu.RUnlock()
-	return resp, upstreamErr, nil
+	return mappedProvider, mappedModel
 }
 
 func extractUsage(resp *schemas.BifrostResponse) (TokenUsage, bool) {
 	var chat *schemas.BifrostLLMUsage
 	var responses *schemas.ResponsesResponseUsage
+	var speech *schemas.SpeechUsage
 	switch {
 	case resp.ChatResponse != nil:
 		chat = resp.ChatResponse.Usage
 	case resp.TextCompletionResponse != nil:
 		chat = resp.TextCompletionResponse.Usage
 	case resp.DecisionResponse != nil:
-		// Nil for a free idempotent replay, which is then not exported.
 		chat = resp.DecisionResponse.Usage
 	case resp.ResponsesResponse != nil:
 		responses = resp.ResponsesResponse.Usage
 	case resp.ResponsesStreamResponse != nil && resp.ResponsesStreamResponse.Response != nil:
 		responses = resp.ResponsesStreamResponse.Response.Usage
+	case resp.SpeechResponse != nil:
+		speech = resp.SpeechResponse.Usage
+	case resp.SpeechStreamResponse != nil:
+		speech = resp.SpeechStreamResponse.Usage
 	}
 	u := TokenUsage{}
 	if chat != nil {
@@ -265,6 +295,10 @@ func extractUsage(resp *schemas.BifrostResponse) (TokenUsage, bool) {
 		if d := responses.InputTokensDetails; d != nil {
 			u.CachedInputTokens, u.CachedWriteTokens = d.CachedReadTokens, d.CachedWriteTokens
 		}
+	} else if speech != nil {
+		// Speech has no cache counters. Character-billed TTS reports no tokens
+		// (only InputChars) and is skipped as zero usage.
+		u.InputTokens, u.OutputTokens = speech.InputTokens, speech.OutputTokens
 	} else {
 		return u, false
 	}
@@ -281,7 +315,7 @@ func (p *Plugin) run() {
 			p.logger.Warn("[metronome] shutdown deadline reached; pending events dropped")
 			return
 		}
-		payload, err := schemas.MarshalSorted([]Event[TokenUsage]{event})
+		payload, err := schemas.MarshalSorted([]Event[any]{event})
 		if err != nil {
 			p.logger.Warn("[metronome] unable to encode event")
 			continue
@@ -293,7 +327,7 @@ func (p *Plugin) run() {
 }
 
 // send retries the identical serialized payload. External usage propagates errors
-// to its caller; token usage still uses its background queue.
+// to its caller; usage observed by the hooks still uses the background queue.
 func (p *Plugin) send(ctx context.Context, id string, payload []byte) error {
 	for attempt := 0; attempt < 3; attempt++ {
 		if err := ctx.Err(); err != nil {

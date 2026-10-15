@@ -17,14 +17,19 @@ func decisionResponse(provider schemas.ModelProvider, model string, usage *schem
 
 func exportDecision(t *testing.T, ctx *schemas.BifrostContext, response *schemas.BifrostResponse) (Event[TokenUsage], bool) {
 	t.Helper()
-	p := &Plugin{logger: testLogger{}, queue: make(chan Event[TokenUsage], 1), ctx: context.Background()}
+	p := &Plugin{logger: testLogger{}, queue: make(chan Event[any], 1), ctx: context.Background()}
 	p.PreLLMHook(ctx, nil)
 	if _, _, err := p.PostLLMHook(ctx, response, nil); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case event := <-p.queue:
-		return event, true
+		usage, ok := event.Properties.(TokenUsage)
+		if !ok {
+			t.Fatalf("decision exported with unexpected properties: %T", event.Properties)
+		}
+		return Event[TokenUsage]{TransactionID: event.TransactionID, CustomerID: event.CustomerID,
+			EventType: event.EventType, Timestamp: event.Timestamp, Properties: usage}, true
 	default:
 		return Event[TokenUsage]{}, false
 	}
