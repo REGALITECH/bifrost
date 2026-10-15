@@ -15,6 +15,8 @@ func TestAutomaticUsageUsesPreHookUUID(t *testing.T) {
 		resp *schemas.BifrostResponse
 	}{
 		{"tokens", tokenIdentityResponse()},
+		{"decision without idempotency key", decisionResponse(schemas.Typesafe, "jev-1.13.0", &schemas.BifrostLLMUsage{PromptTokens: 12})},
+		{"emulated decision", decisionResponse(schemas.OpenAI, "test-model", &schemas.BifrostLLMUsage{PromptTokens: 12, CompletionTokens: 30})},
 		{"speech tokens", speechResponse(schemas.Gemini, "tts-model", &schemas.SpeechUsage{InputTokens: 12, OutputTokens: 340})},
 		{"streamed speech tokens", speechChunk(schemas.Gemini, "tts-model", schemas.SpeechStreamResponseTypeDone, &schemas.SpeechUsage{InputTokens: 12, OutputTokens: 340})},
 		{"fish speech", speechResponse(schemas.FishAudio, "s2-pro", &schemas.SpeechUsage{InputChars: 54})},

@@ -9,6 +9,19 @@ successful Chat Completions, Text Completions, Responses and speech
 events. Fish Audio speech and realtime turns that Bifrost synthesizes, and
 authenticated external Fish Audio reports, produce `fishaudio-usage` events.
 
+Successful decisions (`/v1/decisions` and `/typesafe/v1/systemone`) produce `token-billing` events
+too, marked with `request_type: "decisions"`. TypeSafe-family decisions report
+input tokens only, because their output tokens are free answer bookkeeping
+rather than generated output; a decision emulated through an LLM keeps the
+output tokens that LLM generated.
+
+A TypeSafe decision sent with an `Idempotency-Key` uses a deterministic
+transaction ID derived from the virtual key, provider, model, and key. A replay whose
+first event was delivered is deduplicated by Metronome; a replay whose first
+response was lost is billed once. Without a key, every attempt has its own ID.
+Bifrost's own spend tracking (governance budgets and logs) does not deduplicate
+replays: a replayed decision still records its usage there.
+
 ## Build and configure
 
 The normal gateway build includes the plugin. `transports/Dockerfile.local`
@@ -172,6 +185,7 @@ of an event.
 | Request | Event | Usage |
 | --- | --- | --- |
 | Chat Completions, Text Completions, Responses | `token-billing` | Input, output and cached tokens |
+| Decisions | `token-billing` | TypeSafe: input tokens only; LLM emulation: input and output tokens; `request_type: "decisions"` |
 | Speech with reported tokens, such as Gemini TTS or streamed OpenAI `gpt-4o-mini-tts` | `token-billing` | Input and output tokens; no cached counters |
 | Fish Audio speech | `fishaudio-usage` | UTF-8 input bytes; `usage_source: "speech"` |
 | Fish Audio realtime | `fishaudio-usage` | Logged input bytes; `usage_source: "realtime"` |
@@ -194,7 +208,8 @@ four-counter `token-billing` format.
   sent one at a time; slow ingestion reduces throughput. Up to three attempts
   reuse the identical payload and transaction ID for network errors, 429 and 5xx.
   Other HTTP errors are logged without retry.
-- Automatic events use the UUID created at request or realtime-turn start.
+- Automatic events use the pre-hook UUID, except TypeSafe decisions with an
+  `Idempotency-Key`, which use the stable ID described above.
   A new request, turn or fallback gets a fresh UUID even when `x-request-id` is
   reused. Provider retries share the UUID; only successful final usage is exported.
 - There is no durable outbox: queue overflow, retry exhaustion, process failure

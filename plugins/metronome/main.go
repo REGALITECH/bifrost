@@ -39,6 +39,9 @@ type TokenUsage struct {
 	OutputTokens      int    `json:"output_tokens"`
 	CachedInputTokens int    `json:"cached_input_tokens"`
 	CachedWriteTokens int    `json:"cached_write_tokens"`
+	// RequestType is set only for decision events ("decisions") so billable
+	// metrics can tell them apart; generation events keep their existing shape.
+	RequestType string `json:"request_type,omitempty"`
 }
 
 type requestKey string
@@ -143,7 +146,7 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 		if !final {
 			return resp, upstreamErr, nil
 		}
-	case schemas.ChatCompletionRequest, schemas.TextCompletionRequest, schemas.ResponsesRequest, schemas.SpeechRequest:
+	case schemas.ChatCompletionRequest, schemas.TextCompletionRequest, schemas.ResponsesRequest, schemas.SpeechRequest, schemas.DecisionRequest:
 	case schemas.RealtimeRequest:
 		// Only Fish Audio turns are exported (below). Other providers' realtime
 		// audio tokens don't fit the four token counters.
@@ -162,6 +165,16 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 	usage, ok := extractUsage(resp)
 	if !ok {
 		return resp, upstreamErr, nil
+	}
+	if extra.RequestType == schemas.DecisionRequest {
+		usage.RequestType = string(schemas.DecisionRequest)
+		// TypeSafe-family endpoints charge input tokens only; their output
+		// tokens are answer bookkeeping, not generated output. A decision
+		// emulated through an LLM keeps the output tokens that LLM generated
+		// and its provider bills.
+		if schemas.ResolveBaseProvider(ctx, extra.Provider) == schemas.Typesafe {
+			usage.OutputTokens = 0
+		}
 	}
 	if usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.CachedInputTokens < 0 || usage.CachedWriteTokens < 0 {
 		p.logger.Warn("[metronome] skipped inconsistent token counts")
@@ -184,7 +197,16 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 		p.logger.Warn("[metronome] skipped usage: missing pre-hook attempt ID")
 		return resp, upstreamErr, nil
 	}
-	p.enqueue(Event[any]{TransactionID: attempt, CustomerID: customer, EventType: "token-billing", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Properties: usage})
+	transactionID := attempt
+	// Replayed TypeSafe decisions share an ID scoped to the authenticated
+	// virtual key, served provider/model and Idempotency-Key. Other requests
+	// retain their pre-hook UUID.
+	if extra.RequestType == schemas.DecisionRequest && schemas.ResolveBaseProvider(ctx, extra.Provider) == schemas.Typesafe {
+		if key := schemas.DecisionIdempotencyKey(ctx); key != "" {
+			transactionID = "bifrost-idem-" + schemas.DecisionIdempotencyScope(customer, provider, model, key)
+		}
+	}
+	p.enqueue(Event[any]{TransactionID: transactionID, CustomerID: customer, EventType: "token-billing", Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Properties: usage})
 	return resp, upstreamErr, nil
 }
 
@@ -251,6 +273,8 @@ func extractUsage(resp *schemas.BifrostResponse) (TokenUsage, bool) {
 		chat = resp.ChatResponse.Usage
 	case resp.TextCompletionResponse != nil:
 		chat = resp.TextCompletionResponse.Usage
+	case resp.DecisionResponse != nil:
+		chat = resp.DecisionResponse.Usage
 	case resp.ResponsesResponse != nil:
 		responses = resp.ResponsesResponse.Usage
 	case resp.ResponsesStreamResponse != nil && resp.ResponsesStreamResponse.Response != nil:
