@@ -6,8 +6,9 @@
 // the server streams audio frames until finish(stop). Both Speech (one-shot,
 // accumulated) and SpeechStream (incremental deltas) drive this same WebSocket;
 // the msgpack wire protocol is fully encapsulated here, so the rest of Bifrost
-// treats Fish like any other TTS provider. ListModels uses the HTTP /model
-// endpoint.
+// treats Fish like any other TTS provider. By default, ListModels uses the HTTP
+// /model endpoint only to validate keys and returns configured models/aliases.
+// With explicit ExtraParams, it lists voice models through that endpoint.
 package fishaudio
 
 import (
@@ -101,15 +102,19 @@ func (provider *FishAudioProvider) readIdleTimeout() time.Duration {
 
 // --- ListModels ---
 
-// listModelsByKey lists voice models for a single key, paginating through
-// Fish's /model endpoint.
+// listModelsByKey validates a key with one minimal /model request when
+// ExtraParams is empty, ignoring voices and backfilling configured models and
+// aliases through the standard pipeline (empty when Unfiltered is true).
 //
-// By default it lists the account's own voices (self=true), which is bounded.
-// Callers can list public voices by passing self=false via ExtraParams (e.g.
-// the query string ?self=false), and may narrow the (very large) public catalog
-// with Fish filters — title, language, tag, sort_by — also forwarded from
-// ExtraParams. Pagination is capped at schemas.MaxPaginationRequests pages.
+// With non-empty ExtraParams it lists voices, defaulting to self=true. Callers
+// can override self and pass Fish filters such as title, language, tag, and
+// sort_by. Pagination is capped at schemas.MaxPaginationRequests pages.
 func (provider *FishAudioProvider) listModelsByKey(ctx *schemas.BifrostContext, key schemas.Key, request *schemas.BifrostListModelsRequest) (*schemas.BifrostListModelsResponse, *schemas.BifrostError) {
+	validationOnly := len(request.ExtraParams) == 0
+	pageSize := fishModelsPageSize
+	if validationOnly {
+		pageSize = 1
+	}
 	aggregated := &FishAudioListModelsResponse{}
 	var totalLatency time.Duration
 	var providerHeaders map[string]string
@@ -130,7 +135,7 @@ func (provider *FishAudioProvider) listModelsByKey(ctx *schemas.BifrostContext, 
 		req.SetRequestURI(provider.networkConfig.BaseURL + providerUtils.GetPathFromContext(ctx, "/model"))
 		args := req.URI().QueryArgs()
 		args.Set("self", selfValue)
-		args.Set("page_size", strconv.Itoa(fishModelsPageSize))
+		args.Set("page_size", strconv.Itoa(pageSize))
 		args.Set("page_number", strconv.Itoa(page))
 		// Forward any other provider-specific filters (title, language, tag,
 		// sort_by, ...) so callers can narrow a public listing.
@@ -182,11 +187,15 @@ func (provider *FishAudioProvider) listModelsByKey(ctx *schemas.BifrostContext, 
 			return nil, providerUtils.NewBifrostOperationError("failed to parse fish audio models response", err)
 		}
 
-		aggregated.Items = append(aggregated.Items, pageResponse.Items...)
-
 		wait()
 		fasthttp.ReleaseRequest(req)
 		fasthttp.ReleaseResponse(resp)
+
+		// Validation must not populate the TTS catalog with voice IDs or paginate.
+		if validationOnly {
+			break
+		}
+		aggregated.Items = append(aggregated.Items, pageResponse.Items...)
 
 		// Stop when the API reports no more pages or returns a short page.
 		if !pageResponse.HasMore || len(pageResponse.Items) < fishModelsPageSize {
@@ -204,14 +213,15 @@ func (provider *FishAudioProvider) listModelsByKey(ctx *schemas.BifrostContext, 
 	response.ExtraFields.Latency = totalLatency.Milliseconds()
 	response.ExtraFields.ProviderResponseHeaders = providerHeaders
 
-	if providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse) {
+	if !validationOnly && providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse) {
 		response.ExtraFields.RawResponse = aggregated
 	}
 
 	return response, nil
 }
 
-// ListModels lists the account's voice models, concurrently across keys.
+// ListModels validates keys and returns configured models/aliases by default.
+// Non-empty ExtraParams opts into paginated voice listing, concurrently across keys.
 func (provider *FishAudioProvider) ListModels(ctx *schemas.BifrostContext, keys []schemas.Key, request *schemas.BifrostListModelsRequest) (*schemas.BifrostListModelsResponse, *schemas.BifrostError) {
 	if err := providerUtils.CheckOperationAllowed(schemas.FishAudio, provider.customProviderConfig, schemas.ListModelsRequest); err != nil {
 		return nil, err

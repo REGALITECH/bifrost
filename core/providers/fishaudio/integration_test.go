@@ -15,9 +15,9 @@ import (
 // audio, asserting real audio bytes come back.
 //
 // It is skipped unless FISH_AUDIO_API_KEY is set. The synthesis voice is
-// discovered from ListModels (the account's own voices); override it with
-// FISH_AUDIO_VOICE_ID, and the model variant with FISH_AUDIO_MODEL (default
-// s2-pro).
+// discovered from ListModels with explicit self=true (the account's own voices);
+// override it with FISH_AUDIO_VOICE_ID, and the model variant with FISH_AUDIO_MODEL
+// (default s2-pro).
 //
 //	FISH_AUDIO_API_KEY=... go test ./core/providers/fishaudio/ -run TestFishAudioIntegration -v
 func TestFishAudioIntegration(t *testing.T) {
@@ -38,12 +38,13 @@ func TestFishAudioIntegration(t *testing.T) {
 		model = "s2-pro"
 	}
 
-	// 1. ListModels — this both validates the key and discovers a usable voice.
+	// 1. Explicit voice listing both validates the key and discovers a usable voice.
 	var voice string
 	t.Run("ListModels", func(t *testing.T) {
 		bctx := schemas.NewBifrostContext(ctx, schemas.NoDeadline)
 		resp, berrResp := client.ListModelsRequest(bctx, &schemas.BifrostListModelsRequest{
-			Provider: schemas.FishAudio,
+			Provider:    schemas.FishAudio,
+			ExtraParams: map[string]interface{}{"self": "true"},
 		})
 		if berrResp != nil {
 			t.Fatalf("ListModels failed (is the FISH_AUDIO_API_KEY valid?): %s", bifrostErrMessage(berrResp))
