@@ -29,6 +29,7 @@ As of 2026-08-20, relative to upstream commit `0a8a38c9` (2026-08-15):
 | Fish Audio catalog pricing derived from the datasheet's OpenRouter rows | `framework/modelcatalog/datasheet/derive.go`, `framework/modelcatalog/datasheet/derive_test.go`, `framework/modelcatalog/datasheet/testdata/pricing-openrouter-fishaudio.json`, `framework/modelcatalog/datasheet/sync.go` (one call site) |
 | Metronome builtin exporter and external usage delivery (2026-09) | `plugins/metronome/`, `transports/bifrost-http/{handlers/fishaudio_usage.go,server/plugins.go,lib/config.go}`, `transports/go.mod`, `transports/config.schema.json`, `transports/Dockerfile.local`, `Makefile`, `docs/plugins/metronome.mdx`, `docs/docs.json`, `examples/configs/withmetronome/` |
 | Metronome CI coverage and release smoke test | `.github/workflows/metronome-tests.yml`, `.github/workflows/scripts/{setup-go-workspace.sh,validate-schema-sync.sh,test-metronome-image.sh}`, `.github/dependabot.yml`, `.github/workflows/regali-docker-release.yml` |
+| Fish Audio CI coverage (provider, model catalog and governance unit tests; PR Tests runs only `core`) | `.github/workflows/fishaudio-tests.yml` |
 | GHCR release workflow (new file) | `.github/workflows/regali-docker-release.yml` |
 | `FISH_AUDIO_API_KEY` plumbed into upstream test jobs | `.github/workflows/pr-tests.yml`, `.github/workflows/release-pipeline.yml` |
 | Snyk workflow deleted (not usable in a fork) | `.github/workflows/snyk.yml` |
@@ -147,6 +148,7 @@ Active:
 | `run-core-tests.yml` | `workflow_dispatch`, gated on write access |
 | `pr-tests.yml` | `workflow_dispatch` |
 | `workflow-lint.yml` | pull requests touching `.github/workflows/**` |
+| `fishaudio-tests.yml` | pull requests to `main` touching the Fish Audio provider, `core/schemas`, `framework/modelcatalog` or `plugins/governance`; `workflow_dispatch` |
 
 Disabled:
 
