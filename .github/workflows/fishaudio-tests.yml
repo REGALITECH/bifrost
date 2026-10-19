@@ -1,0 +1,45 @@
+name: Fish Audio Tests
+
+# Unit tests for the Fish Audio provider and the model-catalog checks it relies
+# on. PR Tests only runs the core module, so the framework and governance
+# packages that decide whether a virtual key allows a Fish TTS model are run
+# here. Live Fish tests skip themselves without FISH_AUDIO_API_KEY.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "core/providers/fishaudio/**"
+      - "core/providers/utils/**"
+      - "core/schemas/**"
+      - "framework/modelcatalog/**"
+      - "plugins/governance/**"
+      - ".github/workflows/fishaudio-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fishaudio-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fishaudio:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.26.5'
+          cache-dependency-path: '**/go.sum'
+      - name: Set up local workspace
+        run: source .github/workflows/scripts/setup-go-workspace.sh
+      - name: Test Fish Audio provider
+        working-directory: core
+        run: go test ./providers/fishaudio/...
+      - name: Test model catalog (wildcard virtual keys, Fish pricing)
+        working-directory: framework
+        run: go test ./modelcatalog/...
+      - name: Test governance plugin (virtual-key model checks)
+        working-directory: plugins/governance
+        run: go test ./...

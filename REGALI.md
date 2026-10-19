@@ -25,11 +25,12 @@ As of 2026-08-20, relative to upstream commit `0a8a38c9` (2026-08-15):
 
 | Change | Paths |
 | --- | --- |
-| Fish Audio provider (speech + realtime WS) | `core/providers/fishaudio/`, `core/schemas/`, `core/internal/llmtests/`, `framework/streaming/audio.go`, `plugins/logging/operations.go`, `transports/bifrost-http/`, `transports/config.schema.json`, `ui/lib/constants/`, `docs/providers/supported-providers/fishaudio.mdx` |
+| Fish Audio provider (speech + realtime WS; fixed TTS model list in `core/schemas/fishaudio.go`) | `core/providers/fishaudio/`, `core/schemas/`, `core/internal/llmtests/`, `framework/streaming/audio.go`, `framework/modelcatalog/fishaudioallowlist_test.go`, `plugins/logging/operations.go`, `transports/bifrost-http/`, `transports/config.schema.json`, `ui/lib/constants/`, `docs/providers/supported-providers/fishaudio.mdx` |
 | Fish Audio catalog pricing derived from the datasheet's OpenRouter rows | `framework/modelcatalog/datasheet/derive.go`, `framework/modelcatalog/datasheet/derive_test.go`, `framework/modelcatalog/datasheet/testdata/pricing-openrouter-fishaudio.json`, `framework/modelcatalog/datasheet/sync.go` (one call site) |
 | Metronome builtin exporter (token, speech and Fish Audio realtime usage) and external usage delivery (2026-09, 2026-10) | `plugins/metronome/`, `transports/bifrost-http/{handlers/fishaudio_usage.go,handlers/metronomerealtime_test.go,server/plugins.go,lib/config.go}`, `transports/go.mod`, `transports/config.schema.json`, `transports/Dockerfile.local`, `Makefile`, `docs/plugins/metronome.mdx`, `docs/docs.json`, `examples/configs/withmetronome/` |
 | Metronome CI coverage and release smoke test | `.github/workflows/metronome-tests.yml`, `.github/workflows/scripts/{setup-go-workspace.sh,validate-schema-sync.sh,test-metronome-image.sh}`, `.github/dependabot.yml`, `.github/workflows/regali-docker-release.yml` |
 | TypeSafe decisions: replay-safe Metronome billing, per-tenant idempotency keys, exact-body native route; Metronome exports decision input tokens | `core/providers/typesafe/replay.go` (new), `core/providers/typesafe/typesafe.go`, `core/schemas/decision.go`, `core/decisionemulation.go`, `core/bifrost.go` (fallback copy), `transports/bifrost-http/integrations/typesafe.go`, `plugins/metronome/`, `framework/modelcatalog/datasheet/decision_cost_test.go` (new), `docs/plugins/metronome.mdx` |
+| Fish Audio CI coverage (provider, model catalog and governance unit tests; PR Tests runs only `core`) | `.github/workflows/fishaudio-tests.yml` |
 | GHCR release workflow (new file) | `.github/workflows/regali-docker-release.yml` |
 | `FISH_AUDIO_API_KEY` plumbed into upstream test jobs | `.github/workflows/pr-tests.yml`, `.github/workflows/release-pipeline.yml` |
 | Snyk workflow deleted (not usable in a fork) | `.github/workflows/snyk.yml` |
@@ -83,11 +84,12 @@ break shows up at compile time or in the transformation tests.
 
 ```
 (cd core && go build ./... && go test ./providers/fishaudio/)
-(cd framework && go test ./modelcatalog/datasheet/)
+(cd framework && go test ./modelcatalog/ ./modelcatalog/datasheet/)
 ```
 
-Upstream reshapes the datasheet loader often; the derivation call site and tests catch a break at
-compile or test time.
+Upstream reshapes the datasheet loader and the model catalog often; the derivation call site and
+tests catch a break at compile or test time. `fishaudioallowlist_test.go` pins that a wildcard
+virtual key accepts the fixed Fish Audio TTS models (REGALITECH/etla#256).
 
 Provider tests that call a live API skip themselves when their key is absent, so this passes with no
 API key set: the four `realtime_test.go` unit tests run, `TestFishAudio` and `TestFishAudioIntegration`
@@ -147,6 +149,7 @@ Active:
 | `run-core-tests.yml` | `workflow_dispatch`, gated on write access |
 | `pr-tests.yml` | `workflow_dispatch` |
 | `workflow-lint.yml` | pull requests touching `.github/workflows/**` |
+| `fishaudio-tests.yml` | pull requests to `main` touching the Fish Audio provider, `core/schemas`, `framework/modelcatalog` or `plugins/governance`; `workflow_dispatch` |
 
 Disabled:
 
