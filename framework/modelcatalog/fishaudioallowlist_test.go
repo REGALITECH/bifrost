@@ -14,11 +14,24 @@ import (
 
 // refreshFishLiveModels stores the Fish Audio provider's filtered and
 // unfiltered model lists per key, mirroring FetchAndStoreLiveForKey.
-func refreshFishLiveModels(mc *ModelCatalog, keys []schemas.Key) {
+func refreshFishLiveModels(t *testing.T, mc *ModelCatalog, keys []schemas.Key) {
+	t.Helper()
+	provider := fishaudio.NewFishAudioProvider(&schemas.ProviderConfig{}, nil)
+	ctx := schemas.NewBifrostContext(t.Context(), schemas.NoDeadline)
+	t.Cleanup(ctx.Cancel)
 	mc.SetKeyConfigForProvider(schemas.FishAudio, keys)
 	for _, key := range keys {
 		for _, unfiltered := range []bool{false, true} {
-			resp := fishaudio.ToBifrostListModelsResponse(schemas.FishAudio, key.Models, key.BlacklistedModels, key.Aliases, unfiltered)
+			resp, err := provider.ListModels(ctx, []schemas.Key{key}, &schemas.BifrostListModelsRequest{
+				Provider:   schemas.FishAudio,
+				Unfiltered: unfiltered,
+			})
+			if err != nil {
+				t.Fatalf("ListModels(key=%q, unfiltered=%t) failed: %v", key.ID, unfiltered, err)
+			}
+			if resp == nil {
+				t.Fatalf("ListModels(key=%q, unfiltered=%t) returned no response", key.ID, unfiltered)
+			}
 			mc.UpsertLiveFromResponse(schemas.FishAudio, key.ID, unfiltered, resp)
 		}
 	}
@@ -63,7 +76,7 @@ func TestFishAudioAllowlist_WildcardVirtualKey(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// No datasheet rows for fishaudio: the result must not depend on pricing data.
 			mc := NewTestCatalog(nil)
-			refreshFishLiveModels(mc, tc.keys)
+			refreshFishLiveModels(t, mc, tc.keys)
 			for _, model := range tc.allowed {
 				if !mc.IsModelAllowedForProvider(schemas.FishAudio, model, nil, wildcard) {
 					t.Errorf("wildcard virtual key denied %q", model)
