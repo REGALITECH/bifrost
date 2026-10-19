@@ -25,7 +25,7 @@ As of 2026-08-20, relative to upstream commit `0a8a38c9` (2026-08-15):
 
 | Change | Paths |
 | --- | --- |
-| Fish Audio provider (speech + realtime WS) | `core/providers/fishaudio/`, `core/schemas/`, `core/internal/llmtests/`, `framework/streaming/audio.go`, `plugins/logging/operations.go`, `transports/bifrost-http/`, `transports/config.schema.json`, `ui/lib/constants/`, `docs/providers/supported-providers/fishaudio.mdx` |
+| Fish Audio provider (speech + realtime WS; fixed TTS model list in `core/schemas/fishaudio.go`) | `core/providers/fishaudio/`, `core/schemas/`, `core/internal/llmtests/`, `framework/streaming/audio.go`, `framework/modelcatalog/fishaudioallowlist_test.go`, `plugins/logging/operations.go`, `transports/bifrost-http/`, `transports/config.schema.json`, `ui/lib/constants/`, `docs/providers/supported-providers/fishaudio.mdx` |
 | Fish Audio catalog pricing derived from the datasheet's OpenRouter rows | `framework/modelcatalog/datasheet/derive.go`, `framework/modelcatalog/datasheet/derive_test.go`, `framework/modelcatalog/datasheet/testdata/pricing-openrouter-fishaudio.json`, `framework/modelcatalog/datasheet/sync.go` (one call site) |
 | Metronome builtin exporter and external usage delivery (2026-09) | `plugins/metronome/`, `transports/bifrost-http/{handlers/fishaudio_usage.go,server/plugins.go,lib/config.go}`, `transports/go.mod`, `transports/config.schema.json`, `transports/Dockerfile.local`, `Makefile`, `docs/plugins/metronome.mdx`, `docs/docs.json`, `examples/configs/withmetronome/` |
 | Metronome CI coverage and release smoke test | `.github/workflows/metronome-tests.yml`, `.github/workflows/scripts/{setup-go-workspace.sh,validate-schema-sync.sh,test-metronome-image.sh}`, `.github/dependabot.yml`, `.github/workflows/regali-docker-release.yml` |
@@ -82,11 +82,12 @@ break shows up at compile time or in the transformation tests.
 
 ```
 (cd core && go build ./... && go test ./providers/fishaudio/)
-(cd framework && go test ./modelcatalog/datasheet/)
+(cd framework && go test ./modelcatalog/ ./modelcatalog/datasheet/)
 ```
 
-Upstream reshapes the datasheet loader often; the derivation call site and tests catch a break at
-compile or test time.
+Upstream reshapes the datasheet loader and the model catalog often; the derivation call site and
+tests catch a break at compile or test time. `fishaudioallowlist_test.go` pins that a wildcard
+virtual key accepts the fixed Fish Audio TTS models (REGALITECH/etla#256).
 
 Provider tests that call a live API skip themselves when their key is absent, so this passes with no
 API key set: the four `realtime_test.go` unit tests run, `TestFishAudio` and `TestFishAudioIntegration`

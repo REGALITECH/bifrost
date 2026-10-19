@@ -8,7 +8,7 @@ icon: "fish"
 
 Fish Audio is a specialized **audio provider** for text-to-speech. Unlike most TTS providers, Fish synthesizes over a **WebSocket** (`/v1/tts/live`) that exchanges **MessagePack-encoded** events. Bifrost fully encapsulates this protocol inside the provider, so Fish Audio is consumed through the standard Speech / SpeechStream interface like any other TTS provider. Conversions include:
 
-- **Model header mapping** - The Bifrost `model` becomes the Fish `model` header (`s1` or `s2-pro`)
+- **Model header mapping** - The Bifrost `model` becomes the Fish `model` header (`s1`, `s2-pro`, `s2.1-pro`, or `s2.1-pro-free`)
 - **Voice configuration** - The Bifrost `voice` becomes Fish's `reference_id` (voice model ID)
 - **Response format handling** - `mp3`, `pcm`, `wav`, `opus` (defaults to `mp3`)
 - **Synthesis parameters** - `temperature`, `top_p`, `normalize`, `sample_rate`, `chunk_length`, `mp3_bitrate`, `latency`, and prosody (`speed`, `volume`)
@@ -20,7 +20,7 @@ Fish Audio is a specialized **audio provider** for text-to-speech. Unlike most T
 |-----------|---------------|-----------|----------|
 | Speech (TTS) | ✅ | ✅ | `wss://api.fish.audio/v1/tts/live` |
 | Realtime (TTS) | - | ✅ | `wss://api.fish.audio/v1/tts/live` (via Bifrost `/v1/realtime`) |
-| List Models | ✅ | - | `GET /model` |
+| List Models | ✅ | - | - (fixed list, no Fish request) |
 | Transcriptions (STT) | ❌ | ❌ | - |
 | Chat Completions | ❌ | ❌ | - |
 | Responses API | ❌ | ❌ | - |
@@ -97,39 +97,46 @@ case schemas.FishAudio:
 </Tab>
 </Tabs>
 
-For text-to-speech calls, the Bifrost `model` is the Fish Audio model variant (`s1` or `s2-pro`, default `s2-pro`), and the Bifrost `voice` is the Fish `reference_id` (voice model ID).
+For text-to-speech calls, the Bifrost `model` is the Fish Audio model variant (default `s2-pro`), and the Bifrost `voice` is the Fish `reference_id` (voice model ID).
 
-### Registering TTS models
+### TTS models
 
-When a virtual key has `allowed_models: ["*"]` for `fishaudio`, it allows the models listed in the Fish Audio provider key's `models`. Adding a model to that list registers it in Bifrost. Key updates apply immediately, without a restart.
+Fish Audio has no API that lists its TTS model variants (`GET /model` lists voices, which are passed as `reference_id`, not as models). Bifrost therefore serves a fixed list, `schemas.FishAudioTTSModels` in `core/schemas/fishaudio.go`:
 
-If the provider key's `models` is `["*"]`, the allowed set falls back to the datasheet's derived `fishaudio/*` rows: `s1`, `s2-pro`, and `s2.1-pro` (see [Pricing](#pricing)). `"*"` cannot be combined with other entries in `models`. To register a model that is not in the datasheet, switch the provider key to an explicit list:
+| Model | Notes |
+|-------|-------|
+| `s2.1-pro` | Fish's recommended production model |
+| `s2.1-pro-free` | Same model as `s2.1-pro` on Fish's free developer tier (fair-use limits, no latency guarantees) |
+| `s2-pro` | Previous generation |
+| `s1` | Deprecated; Fish retires it on 2026-12-31 and then serves `s1` requests with `s2.1-pro` |
+
+[List Models](#2-list-models) returns this list, filtered by each provider key's `models`, blacklisted models and aliases, and Bifrost stores the result as the provider's live model list. A virtual key with `allowed_models: ["*"]` for `fishaudio` therefore allows these models, including when the provider key has aliases or there is more than one Fish key. A model outside the list is rejected with `model_blocked`. This matters because Fish itself does not reject an unknown `model` header: it falls back to `s2.1-pro` and bills it.
+
+To add a Fish Audio model:
+
+1. Add it to `FishAudioTTSModels` (keep the list in sync with the `model` enum of `POST /v1/tts` in Fish's [OpenAPI spec](https://docs.fish.audio/api-reference/openapi.json)) and release Bifrost. Its pricing is derived from `openrouter/fish-audio/<model>` when that row is priced (see [Pricing](#pricing)); otherwise register a governance pricing override.
+2. Then switch the TTS service (gofish) to the new model using `FISH_SPEECH_MODEL_VARIANT`.
+
+Switching gofish first causes TTS to fail with `model_blocked` if the model is not registered, or records no cost if the model has no pricing.
+
+To allow a model before a release, list it explicitly in the provider key's `models`. `"*"` cannot be combined with other entries, so list every model the key should serve:
 
 ```json
 {
   "name": "fishaudio-key-1",
   "value": "env.FISH_AUDIO_API_KEY",
-  "models": ["s1", "s2-pro", "s2.1-pro", "<new-model>"],
+  "models": ["s2-pro", "s2.1-pro", "<new-model>"],
   "weight": 1.0
 }
 ```
-
-A model that is neither registered nor derived from the datasheet is rejected with `model_blocked`. A governance pricing override works even without a datasheet row, so register a pricing override to price the new model.
-
-Roll out each new Fish Audio model in this order in each environment:
-
-1. In Bifrost, add the model to the Fish Audio provider key's `models` and register its pricing override.
-2. Then switch the TTS service (gofish) to the new model using `FISH_SPEECH_MODEL_VARIANT`.
-
-Switching gofish first causes TTS to fail with `model_blocked` if the model is not registered, or records no cost if the model has no pricing.
 
 ---
 
 ## Pricing
 
 Fish Audio speech cost is `input_cost_per_character` × billable UTF-8 bytes, reported as `input_chars`.
-At every datasheet sync, Bifrost derives each `fishaudio/<model>` catalog row from the corresponding `openrouter/fish-audio/<model>` row.
-The derived models are `s1`, `s2-pro`, and `s2.1-pro`.
+At every datasheet sync, Bifrost derives each `fishaudio/<model>` catalog row from the corresponding `openrouter/fish-audio/<model>` row, for every model in `FishAudioTTSModels` whose OpenRouter row is priced.
+Today these are `s1`, `s2-pro`, and `s2.1-pro`. `s2.1-pro-free` is free and has no priced row, so it records no cost.
 As of 2026-09, the price is USD 15 per 1M UTF-8 bytes, tracking OpenRouter's resale price, which matches Fish Audio's list price.
 A governance pricing override still takes precedence when configured.
 If upstream adds a native `fishaudio/<model>` row, it takes precedence over the derived row.
@@ -143,7 +150,7 @@ If upstream adds a native `fishaudio/<model>` row, it takes precedence over the 
 | Parameter | Mapping | Notes |
 |-----------|---------|-------|
 | `input.input` | `TextEvent.text` | The text to convert to speech (required) |
-| `model` | `model` header | Model variant: `s1` or `s2-pro` (default `s2-pro`) |
+| `model` | `model` header | Model variant from [TTS models](#tts-models) (default `s2-pro`) |
 | `voice` | `request.reference_id` | Fish voice model ID |
 | `response_format` | `request.format` | `mp3`, `pcm`, `wav`, `opus` (default `mp3`) |
 | `speed` | `request.prosody.speed` | 0.5–2.0 |
@@ -275,7 +282,7 @@ model: s2-pro
 
 **HTTP / WebSocket Settings:**
 - **Base URL**: `https://api.fish.audio` (default); the WebSocket URL is derived as `wss://api.fish.audio/v1/tts/live`
-- **List Models endpoint**: `GET /model`
+- **List Models**: fixed list (`schemas.FishAudioTTSModels`), no Fish request
 - **Default model variant**: `s2-pro`
 
 ---
@@ -291,7 +298,7 @@ model: s2-pro
 
 <Accordion title="Model header vs voice">
 **Severity**: Medium
-**Behavior**: The Bifrost `model` maps to Fish's `model` header (`s1`/`s2-pro`), while the Bifrost `voice` maps to Fish's `reference_id` (voice model ID).
+**Behavior**: The Bifrost `model` maps to Fish's `model` header (see [TTS models](#tts-models)), while the Bifrost `voice` maps to Fish's `reference_id` (voice model ID).
 **Impact**: Set both `model` and `voice` for predictable output. `model` defaults to `s2-pro` if omitted.
 **Code**: `fishaudio/fishaudio.go` (`resolveModel`), `fishaudio/speech.go` (`ToFishAudioSpeechRequest`)
 </Accordion>
@@ -307,53 +314,17 @@ model: s2-pro
 
 # 2. List Models
 
-## Request Parameters
-
-By default, with no Fish query parameters (`ExtraParams` empty), ListModels makes exactly one `GET /model?self=true&page_size=1&page_number=1` request per key to validate it. A non-200 response marks the key as failed. The returned voices are ignored; ListModels returns only the models and aliases configured on the provider key, prefixed with `fishaudio/` (`fishaudio/<model>`). A key with `models: ["*"]` and no aliases returns no models. Bifrost also stores this result as the provider's live model list.
-
-Passing any of the Fish query parameters below (forwarded via `ExtraParams`) opts into paginated voice listing. In this mode, `self` defaults to `true` for the **account's own** voices; `self=false` lists the **public** catalog. Use Fish filters to narrow the (very large) catalog:
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `self` | bool | `true` (default) = your own voices; `false` = public catalog |
-| `title` | string | Filter by title/search term |
-| `language` | string | Filter by language (e.g. `en`, `ja`) |
-| `tag` | string | Filter by tag |
-| `sort_by` | string | Sort order (e.g. `score`, `created_at`) |
-
-Pagination is capped at 20 pages (≈2000 models); when a public listing is truncated, a warning is logged suggesting you narrow it with a filter.
+ListModels makes no request to Fish. It returns the fixed [TTS model list](#tts-models) as `fishaudio/<model>`, filtered by each provider key's `models`, blacklisted models and aliases through the standard pipeline. Query parameters are ignored.
 
 ```bash
-# Own voices
-curl "http://localhost:8080/v1/models?provider=fishaudio&self=true"
-
-# Public English voices, searched by title
-curl "http://localhost:8080/v1/models?provider=fishaudio&self=false&language=en&title=news"
-
-# Configured models only (key validation)
 curl "http://localhost:8080/v1/models?provider=fishaudio"
 ```
 
-## Response Conversion
+For a key with `models: ["*"]`, this returns `fishaudio/s1`, `fishaudio/s2-pro`, `fishaudio/s2.1-pro` and `fishaudio/s2.1-pro-free`. An alias on the key is added next to these models.
 
-For explicit voice listing only, Fish Audio returns voice entries such as:
+Because no request is made, ListModels does not validate the key. An invalid key surfaces on the first speech request as a WebSocket handshake error.
 
-```json
-{
-  "total": 1,
-  "items": [
-    {
-      "_id": "802e3bc2b27e49c2995d23ef70e6ac89",
-      "title": "My Voice",
-      "type": "tts",
-      "languages": ["en"]
-    }
-  ],
-  "has_more": false
-}
-```
-
-In explicit voice listing, each item's `_id` becomes the Bifrost model ID (`fishaudio/<_id>`) and `title` becomes the display name. This mapping does not apply to the default configured-models response.
+Bifrost does not list Fish voices. To find a voice's `reference_id`, call Fish's `GET /model` directly (for example with `self=true` for the account's own voices) or use the Fish Audio dashboard.
 
 ---
 
