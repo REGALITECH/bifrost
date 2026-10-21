@@ -3,9 +3,7 @@ package fishaudio
 // This file defines ALL Fish Audio wire types.
 //
 // The /v1/tts/live WebSocket exchanges MessagePack-encoded events, each a map
-// with an "event" discriminator (msgpack tags). The HTTP /model endpoint (used
-// by ListModels) and HTTP error bodies are JSON (json tags). The two encodings
-// are kept in separate structs with the appropriate struct tags.
+// with an "event" discriminator (msgpack tags).
 
 // # SPEECH (WEBSOCKET) TYPES
 
@@ -63,30 +61,4 @@ type FishAudioServerEvent struct {
 	Audio   []byte `msgpack:"audio,omitempty"`
 	Reason  string `msgpack:"reason,omitempty"`
 	Message string `msgpack:"message,omitempty"`
-}
-
-// # MODELS TYPES
-
-// FishAudioModel is a single voice model entry from GET /model.
-type FishAudioModel struct {
-	ID        string   `json:"_id"`
-	Title     string   `json:"title"`
-	Type      string   `json:"type"`
-	Languages []string `json:"languages"`
-}
-
-// FishAudioListModelsResponse is the paginated response from GET /model.
-type FishAudioListModelsResponse struct {
-	Total   int              `json:"total"`
-	Items   []FishAudioModel `json:"items"`
-	HasMore bool             `json:"has_more"`
-}
-
-// # ERROR TYPES
-
-// FishAudioError is the error body returned by Fish Audio's HTTP endpoints.
-// Fish is not fully consistent across endpoints, so both shapes are accepted.
-type FishAudioError struct {
-	Detail  string `json:"detail,omitempty"`
-	Message string `json:"message,omitempty"`
 }

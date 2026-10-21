@@ -8,14 +8,14 @@ package datasheet
 
 import "github.com/maximhq/bifrost/core/schemas"
 
-// fishAudioPricingModels lists TTS models whose pricing is derived from OpenRouter.
-var fishAudioPricingModels = []string{"s1", "s2-pro", "s2.1-pro"}
-
-// deriveFishAudioPricing adds Fish Audio pricing from OpenRouter rows without
-// replacing native Fish Audio rows and returns the number of entries it added.
+// deriveFishAudioPricing adds Fish Audio pricing from OpenRouter rows for the
+// TTS models the provider serves (schemas.FishAudioTTSModels), without
+// replacing native Fish Audio rows, and returns the number of entries it added.
+// A model without a priced OpenRouter row (e.g. the free s2.1-pro-free tier) is
+// skipped.
 func deriveFishAudioPricing(pricing map[string]Entry, logger schemas.Logger) int {
 	derived := 0
-	for _, model := range fishAudioPricingModels {
+	for _, model := range schemas.FishAudioTTSModels() {
 		sourceKey := "openrouter/fish-audio/" + model
 		source, ok := pricing[sourceKey]
 		if !ok {

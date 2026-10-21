@@ -98,13 +98,6 @@ rule; `DELETE` removes it so the next applicable override or catalog rate is
 used. Existing historical logs are not repriced. An override also works for a model with no
 catalog entry when its applicable rates are supplied.
 
-This configuration prices reported **tokens**. It does not convert credit
-packages or `X-System-One-Credits` into tokens or USD. Remove the experimental
-`typesafe_config.usd_per_credit` setting when moving from the credit-pricing
-branch; there is no automatic conversion from a credit price to a token price.
-The obsolete `typesafe_config_json` column, if already created by that branch,
-may remain unused; this change does not drop it or existing provider data.
-
 Metronome continues to receive token usage through the existing exporter.
 Pricing Overrides control Bifrost spend; they do not update Metronome rate
 cards. See [Metronome](/plugins/metronome) for the separate billing setup.
