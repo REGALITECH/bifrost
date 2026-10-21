@@ -11,12 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { ProviderIconType, RenderProviderIcon } from "@/lib/constants/icons";
 import { getProviderLabel, RequestTypeLabels } from "@/lib/constants/logs";
-import {
-	getErrorMessage,
-	useCreatePricingOverrideMutation,
-	useGetProvidersQuery,
-	useUpdatePricingOverrideMutation,
-} from "@/lib/store";
+import { getErrorMessage, useCreatePricingOverrideMutation, useGetProvidersQuery, useUpdatePricingOverrideMutation } from "@/lib/store";
 import { useGetAllKeysQuery } from "@/lib/store/apis/providersApi";
 import { getUserPicker } from "@/lib/registries/userPicker";
 import { ModelProvider, RequestType } from "@/lib/types/config";
@@ -50,6 +45,10 @@ export const REQUEST_TYPE_GROUPS = [
 		types: ["rerank"],
 	},
 	{
+		label: "Decisions",
+		types: ["decisions"],
+	},
+	{
 		label: "Audio",
 		types: ["speech", "transcription"],
 	},
@@ -79,13 +78,13 @@ export const PRICING_FIELDS = [
 		key: "input_cost_per_token",
 		label: "Input / token",
 		group: "chat",
-		requestTypeGroups: ["chat", "embedding", "rerank", "audio", "image", "video"],
+		requestTypeGroups: ["chat", "embedding", "rerank", "decisions", "audio", "image", "video"],
 	},
 	{
 		key: "output_cost_per_token",
 		label: "Output / token",
 		group: "chat",
-		requestTypeGroups: ["chat", "rerank", "audio", "image", "video"],
+		requestTypeGroups: ["chat", "rerank", "decisions", "audio", "image", "video"],
 	},
 	{ key: "input_cost_per_token_batches", label: "Input / token (batch)", group: "chat", requestTypeGroups: ["chat"] },
 	{ key: "output_cost_per_token_batches", label: "Output / token (batch)", group: "chat", requestTypeGroups: ["chat"] },
@@ -276,8 +275,18 @@ export const PRICING_FIELDS = [
 		group: "image",
 		requestTypeGroups: ["image"],
 	},
-	{ key: "output_cost_per_image_above_2048_and_2048_pixels", label: "Output / image (>2048px)", group: "image", requestTypeGroups: ["image"] },
-	{ key: "output_cost_per_image_above_4096_and_4096_pixels", label: "Output / image (>4096px)", group: "image", requestTypeGroups: ["image"] },
+	{
+		key: "output_cost_per_image_above_2048_and_2048_pixels",
+		label: "Output / image (>2048px)",
+		group: "image",
+		requestTypeGroups: ["image"],
+	},
+	{
+		key: "output_cost_per_image_above_4096_and_4096_pixels",
+		label: "Output / image (>4096px)",
+		group: "image",
+		requestTypeGroups: ["image"],
+	},
 	{ key: "output_cost_per_image_low_quality", label: "Output / image (low quality)", group: "image", requestTypeGroups: ["image"] },
 	{ key: "output_cost_per_image_medium_quality", label: "Output / image (medium quality)", group: "image", requestTypeGroups: ["image"] },
 	{ key: "output_cost_per_image_high_quality", label: "Output / image (high quality)", group: "image", requestTypeGroups: ["image"] },
@@ -615,8 +624,8 @@ export default function PricingOverrideSheet({ open, onOpenChange, editingOverri
 				providerKeyID: scopeLock.providerKeyID ?? "",
 				scopeRoot:
 					scopeLock.scopeKind === "virtual_key" ||
-						scopeLock.scopeKind === "virtual_key_provider" ||
-						scopeLock.scopeKind === "virtual_key_provider_key"
+					scopeLock.scopeKind === "virtual_key_provider" ||
+					scopeLock.scopeKind === "virtual_key_provider_key"
 						? "virtual_key"
 						: scopeLock.scopeKind === "user" || scopeLock.scopeKind === "user_provider" || scopeLock.scopeKind === "user_provider_key"
 							? "user"

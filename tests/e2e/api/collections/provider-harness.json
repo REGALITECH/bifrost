@@ -83,6 +83,9 @@
           "        shape = 'gemini-generate-content';",
           "        var parts = j.candidates[0].content.parts || [];",
           "        hasContent = parts.some(function (p) { return p && (p.text || p.functionCall || p.executableCode); });",
+          "    } else if (j.answers && j.usage) {",
+          "        shape = 'decisions';",
+          "        hasContent = Array.isArray(j.answers) ? j.answers.length > 0 : Object.keys(j.answers).length > 0;",
           "    } else if (typeof j.output_text === 'string' && j.output_text.length > 0) {",
           "        shape = 'openai-responses-output_text';",
           "        hasContent = true;",
@@ -129040,6 +129043,68 @@
                 "messages"
               ]
             }
+          }
+        }
+      ]
+    },
+    {
+      "name": "52. TypeSafe decision token pricing (PR #20)",
+      "description": "Use a configured typesafe provider with a token-based endpoint and API key, without a provider unit price. These cases pin the unified and native usage shapes consumed by model pricing and Pricing Overrides. The Go fixture separately pins removal of host-specific price requirements. Paid live execution is opt-in.",
+      "item": [
+        {
+          "name": "TypeSafe jev-latest token pricing unified - #20",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "type": "text/javascript",
+              "exec": [
+                "if ([401, 403, 429, 500, 502, 503, 504, 529].indexOf(pm.response.code) !== -1) { return; }",
+                "pm.test('decision retains tokens for catalog pricing without a provider unit price', function () {",
+                "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                "  var body = pm.response.json();",
+                "  pm.expect(body.answers[0].type).to.equal('predicate');",
+                "  pm.expect(body.usage.prompt_tokens).to.be.above(0);",
+                "  pm.expect(body.usage.total_tokens).to.equal(body.usage.prompt_tokens + body.usage.completion_tokens);",
+                "});"
+              ]
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"typesafe/jev-latest\",\"input\":\"The light is green.\",\"questions\":[{\"name\":\"green\",\"type\":\"predicate\",\"instructions\":\"Is the light green?\"}]}"
+            },
+            "url": {"raw": "{{baseUrl}}/v1/decisions", "host": ["{{baseUrl}}"], "path": ["v1", "decisions"]}
+          }
+        },
+        {
+          "name": "TypeSafe jev-latest token pricing native - #20",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "type": "text/javascript",
+              "exec": [
+                "if ([401, 403, 429, 500, 502, 503, 504, 529].indexOf(pm.response.code) !== -1) { return; }",
+                "pm.test('native decision retains reported input and output usage', function () {",
+                "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.be.below(400);",
+                "  var body = pm.response.json();",
+                "  pm.expect(body.answers.green.type).to.equal('noul');",
+                "  pm.expect(body.usage.input_tokens).to.be.above(0);",
+                "  pm.expect(body.usage.output_tokens).to.be.at.least(0);",
+                "});"
+              ]
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"model\":\"typesafe/jev-latest\",\"state\":\"The light is green.\",\"questions\":{\"green\":{\"type\":\"noul\",\"instructions\":\"Is the light green?\"}}}"
+            },
+            "url": {"raw": "{{baseUrl}}/typesafe/v1/systemone", "host": ["{{baseUrl}}"], "path": ["typesafe", "v1", "systemone"]}
           }
         }
       ]

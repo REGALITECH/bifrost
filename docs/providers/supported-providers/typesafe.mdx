@@ -52,57 +52,62 @@ Configure TypeSafe as a provider with a bearer API key:
 }
 ```
 
-### Hosted System One credit pricing
+### Model pricing and Pricing Overrides
 
-Hosted System One (`system-one.dev` and its subdomains, matched on the parsed
-host after IDNA normalization, so Unicode spellings that resolve to it count;
-a host that cannot be parsed or normalized is treated as hosted) bills in credits, which it reports only in the `X-System-One-Credits`
-response header. Set the USD price of one credit as an exact decimal string in
-`typesafe_config` (provider config, also in the `typesafe_config` field of the
-provider API):
+ETLA sends decisions through Bifrost to the configured TypeSafe endpoint
+(`https://api.typesafe.ai` by default). The provider reports input and output
+token usage; Bifrost calculates spend using the existing model catalog and
+[Pricing Overrides](/providers/custom-pricing). Provider settings contain the
+connection and credentials, not unit prices.
 
-```json
-{
-  "providers": {
-    "typesafe": {
-      "network_config": { "base_url": "https://api.system-one.dev" },
-      "typesafe_config": { "usd_per_credit": "0.002" },
-      "keys": [{ "name": "System One", "value": "env.SYSTEM_ONE_API_KEY", "weight": 1, "models": ["*"] }]
+In **Models → Pricing Overrides**, create an override, choose the registered
+provider, enter the routed model ID (for example `jev-latest`), and select
+**Decisions**. Set **Input / token** and **Output / token** in USD per token.
+For example, a rate of $0.042 per million input tokens is `0.000000042` per
+token. Set output to `0` when it is free; an empty field keeps the catalog rate.
+Use the price agreed for your API account; the following numbers are examples.
+
+The screen uses the same management API:
+
+```bash
+curl -X POST http://localhost:8080/api/governance/pricing-overrides \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Jev input pricing",
+    "scope_kind": "provider",
+    "provider_id": "typesafe",
+    "match_type": "exact",
+    "pattern": "jev-latest",
+    "request_types": ["decisions"],
+    "patch": {
+      "input_cost_per_token": 0.000000042,
+      "output_cost_per_token": 0
     }
-  }
-}
+  }'
 ```
 
-The value above is an example; no price is published, so the setting is unset
-by default. Behavior on a hosted endpoint:
+For a custom provider such as `etla-system-one`, use that registered name in
+`provider_id`. The model pattern is the routed model ID without the provider
+prefix. A `jev-*` wildcard can cover both aliases and versioned Jev models.
+Virtual-key scopes can provide tenant-specific rates using the same API.
 
-- **Price set:** the decision's cost is credits × price, computed in exact
-  decimal arithmetic and converted to a float only at the end. It is used for
-  spend, logs and governance budgets in place of token rates, and the Metronome
-  event carries it as `cost_usd`. A malformed header (not a plain non-negative
-  decimal) or a missing header fails the request with an error naming the
-  header, because the decision was already charged and cannot be priced
-  safely. Bifrost logs the upstream request ID (`x-typesafe-request-id`) and the
-  raw header value so the charge can be reconciled. The only exception is an
-  idempotent replay (`X-Idempotency-Replayed: true`), which is not charged
-  again; without the header it keeps its token usage.
-- **Price unset:** decision requests are rejected before they are sent, with a
-  configuration error naming `typesafe_config.usd_per_credit`. Hosted usage is
-  never billed as zero.
+The rule is stored in `governance_pricing_overrides`, separately from catalog
+rows in `governance_model_pricing`, and applied to subsequent cost calculations
+for logs and budgets. `PUT /api/governance/pricing-overrides/{id}` updates the
+rule; `DELETE` removes it so the next applicable override or catalog rate is
+used. Existing historical logs are not repriced. An override also works for a model with no
+catalog entry when its applicable rates are supplied.
 
-Other endpoints, including api.typesafe.ai and self-hosted ones, ignore both the
-header and the setting and keep native token pricing. Hosting is decided by the
-configured base URL's host, so a base URL that points at a proxy in front of
-system-one.dev counts as non-hosted: its decisions are priced by tokens and no
-credits are read. Point the provider at system-one.dev directly to bill in
-credits.
+This configuration prices reported **tokens**. It does not convert credit
+packages or `X-System-One-Credits` into tokens or USD. Remove the experimental
+`typesafe_config.usd_per_credit` setting when moving from the credit-pricing
+branch; there is no automatic conversion from a credit price to a token price.
+The obsolete `typesafe_config_json` column, if already created by that branch,
+may remain unused; this change does not drop it or existing provider data.
 
-<Warning>
-Metronome bills credit-priced decisions only through the `cost_usd` billable
-metric; their token counts are zero. Set up and verify that metric before
-configuring `usd_per_credit`. See the Metronome plugin's "Hosted System One
-spend" section.
-</Warning>
+Metronome continues to receive token usage through the existing exporter.
+Pricing Overrides control Bifrost spend; they do not update Metronome rate
+cards. See [Metronome](/plugins/metronome) for the separate billing setup.
 
 ### Custom TypeSafe Providers
 

@@ -43,9 +43,6 @@ type TokenUsage struct {
 	// RequestType is set only for decision events ("decisions") so billable
 	// metrics can tell them apart; generation events keep their existing shape.
 	RequestType string `json:"request_type,omitempty"`
-	// CostUSD is the exact decimal USD spend of a hosted System One decision
-	// priced from credits; omitted for every other event.
-	CostUSD string `json:"cost_usd,omitempty"`
 }
 
 type requestKey string
@@ -166,18 +163,12 @@ func (p *Plugin) PostLLMHook(ctx *schemas.BifrostContext, resp *schemas.BifrostR
 		if schemas.ResolveBaseProvider(ctx, extra.Provider) == schemas.Typesafe {
 			usage.OutputTokens = 0
 		}
-		// Hosted System One bills in credits, carried as cost_usd. Its token
-		// counts are not billable, so they are zeroed to keep token metrics
-		// from charging the same decision twice.
-		if usage.CostUSD != "" {
-			usage.InputTokens, usage.CachedInputTokens, usage.CachedWriteTokens = 0, 0, 0
-		}
 	}
 	if usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.CachedInputTokens < 0 || usage.CachedWriteTokens < 0 {
 		p.logger.Warn("[metronome] skipped inconsistent token counts")
 		return resp, upstreamErr, nil
 	}
-	if usage.InputTokens+usage.OutputTokens+usage.CachedInputTokens+usage.CachedWriteTokens == 0 && usage.CostUSD == "" {
+	if usage.InputTokens+usage.OutputTokens+usage.CachedInputTokens+usage.CachedWriteTokens == 0 {
 		return resp, upstreamErr, nil
 	}
 	customer, _ := ctx.Value(schemas.BifrostContextKeyGovernanceVirtualKeyID).(string)
@@ -266,7 +257,6 @@ func extractUsage(resp *schemas.BifrostResponse) (TokenUsage, bool) {
 	u := TokenUsage{}
 	if chat != nil {
 		u.InputTokens, u.OutputTokens = chat.PromptTokens, chat.CompletionTokens
-		u.CostUSD = chat.CreditCostUSD
 		if d := chat.PromptTokensDetails; d != nil {
 			u.CachedInputTokens, u.CachedWriteTokens = d.CachedReadTokens, d.CachedWriteTokens
 		}

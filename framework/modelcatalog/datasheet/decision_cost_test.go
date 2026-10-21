@@ -7,6 +7,7 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestCalculateCostForUsage_TypesafeDecision pins that a decision is priced
@@ -28,26 +29,49 @@ func TestCalculateCostForUsage_TypesafeDecision(t *testing.T) {
 	assert.Equal(t, 0.0, s.CalculateCostForUsage(nil, schemas.Typesafe, "jev-1.13.0", schemas.DecisionRequest, nil))
 }
 
-// TestCalculateCost_CreditPricedDecision pins that a hosted decision priced
-// from credits keeps its provider-computed USD cost instead of token rates.
-func TestCalculateCost_CreditPricedDecision(t *testing.T) {
+func TestDecisionPricingOverrideScopesAndLifecycle(t *testing.T) {
 	s := newTestStore()
-	s.pricingData[makeKey("jev-1.13.0", "typesafe", "decisions")] = configstoreTables.TableModelPricing{
-		Model: "jev-1.13.0", Provider: "typesafe", Mode: "decisions",
-		InputCostPerToken:  bifrost.Ptr(4.2e-8),
-		OutputCostPerToken: bifrost.Ptr(0.0),
+	base := configstoreTables.TableModelPricing{
+		Model: "jev-latest", Provider: "typesafe", Mode: "decisions",
+		InputCostPerToken: bifrost.Ptr(1e-7), OutputCostPerToken: bifrost.Ptr(2e-7),
 	}
-	usage := &schemas.BifrostLLMUsage{
-		PromptTokens: 296, TotalTokens: 296, CreditCostUSD: "0.031",
-		Cost: &schemas.BifrostCost{RequestCost: 0.031, TotalCost: 0.031},
+	s.pricingData[makeKey(base.Model, base.Provider, base.Mode)] = base
+	provider := configstoreTables.TablePricingOverride{
+		ID: "provider-price", ScopeKind: string(ScopeKindProvider), ProviderID: bifrost.Ptr("typesafe"),
+		MatchType: string(MatchTypeExact), Pattern: "jev-latest",
+		RequestTypes:     []schemas.RequestType{schemas.DecisionRequest},
+		PricingPatchJSON: `{"input_cost_per_token":0.000000042,"output_cost_per_token":0}`,
 	}
-	assert.Equal(t, 0.031, s.CalculateCostForUsage(usage, schemas.Typesafe, "jev-1.13.0", schemas.DecisionRequest, nil))
+	custom := provider
+	custom.ID, custom.ProviderID = "custom-price", bifrost.Ptr("etla-system-one")
+	tenant := provider
+	tenant.ID, tenant.ScopeKind, tenant.VirtualKeyID = "tenant-price", string(ScopeKindVirtualKeyProvider), bifrost.Ptr("vk-1")
+	tenant.PricingPatchJSON = `{"input_cost_per_token":0,"output_cost_per_token":0}`
+	require.NoError(t, s.SetOverrides([]configstoreTables.TablePricingOverride{provider, custom, tenant}))
+	usage := &schemas.BifrostLLMUsage{PromptTokens: 296, CompletionTokens: 20, TotalTokens: 316}
+	check := func(provider schemas.ModelProvider, vk string, want float64) {
+		t.Helper()
+		scopes := &LookupScopes{VirtualKeyID: vk}
+		assert.InDelta(t, want, s.CalculateCostForUsage(usage, provider, "jev-latest", schemas.DecisionRequest, scopes), 1e-15)
+		response := &schemas.BifrostResponse{DecisionResponse: &schemas.BifrostDecisionResponse{Model: "jev-1.13.0", Usage: usage}}
+		response.PopulateExtraFields(schemas.DecisionRequest, provider, "jev-latest", "jev-latest")
+		assert.InDelta(t, want, s.CalculateCost(response, scopes), 1e-15)
+	}
+	check(schemas.Typesafe, "vk-1", 0)
+	check(schemas.Typesafe, "vk-2", 296*4.2e-8)
+	// Registered custom providers need no duplicate catalog row.
+	check("etla-system-one", "vk-2", 296*4.2e-8)
+	check("unmatched-provider", "vk-2", 0)
+	assert.Zero(t, s.CalculateCostForUsage(usage, schemas.Typesafe, "jev-latest", schemas.ChatCompletionRequest, nil))
 
-	resp := &schemas.BifrostResponse{DecisionResponse: &schemas.BifrostDecisionResponse{Model: "jev-1.13.0", Usage: usage}}
-	resp.PopulateExtraFields(schemas.DecisionRequest, schemas.Typesafe, "jev-1.13.0", "jev-1.13.0")
-	assert.Equal(t, 0.031, s.CalculateCost(resp, nil))
-
-	// Zero credits cost zero rather than falling back to token rates.
-	zero := &schemas.BifrostLLMUsage{PromptTokens: 296, TotalTokens: 296, CreditCostUSD: "0", Cost: &schemas.BifrostCost{}}
-	assert.Equal(t, 0.0, s.CalculateCostForUsage(zero, schemas.Typesafe, "jev-1.13.0", schemas.DecisionRequest, nil))
+	provider.PricingPatchJSON = `{"input_cost_per_token":0.00000005,"output_cost_per_token":0.00000002}`
+	require.NoError(t, s.UpsertOverrides(&provider))
+	check(schemas.Typesafe, "vk-2", 296*5e-8+20*2e-8)
+	check(schemas.Typesafe, "vk-1", 0)
+	s.DeleteOverride(tenant.ID)
+	check(schemas.Typesafe, "vk-1", 296*5e-8+20*2e-8)
+	s.DeleteOverride(provider.ID)
+	check(schemas.Typesafe, "vk-2", 296*1e-7+20*2e-7)
+	// Overrides never mutate the underlying catalog price.
+	assert.Equal(t, base, s.pricingData[makeKey(base.Model, base.Provider, base.Mode)])
 }

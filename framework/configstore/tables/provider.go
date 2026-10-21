@@ -21,7 +21,6 @@ type TableProvider struct {
 	ConcurrencyBufferJSON    string    `gorm:"type:text" json:"-"`                                // JSON serialized schemas.ConcurrencyAndBufferSize
 	ProxyConfigJSON          string    `gorm:"type:text" json:"-"`                                // JSON serialized schemas.ProxyConfig
 	CustomProviderConfigJSON string    `gorm:"type:text" json:"-"`                                // JSON serialized schemas.CustomProviderConfig
-	TypesafeConfigJSON       string    `gorm:"type:text" json:"-"`                                // JSON serialized schemas.TypesafeConfig
 	OpenAIConfigJSON         string    `gorm:"type:text" json:"-"`                                // JSON serialized schemas.OpenAIConfig
 	SendBackRawRequest       bool      `json:"send_back_raw_request"`
 	SendBackRawResponse      bool      `json:"send_back_raw_response"`
@@ -40,7 +39,6 @@ type TableProvider struct {
 	// Custom provider fields
 	CustomProviderConfig *schemas.CustomProviderConfig `gorm:"-" json:"custom_provider_config,omitempty"`
 	OpenAIConfig         *schemas.OpenAIConfig         `gorm:"-" json:"openai_config,omitempty"`
-	TypesafeConfig       *schemas.TypesafeConfig       `gorm:"-" json:"typesafe_config,omitempty"`
 
 	// Foreign keys
 	Models []TableModel `gorm:"foreignKey:ProviderID;constraint:OnDelete:CASCADE" json:"models"`
@@ -111,15 +109,6 @@ func (p *TableProvider) BeforeSave(tx *gorm.DB) error {
 	} else {
 		p.OpenAIConfigJSON = ""
 	}
-	if p.TypesafeConfig != nil {
-		data, err := json.Marshal(p.TypesafeConfig)
-		if err != nil {
-			return err
-		}
-		p.TypesafeConfigJSON = string(data)
-	} else {
-		p.TypesafeConfigJSON = ""
-	}
 	// Validate governance fields
 	if p.BudgetID != nil && strings.TrimSpace(*p.BudgetID) == "" {
 		return fmt.Errorf("budget_id cannot be an empty string")
@@ -189,14 +178,6 @@ func (p *TableProvider) AfterFind(tx *gorm.DB) error {
 			return err
 		}
 		p.OpenAIConfig = &openaiConfig
-	}
-
-	if p.TypesafeConfigJSON != "" {
-		var typesafeConfig schemas.TypesafeConfig
-		if err := json.Unmarshal([]byte(p.TypesafeConfigJSON), &typesafeConfig); err != nil {
-			return err
-		}
-		p.TypesafeConfig = &typesafeConfig
 	}
 
 	return nil
