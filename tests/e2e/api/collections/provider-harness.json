@@ -129147,6 +129147,47 @@
           }
         }
       ]
+    },
+    {
+      "name": "53. TypeSafe pinned model catalog",
+      "description": "Requires the default api.typesafe.ai endpoint and a key allowing all models. Pins the supplemented fixed Jev versions on the native model-listing route without making an inference request.",
+      "item": [
+        {
+          "name": "TypeSafe jev-1.14.0 pinned catalog includes both fixed releases",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if ([401, 403, 429, 500, 502, 503, 504].indexOf(pm.response.code) !== -1) { return; }",
+                  "pm.test('pinned catalog includes Jev 1.13.0 and 1.14.0', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(200);",
+                  "  var names = pm.response.json().models.map(function (model) { return model.name; });",
+                  "  pm.expect(names).to.include('jev-1.13.0');",
+                  "  pm.expect(names).to.include('jev-1.14.0');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/typesafe/v1/models",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "typesafe",
+                "v1",
+                "models"
+              ]
+            }
+          }
+        }
+      ]
     }
   ]
 }

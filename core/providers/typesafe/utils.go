@@ -30,7 +30,7 @@ type typesafeModel struct {
 // typesafeModels is the pinned jev catalog: merged into the live listing
 // (which carries the aliases only) and served alone when the live call fails
 // against the default endpoint. Mirrored in the hosted datasheet. Aliases
-// resolve upstream: jev-latest and jev-preview both point at jev-1.13.0 today.
+// resolve upstream and may move to a different version without a catalog update.
 var typesafeModels = []typesafeModel{
 	{
 		ID:          "jev-1.13.0",
@@ -39,6 +39,12 @@ var typesafeModels = []typesafeModel{
 		// The SDKs validate release_date on every listed model; 1.13.0 shipped
 		// at the same instant its aliases were minted.
 		ReleaseDate: "2026-09-10T18:38:01.391457+00:00",
+	},
+	{
+		ID:          "jev-1.14.0",
+		Name:        "Jev 1.14.0",
+		Description: "TypeSafe's System One Model: Jev, version 1.14.0",
+		ReleaseDate: "2026-10-14",
 	},
 	{
 		ID:          "jev-latest",
