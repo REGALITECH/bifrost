@@ -22,14 +22,6 @@ response was lost is billed once. Without a key, every attempt has its own ID.
 Bifrost's own spend tracking (governance budgets and logs) does not deduplicate
 replays: a replayed decision still records its usage there.
 
-Bifrost prices decisions with its existing model catalog and
-[Pricing Overrides](/providers/custom-pricing), using `request_types: ["decisions"]`.
-These rates affect Bifrost logs and governance budgets. The exporter sends token
-quantities, not a `cost_usd` amount, and does not synchronize these rates to
-Metronome. Configure the corresponding input-token rate on the Metronome rate
-card separately; TypeSafe decision events retain zero output tokens as described
-above. A Bifrost override alone does not change a Metronome invoice.
-
 ## Build and configure
 
 The normal gateway build includes the plugin. `transports/Dockerfile.local`

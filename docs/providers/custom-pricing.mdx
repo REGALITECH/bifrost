@@ -139,7 +139,7 @@ When no key-level alias matches, candidates (1) and (2) are absent and the looku
 | `responses` | Responses API requests (streaming included) |
 | `embedding` | Embedding generation |
 | `rerank` | Reranking |
-| `decisions` | Structured decisions, including TypeSafe Jev |
+| `decisions` | Structured decisions |
 | `speech` | Text-to-speech (streaming included) |
 | `transcription` | Speech-to-text (streaming included) |
 | `image_generation` | Image generation (streaming included) |
@@ -166,10 +166,8 @@ When no key-level alias matches, candidates (1) and (2) are absent and the looku
    - **Pattern** - enter the model name or wildcard prefix
    - **Match type** - choose **Exact** or **Wildcard**
    - **Request types** - select one or more request types (required)
-   - **Pricing fields** - enter the price values you want to override (blank fields keep the catalog rate; zero explicitly sets a free rate)
+   - **Pricing fields** - enter the price values you want to override (use `0` for a free rate)
 4. Click **Save**
-
-For TypeSafe Jev, select **Decisions**, choose the registered provider, and enter the model ID in **Pattern**. Set **Input / token** and, when needed, **Output / token** in USD per token, not per million tokens. Saving uses the existing pricing override API and does not change the provider's connection settings.
 
 ![Pricing Override Form](../media/ui-custom-pricing-form.png)
 

@@ -52,56 +52,6 @@ Configure TypeSafe as a provider with a bearer API key:
 }
 ```
 
-### Model pricing and Pricing Overrides
-
-ETLA sends decisions through Bifrost to the configured TypeSafe endpoint
-(`https://api.typesafe.ai` by default). The provider reports input and output
-token usage; Bifrost calculates spend using the existing model catalog and
-[Pricing Overrides](/providers/custom-pricing). Provider settings contain the
-connection and credentials, not unit prices.
-
-In **Models → Pricing Overrides**, create an override, choose the registered
-provider, enter the routed model ID (for example `jev-latest`), and select
-**Decisions**. Set **Input / token** and **Output / token** in USD per token.
-For example, a rate of $0.042 per million input tokens is `0.000000042` per
-token. Set output to `0` when it is free; an empty field keeps the catalog rate.
-Use the price agreed for your API account; the following numbers are examples.
-
-The screen uses the same management API:
-
-```bash
-curl -X POST http://localhost:8080/api/governance/pricing-overrides \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Jev input pricing",
-    "scope_kind": "provider",
-    "provider_id": "typesafe",
-    "match_type": "exact",
-    "pattern": "jev-latest",
-    "request_types": ["decisions"],
-    "patch": {
-      "input_cost_per_token": 0.000000042,
-      "output_cost_per_token": 0
-    }
-  }'
-```
-
-For a custom provider such as `etla-system-one`, use that registered name in
-`provider_id`. The model pattern is the routed model ID without the provider
-prefix. A `jev-*` wildcard can cover both aliases and versioned Jev models.
-Virtual-key scopes can provide tenant-specific rates using the same API.
-
-The rule is stored in `governance_pricing_overrides`, separately from catalog
-rows in `governance_model_pricing`, and applied to subsequent cost calculations
-for logs and budgets. `PUT /api/governance/pricing-overrides/{id}` updates the
-rule; `DELETE` removes it so the next applicable override or catalog rate is
-used. Existing historical logs are not repriced. An override also works for a model with no
-catalog entry when its applicable rates are supplied.
-
-Metronome continues to receive token usage through the existing exporter.
-Pricing Overrides control Bifrost spend; they do not update Metronome rate
-cards. See [Metronome](/plugins/metronome) for the separate billing setup.
-
 ### Custom TypeSafe Providers
 
 A custom provider can use `typesafe` as its `base_provider_type`, for example to reach a second TypeSafe endpoint with its own keys alongside the standard `typesafe` provider:
