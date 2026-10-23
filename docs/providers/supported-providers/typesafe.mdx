@@ -8,7 +8,7 @@ icon: "scale-balanced"
 
 TypeSafe is a specialized decision provider serving the jev family of System One judgment models. A decision request carries a `state` (what to evaluate) and a map of named `questions`; the response carries one typed answer per question. Bifrost performs conversions including:
 
-- **Model ID mapping** - Uses provider model identifier directly (`jev-1.13.0`, `jev-latest`, `jev-preview`)
+- **Model ID mapping** - Uses provider model identifier directly (`jev-1.13.0`, `jev-1.14.0`, `jev-latest`, `jev-preview`)
 - **Question conversion** - Maps Bifrost question types (`predicate`, `choice`, `score`) to TypeSafe's native System One types (`noul`, `choice`, `score`), and choices and levels to its criteria
 - **Answer normalization** - Native `noul`/`choice`/`score` value fields normalize to a unified `value`, with `confidence`, `probabilities`, and `legend` metadata preserved
 - **Usage normalization** - `input_tokens`/`output_tokens` map to Bifrost's `prompt_tokens`/`completion_tokens` (TypeSafe bills input tokens only)
@@ -164,7 +164,7 @@ Descriptions may be a string, object, array, or null, and pass through to TypeSa
 
 | Bifrost field | Built from native | Notes |
 |---------------|-------------------|-------|
-| `model` | `model` | Aliases resolve upstream: request `jev-latest`, response reports `jev-1.13.0` |
+| `model` | `model` | Aliases resolve upstream; the response reports the version that handled the request |
 | `answers[]` | `answers` keyed by name | In question order; `name` as asked (absent for an unnamed question) |
 | `answers[].type` | `answers.<name>.type` | `noul` → `predicate` |
 | `answers[].probability` \| `.choice` \| `.score` | `.noul` \| `.choice` \| `.score` | A noul outside [0,1] is rejected; a boolean choice answers with its boolean |
@@ -207,11 +207,24 @@ Success and error responses from the TypeSafe provider are relayed byte-for-byte
 
 | Model | Notes |
 |-------|-------|
-| `jev-1.13.0` | Current versioned release |
-| `jev-latest` | Alias, currently resolves to `jev-1.13.0` |
-| `jev-preview` | Preview alias, currently resolves to `jev-1.13.0` |
+| `jev-1.13.0` | Fixed version 1.13.0 |
+| `jev-1.14.0` | Fixed version 1.14.0 |
+| `jev-latest` | Stable-release alias; resolved by TypeSafe |
+| `jev-preview` | Preview alias; resolved by TypeSafe |
 
 Responses always report the resolved versioned model. TypeSafe bills input tokens only; the jev pricing, 64k context window, and rate limits are documented at [docs.typesafe.ai/models](https://docs.typesafe.ai/models).
+
+For TypeSafe decision requests, Bifrost first looks for a `decisions` pricing row
+and falls back to an `evaluation` row for the same model, as used by the hosted
+Jev 1.14.0 datasheet. This also works with already-synced pricing rows and preserves
+`decisions`-scoped pricing overrides. The lookup uses the routing model; recording
+`metadata.response_model` does not switch alias requests to version-specific pricing.
+
+For decision requests, the logging plugin stores the model reported in the response
+in `metadata.response_model`, including when content logging is disabled. The log's
+`model` and `alias` fields retain the routing identity used for pricing. This applies
+to compatible decision providers as well as TypeSafe; no alias-to-version mapping is
+inferred. Historical logs are not backfilled.
 
 ## Idempotency keys and exact request bodies
 

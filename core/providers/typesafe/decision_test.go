@@ -933,8 +933,10 @@ func TestListModelsDefaultEndpointMergesPinnedCatalog(t *testing.T) {
 		if names["jev-latest"].Description != "live description" {
 			t.Errorf("live entry must win: %+v", names["jev-latest"])
 		}
-		if _, ok := names["jev-1.13.0"]; !ok {
-			t.Errorf("pinned versioned entry missing from %v", names)
+		for _, version := range []string{"jev-1.13.0", "jev-1.14.0"} {
+			if _, ok := names[version]; !ok {
+				t.Errorf("pinned versioned entry %s missing from %v", version, names)
+			}
 		}
 		if len(merged) != len(typesafeModels) {
 			t.Errorf("expected %d models after merge, got %d", len(typesafeModels), len(merged))
