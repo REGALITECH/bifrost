@@ -50,6 +50,10 @@ export const REQUEST_TYPE_GROUPS = [
 		types: ["rerank"],
 	},
 	{
+		label: "Decisions",
+		types: ["decisions"],
+	},
+	{
 		label: "Audio",
 		types: ["speech", "transcription"],
 	},
@@ -79,13 +83,13 @@ export const PRICING_FIELDS = [
 		key: "input_cost_per_token",
 		label: "Input / token",
 		group: "chat",
-		requestTypeGroups: ["chat", "embedding", "rerank", "audio", "image", "video"],
+		requestTypeGroups: ["chat", "embedding", "rerank", "decisions", "audio", "image", "video"],
 	},
 	{
 		key: "output_cost_per_token",
 		label: "Output / token",
 		group: "chat",
-		requestTypeGroups: ["chat", "rerank", "audio", "image", "video"],
+		requestTypeGroups: ["chat", "rerank", "decisions", "audio", "image", "video"],
 	},
 	{ key: "input_cost_per_token_batches", label: "Input / token (batch)", group: "chat", requestTypeGroups: ["chat"] },
 	{ key: "output_cost_per_token_batches", label: "Output / token (batch)", group: "chat", requestTypeGroups: ["chat"] },
