@@ -214,6 +214,12 @@ Success and error responses from the TypeSafe provider are relayed byte-for-byte
 
 Responses always report the resolved versioned model. TypeSafe bills input tokens only; the jev pricing, 64k context window, and rate limits are documented at [docs.typesafe.ai/models](https://docs.typesafe.ai/models).
 
+For TypeSafe decision requests, Bifrost first looks for a `decisions` pricing row
+and falls back to an `evaluation` row for the same model, as used by the hosted
+Jev 1.14.0 datasheet. This also works with already-synced pricing rows and preserves
+`decisions`-scoped pricing overrides. The lookup uses the routing model; recording
+`metadata.response_model` does not switch alias requests to version-specific pricing.
+
 For decision requests, the logging plugin stores the model reported in the response
 in `metadata.response_model`, including when content logging is disabled. The log's
 `model` and `alias` fields retain the routing identity used for pricing. This applies
