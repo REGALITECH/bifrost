@@ -300,6 +300,7 @@ export type RequestType =
 	| "responses_input_items"
 	| "embedding"
 	| "rerank"
+	| "decisions"
 	| "speech"
 	| "speech_stream"
 	| "transcription"
