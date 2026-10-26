@@ -8,6 +8,12 @@ on:
   pull_request:
     paths:
       - ".github/workflows/**"
+      # The checker reads these files too. Classify new hosts in the PR that
+      # introduces them, before an unrelated workflow change hits the failure.
+      - "tests/e2e/api/collections/provider-harness.json"
+      - "tests/integrations/python/config.json"
+      - "core/providers/**/*.go"
+      - "!core/providers/**/*_test.go"
 
 permissions:
   contents: read
@@ -43,6 +49,9 @@ jobs:
         run: |
           python3 -m pip install --user --disable-pip-version-check \
             --require-hashes -r .github/workflows/requirements/pyyaml.txt
+
+      - name: Test egress allowlist checker
+        run: bash ./.github/workflows/scripts/check-egress-allowlist.test.sh
 
       - name: Check egress allowlists
         run: ./.github/workflows/scripts/check-egress-allowlist.sh

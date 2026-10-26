@@ -22,8 +22,8 @@ This matches the rulesets on `etla_app`, `clomoni_api` and `aeon_app`.
 
 ## What diverges from upstream
 
-As of 2026-09-30, relative to upstream `transports/v2.2.4` (`ed8371a9`, 2026-09-29): 41 upstream
-files edited or deleted, 59 new files.
+As of 2026-10-26, relative to upstream `transports/v2.2.4` (`ed8371a9`, 2026-09-29): 43 upstream
+files edited or deleted, 60 new files.
 
 | Change | Paths |
 | --- | --- |
@@ -36,6 +36,7 @@ files edited or deleted, 59 new files.
 | Metronome CI coverage and release smoke test | `.github/workflows/metronome-tests.yml`, `.github/workflows/scripts/test-metronome-image.sh`, `.github/dependabot.yml`, `.github/workflows/regali-docker-release.yml` |
 | GHCR release workflow (new file) | `.github/workflows/regali-docker-release.yml` |
 | PR tests start on pull requests to `main`; `run-tests.sh` follows the current test layout | `.github/workflows/pr-tests.yml`, `.github/workflows/scripts/run-tests.sh` |
+| Workflow Lint classifies documentation/provider-fetched URLs, checks input changes, and tests that unknown destinations still fail | `.github/workflows/workflow-lint.yml`, `.github/workflows/scripts/check-egress-allowlist{,.test}.sh` |
 | `FISH_AUDIO_API_KEY` plumbed into upstream test jobs | `.github/workflows/pr-tests.yml`, `.github/workflows/release-pipeline.yml` |
 | CODEOWNERS deleted | `.github/CODEOWNERS` — it assigned every path to `@maximhq/bifrost-admin`, a team that does not exist in this org, so it was inert. No other REGALITECH repository uses CODEOWNERS. |
 | Issue template config replaced | `.github/ISSUE_TEMPLATE/config.yml` — points upstream product reports at maximhq/bifrost |
@@ -223,7 +224,13 @@ Active:
 | `metronome-tests.yml` | pull requests to `main`, `workflow_dispatch` |
 | `pr-tests.yml` | pull requests to `main` (the secret-bearing job waits for approval in the `pr-testing` environment), `workflow_dispatch` |
 | `run-core-tests.yml` | `workflow_dispatch`, gated on write access |
-| `workflow-lint.yml` | pull requests touching `.github/workflows/**` |
+| `workflow-lint.yml` | pull requests touching `.github/workflows/**`, the provider-harness collection, its seeded Python config, or non-test provider Go files |
+
+The fork carries the Workflow Lint fix for upstream issue `maximhq/bifrost#7785`.
+Documentation URLs and provider-side fetches are classified in `NOT_DIALLED_HOSTS`;
+the runner's network allowlists and `egress-policy: block` are unchanged. On an upstream
+sync, classify newly reported hosts by their actual use before adding exemptions or
+network permissions. Remove the fork fix once upstream supplies an equivalent change.
 
 Disabled:
 

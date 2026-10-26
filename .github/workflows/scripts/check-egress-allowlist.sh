@@ -153,9 +153,12 @@ NOT_DIALLED_HOSTS = {
     "www.youtube.com": "Gemini video input - Google fetches the URL server-side",
     "en.wikipedia.org": "googleSearch excludeDomains filter value, not a URL anyone fetches",
     "placeholder.search.windows.net": "Azure AI Search placeholder in a request body; never resolved",
+    "mcp.deepwiki.com": "Anthropic mcp_servers URL; Anthropic's MCP connector fetches it server-side",
     # Deliberately unresolvable - negative tests assert the failure path.
     "bifrost.invalid": "reserved .invalid TLD; negative-path tests assert it fails to resolve",
     # Documentation links inside descriptions and comments.
+    "ai.google.dev": "doc link in a folder description",
+    "learn.microsoft.com": "doc link in a test-script comment",
     "anthropic.com": "doc link in a folder description",
     "www.anthropic.com": "doc link in a folder description",
     "platform.claude.com": "doc link in a folder description",
