@@ -10,14 +10,14 @@ import (
 )
 
 // TestFishAudioIntegration is a focused, account-agnostic integration test that
-// exercises a real Fish Audio key end-to-end: it lists the account's voices,
-// then synthesizes both non-streaming (Speech) and streaming (SpeechStream)
-// audio, asserting real audio bytes come back.
+// exercises a real Fish Audio key end-to-end: it synthesizes both
+// non-streaming (Speech) and streaming (SpeechStream) audio, asserting real
+// audio bytes come back.
 //
-// It is skipped unless FISH_AUDIO_API_KEY is set. The synthesis voice is
-// discovered from ListModels (the account's own voices); override it with
-// FISH_AUDIO_VOICE_ID, and the model variant with FISH_AUDIO_MODEL (default
-// s2-pro).
+// It is skipped unless FISH_AUDIO_API_KEY is set. The synthesis voice defaults
+// to the voice in Fish's own API docs (llmtests.FishAudioDocVoiceID); override
+// it with FISH_AUDIO_VOICE_ID, and the model variant with FISH_AUDIO_MODEL
+// (default s2-pro).
 //
 //	FISH_AUDIO_API_KEY=... go test ./core/providers/fishaudio/ -run TestFishAudioIntegration -v
 func TestFishAudioIntegration(t *testing.T) {
@@ -38,30 +38,9 @@ func TestFishAudioIntegration(t *testing.T) {
 		model = "s2-pro"
 	}
 
-	// 1. ListModels — this both validates the key and discovers a usable voice.
-	var voice string
-	t.Run("ListModels", func(t *testing.T) {
-		bctx := schemas.NewBifrostContext(ctx, schemas.NoDeadline)
-		resp, berrResp := client.ListModelsRequest(bctx, &schemas.BifrostListModelsRequest{
-			Provider: schemas.FishAudio,
-		})
-		if berrResp != nil {
-			t.Fatalf("ListModels failed (is the FISH_AUDIO_API_KEY valid?): %s", bifrostErrMessage(berrResp))
-		}
-		t.Logf("Fish Audio returned %d voice model(s)", len(resp.Data))
-
-		if override := strings.TrimSpace(os.Getenv("FISH_AUDIO_VOICE_ID")); override != "" {
-			voice = override
-			return
-		}
-		if len(resp.Data) > 0 {
-			// Model IDs are namespaced as "fishaudio/<reference_id>"; strip it.
-			voice = strings.TrimPrefix(resp.Data[0].ID, string(schemas.FishAudio)+"/")
-		}
-	})
-
+	voice := strings.TrimSpace(os.Getenv("FISH_AUDIO_VOICE_ID"))
 	if voice == "" {
-		t.Skip("No Fish Audio voice available (account has no voices and FISH_AUDIO_VOICE_ID not set); skipping synthesis subtests")
+		voice = llmtests.FishAudioDocVoiceID
 	}
 	t.Logf("Using voice reference_id=%q model=%q", voice, model)
 
@@ -77,7 +56,7 @@ func TestFishAudioIntegration(t *testing.T) {
 		}
 	}
 
-	// 2. Speech (non-streaming) — drives the WebSocket to completion.
+	// 1. Speech (non-streaming) — drives the WebSocket to completion.
 	t.Run("Speech", func(t *testing.T) {
 		bctx := schemas.NewBifrostContext(ctx, schemas.NoDeadline)
 		resp, berrResp := client.SpeechRequest(bctx, newSpeechRequest())
@@ -90,7 +69,7 @@ func TestFishAudioIntegration(t *testing.T) {
 		t.Logf("Speech returned %d audio bytes", len(resp.Audio))
 	})
 
-	// 3. SpeechStream — collects incremental audio deltas.
+	// 2. SpeechStream — collects incremental audio deltas.
 	t.Run("SpeechStream", func(t *testing.T) {
 		bctx := schemas.NewBifrostContext(ctx, schemas.NoDeadline)
 		stream, bErr := client.SpeechStreamRequest(bctx, newSpeechRequest())

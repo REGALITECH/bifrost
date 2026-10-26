@@ -6,3 +6,4 @@
 - fix: file_data sent as bare base64 with a file_type is folded into a data URL for OpenAI-shaped providers, which rejected the bare payload (#7682)
 - fix: OpenAI Responses drops a function_call input item id that does not begin with fc so Gemini streaming histories replay cleanly; call_id is kept (#7676)
 - fix: Gemini thought signatures on inline image and file parts stay on the content block and round-trip back to Gemini (#7692)
+- Added the TypeSafe (System One) provider with the /v1/decisions endpoint and /typesafe native routes.

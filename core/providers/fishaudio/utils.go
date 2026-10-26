@@ -20,14 +20,12 @@ import (
 const (
 	fishDefaultBaseURL = "https://api.fish.audio"
 	fishTTSLivePath    = "/v1/tts/live"
-	fishModelsPath     = "/model"
 )
 
 // # DEFAULTS AND LIMITS
 
 const (
 	fishDefaultModel       = "s2-pro"
-	fishModelsPageSize     = 100
 	fishDefaultTimeoutSecs = 30
 )
 
@@ -248,9 +246,9 @@ func readErrorBody(resp *http.Response) string {
 
 // fishVoiceFromRequest extracts the single-voice reference_id from the request.
 //
-// ListModels returns IDs namespaced as "fishaudio/<reference_id>", so callers
-// commonly paste the full ID into the voice field. Fish's reference_id is the
-// bare value, so a leading "fishaudio/" prefix is stripped defensively.
+// Fish's reference_id is the bare voice ID. Callers sometimes namespace it as
+// "fishaudio/<reference_id>" like a model ID, so a leading "fishaudio/" prefix
+// is stripped defensively.
 func fishVoiceFromRequest(request *schemas.BifrostSpeechRequest) string {
 	if request.Params == nil || request.Params.VoiceConfig == nil {
 		return ""

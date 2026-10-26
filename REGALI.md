@@ -22,8 +22,8 @@ This matches the rulesets on `etla_app`, `clomoni_api` and `aeon_app`.
 
 ## What diverges from upstream
 
-As of 2026-10-26, relative to upstream `transports/v2.2.4` (`ed8371a9`, 2026-09-29): 43 upstream
-files edited or deleted, 60 new files.
+As of 2026-10-26, relative to upstream `transports/v2.2.4` (`ed8371a9`, 2026-09-29): 70 upstream
+files edited or deleted, 75 new files.
 
 | Change | Paths |
 | --- | --- |
@@ -34,6 +34,10 @@ files edited or deleted, 60 new files.
 | STT usage models registered through the `transcription` custom provider | `framework/configstore/transcriptionmodels.go`, `framework/modelcatalog/{main.go,models.go}`, `transports/bifrost-http/handlers/providers.go`, `transports/bifrost-http/server/server.go`, `docs/features/transcription-usage-models.mdx`, `docs/docs.json` |
 | Metronome builtin exporter and external usage delivery | `plugins/metronome/`, `transports/bifrost-http/{handlers/fishaudio_usage.go,server/plugins.go,server/server.go,lib/config.go}`, `transports/go.mod`, `transports/config.schema.json`, `Makefile` (`test-metronome`), `docs/plugins/metronome.mdx`, `docs/docs.json`, `examples/configs/withmetronome/` |
 | Metronome CI coverage and release smoke test | `.github/workflows/metronome-tests.yml`, `.github/workflows/scripts/test-metronome-image.sh`, `.github/dependabot.yml`, `.github/workflows/regali-docker-release.yml` |
+| Fixed Fish Audio TTS model catalog and wildcard virtual-key coverage | `core/schemas/fishaudio.go`, `core/providers/fishaudio/`, `framework/modelcatalog/fishaudioallowlist_test.go`, `.github/workflows/fishaudio-tests.yml`, `tests/e2e/api/{collections/provider-harness.json,fixtures/fishaudio-models/config.json}` |
+| Metronome speech and Fish Audio realtime usage | `plugins/metronome/`, `transports/bifrost-http/handlers/metronomerealtime_test.go`, `docs/plugins/metronome.mdx` |
+| TypeSafe ordered decision schema, native body preservation, tenant/model-scoped idempotency, replay-safe Metronome billing and Jev 1.14.0 discovery/pricing | `core/{decisionemulation*,bifrost.go,schemas/decision*,providers/typesafe/,providers/utils/decision*}`, `core/schemas/{bifrost.go,chatcompletions.go}`, `core/internal/llmtests/decision.go`, `transports/bifrost-http/{handlers/inference.go,integrations/typesafe*}`, `plugins/{logging,metronome}/`, `framework/modelcatalog/datasheet/{cost.go,decision_cost_test.go}`, `docs/{integrations/typesafe-sdk.mdx,providers/supported-providers/typesafe.mdx}` |
+| Decision pricing UI in v2's extracted pricing fields module | `ui/app/workspace/custom-pricing/overrides/{pricingFields.ts,pricingFieldSelector.tsx}`, `ui/lib/{types/config,constants/logs}.ts`, `tests/e2e/features/placeholders/placeholders.spec.ts`, `docs/providers/custom-pricing.mdx` |
 | GHCR release workflow (new file) | `.github/workflows/regali-docker-release.yml` |
 | PR tests start on pull requests to `main`; `run-tests.sh` follows the current test layout | `.github/workflows/pr-tests.yml`, `.github/workflows/scripts/run-tests.sh` |
 | Workflow Lint classifies documentation/provider-fetched URLs, checks input changes, and tests that unknown destinations still fail | `.github/workflows/workflow-lint.yml`, `.github/workflows/scripts/check-egress-allowlist{,.test}.sh` |
@@ -116,6 +120,11 @@ The v2 port (2026-09) did this on `transports/v2.2.4` (`ed8371a9`) with the fork
 instead). Three were folded: `82660c2b` into the Fish Audio provider commit, `f9223746` into the GHCR
 workflow commit, and `#9` into `#11`, which replaced it.
 
+The switch branch also incorporates REGALI `main` through `b5d9582e` (2026-10-26),
+including PRs #17–#21. TypeSafe's newer request/response schema and replay-safe billing
+are retained alongside v2's access resolver, error classification, tracing and cost
+breakdown APIs. Decision pricing fields live in v2's extracted `pricingFields.ts`.
+
 **Where the conflicts will be.** Only in files this fork modified that upstream also touched. New
 files never conflict. In the v2 port, the conflicted files that the fork still edits were
 `core/go.{mod,sum}`, `core/schemas/{bifrost.go,realtime.go}`,
@@ -153,12 +162,13 @@ break shows up at compile time or in the transformation tests.
 make setup-workspace
 (cd core && go build ./... && go test ./providers/fishaudio/)
 (cd core && go test ./providers/utils/ -run TestFasthttpVersionIsConsistentAcrossModules)
-(cd framework && go test ./modelcatalog/datasheet/)
+(cd framework && go test ./modelcatalog/ ./modelcatalog/datasheet/)
 make test-metronome
 ```
 
-Upstream reshapes the datasheet loader often; the derivation call site and tests catch a break at
-compile or test time.
+Upstream reshapes the datasheet loader and the model catalog often; the derivation call site and
+tests catch a break at compile or test time. `fishaudioallowlist_test.go` pins that a wildcard
+virtual key accepts the fixed Fish Audio TTS models (REGALITECH/etla#256).
 
 Provider tests that call a live API skip themselves when their key is absent, so this passes with no
 API key set: the `realtime_test.go` unit tests run, `TestFishAudio` and `TestFishAudioIntegration`
@@ -225,6 +235,7 @@ Active:
 | `pr-tests.yml` | pull requests to `main` (the secret-bearing job waits for approval in the `pr-testing` environment), `workflow_dispatch` |
 | `run-core-tests.yml` | `workflow_dispatch`, gated on write access |
 | `workflow-lint.yml` | pull requests touching `.github/workflows/**`, the provider-harness collection, its seeded Python config, or non-test provider Go files |
+| `fishaudio-tests.yml` | pull requests to `main` touching Fish Audio, provider utilities, schemas, model catalog or governance; `workflow_dispatch` |
 
 The fork carries the Workflow Lint fix for upstream issue `maximhq/bifrost#7785`.
 Documentation URLs and provider-side fetches are classified in `NOT_DIALLED_HOSTS`;

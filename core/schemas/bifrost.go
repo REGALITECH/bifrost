@@ -89,6 +89,7 @@ var SupportedBaseProviders = []ModelProvider{
 	OpenAI,
 	HuggingFace,
 	Replicate,
+	Typesafe,
 }
 
 // StandardProviders is the list of all built-in (non-custom) providers.
@@ -2176,4 +2177,6 @@ type BifrostErrorExtraFields struct {
 	// ErrorTypeOther rather than in a wrong bucket. Empty is normal for provider
 	// errors, which are still inferred.
 	ErrorType ErrorType `json:"error_type,omitempty"`
+	// NativeErrorResponse is the provider error body verbatim for native drop-in routes; never serialized.
+	NativeErrorResponse json.RawMessage `json:"-"`
 }

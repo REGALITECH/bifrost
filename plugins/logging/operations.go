@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"strings"
 	"time"
@@ -576,6 +577,15 @@ func isPassthroughErrorResponse(result *schemas.BifrostResponse) bool {
 func (p *LoggerPlugin) applyNonStreamingOutputToEntry(entry *logstore.Log, result *schemas.BifrostResponse, shouldStoreRaw bool, contentLoggingEnabled bool) {
 	if result == nil {
 		return
+	}
+	// Keep the provider-reported decision model even when content logging is off.
+	// Model and Alias retain routing identity, which cost recomputation relies on.
+	if response := result.DecisionResponse; response != nil && response.Model != "" {
+		entry.MetadataParsed = maps.Clone(entry.MetadataParsed)
+		if entry.MetadataParsed == nil {
+			entry.MetadataParsed = make(map[string]interface{})
+		}
+		entry.MetadataParsed["response_model"] = response.Model
 	}
 	// Token usage
 	var usage *schemas.BifrostLLMUsage

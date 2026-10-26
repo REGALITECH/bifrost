@@ -1460,20 +1460,8 @@ func (bifrost *Bifrost) DecisionRequest(ctx *schemas.BifrostContext, req *schema
 			},
 		}
 	}
-	if req.State == nil {
-		return nil, &schemas.BifrostError{
-			IsBifrostError: false,
-			Error: &schemas.ErrorField{
-				Message: "state not provided for decision request",
-			},
-			ExtraFields: schemas.BifrostErrorExtraFields{
-				RequestType:            schemas.DecisionRequest,
-				Provider:               req.Provider,
-				OriginalModelRequested: req.Model,
-				ResolvedModelUsed:      req.Model,
-			},
-		}
-	}
+	// A nil state is forwarded as JSON null: the TypeSafe SDKs allow it and the
+	// endpoint decides whether it is acceptable.
 	if len(req.Questions) == 0 {
 		return nil, &schemas.BifrostError{
 			IsBifrostError: false,
@@ -5238,6 +5226,8 @@ func (bifrost *Bifrost) prepareFallbackRequest(req *schemas.BifrostRequest, fall
 		tmp := *req.DecisionRequest
 		tmp.Provider = fallback.Provider
 		tmp.Model = fallback.Model
+		// The client's raw body belongs to the primary attempt only.
+		tmp.RawRequestBody = nil
 		fallbackReq.DecisionRequest = &tmp
 	}
 	if req.OCRRequest != nil {

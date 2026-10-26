@@ -35,10 +35,20 @@ test.describe('Placeholder and Enterprise Pages', () => {
     await expect(page).toHaveURL(/\/workspace\/cluster(?:\?.*)?$/)
   })
 
-  test('should load custom-pricing page', async ({ page }) => {
+  test('should load custom-pricing page and show decision pricing fields', async ({ page }) => {
     await page.goto('/workspace/custom-pricing')
     await page.waitForLoadState('networkidle')
     await expect(page).toHaveURL(/\/workspace\/custom-pricing(?:\?.*)?$/)
+
+    await page.goto('/workspace/custom-pricing/overrides')
+    await page.getByTestId('pricing-override-create-btn').click()
+    await page.getByTestId('pricing-override-request-types-btn').click()
+    await page.getByTestId('pricing-override-request-type-checkbox-decisions').click()
+    await page.keyboard.press('Escape')
+    await expect(page.getByTestId('pricing-override-request-types-btn')).toHaveText('Decisions')
+    await expect(page.getByTestId('pricing-field-activate-input_cost_per_token')).toBeVisible()
+    await expect(page.getByTestId('pricing-field-activate-output_cost_per_token')).toBeVisible()
+    await expect(page.getByTestId('pricing-field-activate-cache_read_input_token_cost')).toHaveCount(0)
   })
 
   test('should load rbac page', async ({ page }) => {

@@ -7,16 +7,13 @@ import (
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
-// ToBifrostListModelsResponse converts a Fish Audio /model response into the
-// unified Bifrost model list, applying the standard allow/blacklist/alias
-// filtering pipeline.
-func (response *FishAudioListModelsResponse) ToBifrostListModelsResponse(providerKey schemas.ModelProvider, allowedModels schemas.WhiteList, blacklistedModels schemas.BlackList, aliases schemas.KeyAliases, unfiltered bool) *schemas.BifrostListModelsResponse {
-	if response == nil {
-		return nil
-	}
-
+// ToBifrostListModelsResponse converts the fixed Fish Audio TTS model variants
+// (schemas.FishAudioTTSModels) into the unified Bifrost model list, applying
+// the standard allow/blacklist/alias filtering pipeline.
+func ToBifrostListModelsResponse(providerKey schemas.ModelProvider, allowedModels schemas.WhiteList, blacklistedModels schemas.BlackList, aliases schemas.KeyAliases, unfiltered bool) *schemas.BifrostListModelsResponse {
+	models := schemas.FishAudioTTSModels()
 	bifrostResponse := &schemas.BifrostListModelsResponse{
-		Data: make([]schemas.Model, 0, len(response.Items)),
+		Data: make([]schemas.Model, 0, len(models)),
 	}
 
 	pipeline := &providerUtils.ListModelsPipeline{
@@ -33,11 +30,11 @@ func (response *FishAudioListModelsResponse) ToBifrostListModelsResponse(provide
 
 	included := make(map[string]bool)
 
-	for _, model := range response.Items {
-		for _, result := range pipeline.FilterModel(model.ID) {
+	for _, model := range models {
+		for _, result := range pipeline.FilterModel(model) {
 			entry := schemas.Model{
 				ID:   string(providerKey) + "/" + result.ResolvedID,
-				Name: schemas.Ptr(model.Title),
+				Name: schemas.Ptr(providerUtils.ToDisplayName(result.ResolvedID)),
 			}
 			if result.AliasValue != "" {
 				entry.Alias = schemas.Ptr(result.AliasValue)

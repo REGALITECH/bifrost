@@ -59,19 +59,62 @@ func (p *Plugin) fishAudioEvent(ctx *schemas.BifrostContext, usage *FishAudioUsa
 		return event, err
 	}
 	id := sha256.Sum256(identity)
-	props := fishAudioProperties{SchemaVersion: 1, Provider: string(provider), Model: model,
-		UsageSource: "external", BillableBytes: *usage.BillableBytes, AudioMS: *usage.AudioMS,
-		Outcome: usage.Outcome, TurnID: usage.TurnID, SubID: usage.SubID}
-	if mapped := p.config.ProviderMapping[string(provider)]; mapped != "" {
-		props.Provider = mapped
-	}
-	if mapped := p.config.ModelMapping[string(provider)+"/"+model]; mapped != "" {
-		props.Model = mapped
-	} else if !strings.Contains(model, "/") {
-		props.Model = props.Provider + "/" + model
-	}
+	props := fishAudioProperties{SchemaVersion: 1, UsageSource: "external", BillableBytes: *usage.BillableBytes,
+		AudioMS: *usage.AudioMS, Outcome: usage.Outcome, TurnID: usage.TurnID, SubID: usage.SubID}
+	props.Provider, props.Model = p.rateCardNames(string(provider), model)
 	return Event[fishAudioProperties]{TransactionID: fmt.Sprintf("bf-fishaudio-%x", id), CustomerID: vkID,
 		EventType: "fishaudio-usage", Timestamp: usage.OccurredAt, Properties: props}, nil
+}
+
+// exportFishAudio queues fishaudio-usage for synthesis Bifrost performed itself:
+// a Fish Audio realtime turn or speech request. Fish bills UTF-8 input bytes,
+// which the realtime turn pipeline reports as input tokens and speech as
+// InputChars (bytes when the provider is fishaudio); they are never exported as
+// tokens. Delivery shares the token queue, so the realtime relay and speech
+// responses never wait on Metronome.
+func (p *Plugin) exportFishAudio(ctx *schemas.BifrostContext, resp *schemas.BifrostResponse, extra *schemas.BifrostResponseExtraFields, provider, model string) {
+	source, billableBytes := "", 0
+	switch {
+	case extra.RequestType == schemas.RealtimeRequest && resp.ResponsesResponse != nil && resp.ResponsesResponse.Usage != nil:
+		source, billableBytes = "realtime", resp.ResponsesResponse.Usage.InputTokens
+	case resp.SpeechResponse != nil && resp.SpeechResponse.Usage != nil:
+		source, billableBytes = "speech", resp.SpeechResponse.Usage.InputChars
+	case resp.SpeechStreamResponse != nil && resp.SpeechStreamResponse.Usage != nil:
+		source, billableBytes = "speech", resp.SpeechStreamResponse.Usage.InputChars
+	}
+	if billableBytes <= 0 {
+		return
+	}
+	vkID, _ := ctx.Value(schemas.BifrostContextKeyGovernanceVirtualKeyID).(string)
+	if strings.TrimSpace(vkID) == "" {
+		p.logger.Warn("[metronome] skipped Fish Audio usage: missing authenticated virtual-key ID")
+		return
+	}
+	if model == "" {
+		return
+	}
+	// Reuse the pre-hook UUID, as token events do. Caller-supplied request IDs
+	// can be reused for separate synthesis requests and must not identify usage.
+	attempt, _ := ctx.Value(attemptKey).(string)
+	if attempt == "" {
+		p.logger.Warn("[metronome] skipped Fish Audio usage: missing pre-hook attempt ID")
+		return
+	}
+	// Observation only: the Bifrost request (log entry) ID and its session.
+	turnID, _ := ctx.Value(schemas.BifrostContextKeyRequestID).(string)
+	if strings.TrimSpace(turnID) == "" {
+		turnID = attempt
+	}
+	subID, _ := ctx.Value(schemas.BifrostContextKeyParentRequestID).(string)
+	if strings.TrimSpace(subID) == "" {
+		subID = turnID
+	}
+	// Bifrost does not measure Fish output audio; failed requests carry no usage.
+	props := fishAudioProperties{SchemaVersion: 1, UsageSource: source, BillableBytes: int64(billableBytes),
+		Outcome: "completed", TurnID: turnID, SubID: subID}
+	props.Provider, props.Model = p.rateCardNames(provider, model)
+	p.enqueue(Event[any]{TransactionID: attempt, CustomerID: vkID, EventType: "fishaudio-usage",
+		Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Properties: props})
 }
 
 // Receipt is returned only after successful ingestion.

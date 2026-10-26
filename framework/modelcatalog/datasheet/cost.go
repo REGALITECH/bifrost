@@ -2174,6 +2174,7 @@ func (s *Store) resolvePricing(routingInfo schemas.RoutingInfo, requestType sche
 // getBasePricing looks up catalog pricing for the given model, provider, and request type.
 // It applies a provider-specific fallback chain when an exact match is not found:
 //
+//   - TypeSafe: decision requests also accept evaluation-mode pricing after an exact decisions-mode miss.
 //   - Gemini: retries under the "vertex" provider, then falls back to the counterpart chat/responses mode.
 //   - Vertex: strips the "provider/model" prefix and retries, then falls back to the counterpart chat/responses mode.
 //   - Bedrock: prepends the vendor namespace ("anthropic.", "openai.", "google.", "xai.") inferred from the model family, then falls back to the counterpart chat/responses mode.
@@ -2208,6 +2209,15 @@ func (s *Store) getBasePricing(model, provider string, requestType schemas.Reque
 	pricing, ok := s.pricingData[makeKey(model, provider, mode)]
 	if ok {
 		return &pricing, true
+	}
+
+	// The hosted TypeSafe catalog also uses evaluation (e.g. Jev 1.14.0).
+	// Fall back at lookup time so existing DB rows work without a migration,
+	// while an explicit decisions row keeps precedence.
+	if provider == string(schemas.Typesafe) && requestType == schemas.DecisionRequest {
+		if pricing, ok := s.pricingData[makeKey(model, provider, "evaluation")]; ok {
+			return &pricing, true
+		}
 	}
 
 	// Lookup in vertex if gemini not found

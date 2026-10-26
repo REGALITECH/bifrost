@@ -176328,6 +176328,110 @@
           }
         }
       ]
+    },
+    {
+      "name": "52. Fish TTS model list (REGALITECH/etla#256 / PR #17)",
+      "description": "Fish ListModels used to return voice IDs from GET /model, so wildcard virtual keys rejected TTS engines such as s2.1-pro. These cases pin GET /v1/models -> FishAudioProvider.ListModels -> the fixed TTS engine list, both with and without legacy voice-filter query parameters. Use a dedicated gateway with fixtures/fishaudio-models/config.json: its wildcard key is a dummy and its upstream URL is deliberately unreachable, proving listing requires no Fish credentials or network access. From the repository root, with no gateway already running at BASE_URL, run make run-provider-harness-test PROVIDER=fishaudio FEATURE=\"Fish TTS model list\" APP_DIR=tests/e2e/api/fixtures/fishaudio-models SKIP_STREAM_CANCEL=1. These GET requests perform no synthesis. The Go model-catalog regression separately checks wildcard virtual-key authorization, aliases and multiple keys.",
+      "item": [
+        {
+          "name": "fishaudio/s2.1-pro TTS model list returns synthesis engines - #256",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// This local fixture must not call Fish. Upstream/auth/network errors are regressions, not noise to skip.",
+                  "pm.test('Fish TTS model listing succeeds without an upstream request', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(200);",
+                  "  pm.expect(pm.response.text(), 'wildcard Fish key must allow TTS models').to.not.include('model_blocked');",
+                  "});",
+                  "if (pm.response.code !== 200) { return; }",
+                  "pm.test('Fish lists TTS engines instead of voice IDs', function () {",
+                  "  var body = pm.response.json();",
+                  "  pm.expect(body.data, 'missing model list: ' + pm.response.text()).to.be.an('array');",
+                  "  var ids = body.data.map(function (model) { return model.id; });",
+                  "  pm.expect(ids, 'unexpected models: ' + pm.response.text()).to.have.members(['fishaudio/s1', 'fishaudio/s2-pro', 'fishaudio/s2.1-pro', 'fishaudio/s2.1-pro-free']);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/models?provider=fishaudio",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "models"
+              ],
+              "query": [
+                {
+                  "key": "provider",
+                  "value": "fishaudio"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "fishaudio/s2.1-pro TTS model list ignores legacy voice filters - #256",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// This local fixture must not call Fish. Upstream/auth/network errors are regressions, not noise to skip.",
+                  "pm.test('Fish TTS model listing succeeds without an upstream request', function () {",
+                  "  pm.expect(pm.response.code, 'failed: ' + pm.response.text()).to.equal(200);",
+                  "  pm.expect(pm.response.text(), 'wildcard Fish key must allow TTS models').to.not.include('model_blocked');",
+                  "});",
+                  "if (pm.response.code !== 200) { return; }",
+                  "pm.test('Fish lists TTS engines instead of voice IDs', function () {",
+                  "  var body = pm.response.json();",
+                  "  pm.expect(body.data, 'missing model list: ' + pm.response.text()).to.be.an('array');",
+                  "  var ids = body.data.map(function (model) { return model.id; });",
+                  "  pm.expect(ids, 'unexpected models: ' + pm.response.text()).to.have.members(['fishaudio/s1', 'fishaudio/s2-pro', 'fishaudio/s2.1-pro', 'fishaudio/s2.1-pro-free']);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/v1/models?provider=fishaudio&self=true&title=bifrost-harness-nonexistent-voice",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "v1",
+                "models"
+              ],
+              "query": [
+                {
+                  "key": "provider",
+                  "value": "fishaudio"
+                },
+                {
+                  "key": "self",
+                  "value": "true"
+                },
+                {
+                  "key": "title",
+                  "value": "bifrost-harness-nonexistent-voice"
+                }
+              ]
+            }
+          }
+        }
+      ]
     }
   ]
 }

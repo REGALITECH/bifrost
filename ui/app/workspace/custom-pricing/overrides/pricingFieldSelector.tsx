@@ -6,10 +6,10 @@ import { useEffect, useMemo, useState } from "react";
 import type { FieldErrors, PricingFieldKey } from "./pricingFields";
 import { PRICING_FIELDS } from "./pricingFields";
 
-type GroupKey = "chat" | "embedding" | "rerank" | "audio" | "image" | "video" | "ocr";
+type GroupKey = "chat" | "embedding" | "rerank" | "decisions" | "audio" | "image" | "video" | "ocr";
 
 const PRICING_GROUPS: { key: GroupKey; label: string }[] = [
-	{ key: "chat", label: "Chat / Text / Responses" },
+	{ key: "chat", label: "Chat / Text / Responses / Decisions" },
 	{ key: "embedding", label: "Embedding" },
 	{ key: "rerank", label: "Rerank" },
 	{ key: "audio", label: "Audio" },
@@ -24,6 +24,7 @@ const REQUEST_TYPE_TO_CATEGORY: Record<string, GroupKey> = {
 	responses: "chat",
 	embedding: "embedding",
 	rerank: "rerank",
+	decisions: "decisions",
 	speech: "audio",
 	transcription: "audio",
 	image_generation: "image",
