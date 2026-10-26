@@ -98,15 +98,47 @@ func (provider *OpenRouterProvider) validateKey(ctx *schemas.BifrostContext, key
 	// Check for auth errors (401, 403)
 	statusCode := resp.StatusCode()
 	if statusCode == fasthttp.StatusUnauthorized || statusCode == fasthttp.StatusForbidden {
-		return providerUtils.SetErrorLatency(openai.ParseOpenAIError(resp), latency)
+		return providerUtils.SetErrorLatency(parseOpenRouterError(resp), latency)
 	}
 
 	// Any 4xx/5xx error indicates the key might be invalid
 	if statusCode >= 400 {
-		return providerUtils.SetErrorLatency(openai.ParseOpenAIError(resp), latency)
+		return providerUtils.SetErrorLatency(parseOpenRouterError(resp), latency)
 	}
 
 	return nil
+}
+
+// fetchEmbeddingModels fetches OpenRouter's embedding-model catalog. Best-effort: any
+// failure is logged and swallowed so it never fails the primary ListModels call.
+func (provider *OpenRouterProvider) fetchEmbeddingModels(ctx *schemas.BifrostContext, key schemas.Key) []schemas.Model {
+	req := fasthttp.AcquireRequest()
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+
+	providerUtils.SetExtraHeaders(ctx, req, provider.networkConfig.ExtraHeaders, nil)
+
+	req.SetRequestURI(provider.networkConfig.BaseURL + "/v1/embeddings/models")
+	req.Header.SetMethod(http.MethodGet)
+	req.Header.SetContentType("application/json")
+	if keyValue := key.Value.GetValue(); keyValue != "" {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", keyValue))
+	}
+
+	_, bifrostErr, wait := providerUtils.MakeRequestWithContext(ctx, provider.client, req, resp)
+	defer wait()
+	if bifrostErr != nil || resp.StatusCode() != fasthttp.StatusOK {
+		provider.logger.Debug("openrouter: failed to fetch embedding models, skipping")
+		return nil
+	}
+
+	var embeddingResponse schemas.BifrostListModelsResponse
+	if _, _, bifrostErr := providerUtils.HandleProviderResponse(resp.Body(), &embeddingResponse, nil, false, false); bifrostErr != nil {
+		provider.logger.Debug("openrouter: failed to parse embedding models response, skipping")
+		return nil
+	}
+	return embeddingResponse.Data
 }
 
 // listModelsByKey performs a list models request for a single key.
@@ -159,7 +191,7 @@ func (provider *OpenRouterProvider) listModelsByKey(ctx *schemas.BifrostContext,
 			// Continue with empty response; allowed models will be backfilled below.
 			modelsFetched = false
 		} else {
-			bifrostErr := providerUtils.SetErrorLatency(openai.ParseOpenAIError(resp), latency)
+			bifrostErr := providerUtils.SetErrorLatency(parseOpenRouterError(resp), latency)
 			return nil, bifrostErr
 		}
 	}
@@ -183,6 +215,23 @@ func (provider *OpenRouterProvider) listModelsByKey(ctx *schemas.BifrostContext,
 		// Set raw response if enabled
 		if providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse) {
 			openrouterResponse.ExtraFields.RawResponse = rawResponse
+		}
+	}
+
+	// Merge in the embedding-model catalog, which OpenRouter's default /v1/models
+	// response omits entirely.
+	if modelsFetched {
+		if embeddingModels := provider.fetchEmbeddingModels(ctx, key); len(embeddingModels) > 0 {
+			existing := make(map[string]bool, len(openrouterResponse.Data))
+			for _, m := range openrouterResponse.Data {
+				existing[strings.ToLower(m.ID)] = true
+			}
+			for _, m := range embeddingModels {
+				if !existing[strings.ToLower(m.ID)] {
+					openrouterResponse.Data = append(openrouterResponse.Data, m)
+					existing[strings.ToLower(m.ID)] = true
+				}
+			}
 		}
 	}
 
@@ -275,7 +324,7 @@ func (provider *OpenRouterProvider) TextCompletion(ctx *schemas.BifrostContext, 
 		providerUtils.ShouldSendBackRawRequest(ctx, provider.sendBackRawRequest),
 		providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse),
 		nil,
-		nil,
+		parseOpenRouterError,
 		provider.logger,
 	)
 }
@@ -295,7 +344,7 @@ func (provider *OpenRouterProvider) TextCompletionStream(ctx *schemas.BifrostCon
 		providerUtils.ShouldSendBackRawRequest(ctx, provider.sendBackRawRequest),
 		providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse),
 		provider.GetProviderKey(),
-		nil,
+		parseOpenRouterError,
 		postHookRunner,
 		nil,
 		nil,
@@ -317,7 +366,7 @@ func (provider *OpenRouterProvider) ChatCompletion(ctx *schemas.BifrostContext, 
 		providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse),
 		provider.GetProviderKey(),
 		nil,
-		nil,
+		parseOpenRouterError,
 		nil,
 		provider.logger,
 	)
@@ -342,7 +391,7 @@ func (provider *OpenRouterProvider) ChatCompletionStream(ctx *schemas.BifrostCon
 		postHookRunner,
 		nil,
 		nil,
-		nil,
+		parseOpenRouterError,
 		nil,
 		nil,
 		nil,
@@ -364,7 +413,7 @@ func (provider *OpenRouterProvider) Responses(ctx *schemas.BifrostContext, key s
 		providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse),
 		provider.GetProviderKey(),
 		nil,
-		nil,
+		parseOpenRouterError,
 		nil,
 		provider.logger,
 	)
@@ -385,7 +434,7 @@ func (provider *OpenRouterProvider) ResponsesStream(ctx *schemas.BifrostContext,
 		provider.GetProviderKey(),
 		postHookRunner,
 		nil,
-		nil,
+		parseOpenRouterError,
 		nil,
 		nil,
 		nil,
@@ -407,13 +456,27 @@ func (provider *OpenRouterProvider) Embedding(ctx *schemas.BifrostContext, key s
 		providerUtils.ShouldSendBackRawRequest(ctx, provider.sendBackRawRequest),
 		providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse),
 		nil,
+		parseOpenRouterError,
 		provider.logger,
 	)
 }
 
-// Speech is not supported by the OpenRouter provider.
+// Speech performs a text-to-speech request to the OpenRouter API.
 func (provider *OpenRouterProvider) Speech(ctx *schemas.BifrostContext, key schemas.Key, request *schemas.BifrostSpeechRequest) (*schemas.BifrostSpeechResponse, *schemas.BifrostError) {
-	return nil, providerUtils.NewUnsupportedOperationError(schemas.SpeechRequest, provider.GetProviderKey())
+	return openai.HandleOpenAISpeechRequest(
+		ctx,
+		provider.client,
+		provider.networkConfig.BaseURL+providerUtils.GetPathFromContext(ctx, "/v1/audio/speech"),
+		request,
+		key,
+		provider.networkConfig.ExtraHeaders,
+		nil,
+		provider.GetProviderKey(),
+		providerUtils.ShouldSendBackRawRequest(ctx, provider.sendBackRawRequest),
+		providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse),
+		nil,
+		provider.logger,
+	)
 }
 
 // Rerank is not supported by the OpenRouter provider.
@@ -436,9 +499,21 @@ func (provider *OpenRouterProvider) SpeechStream(ctx *schemas.BifrostContext, po
 	return nil, providerUtils.NewUnsupportedOperationError(schemas.SpeechStreamRequest, provider.GetProviderKey())
 }
 
-// Transcription is not supported by the OpenRouter provider.
+// Transcription performs a speech-to-text request to the OpenRouter API.
 func (provider *OpenRouterProvider) Transcription(ctx *schemas.BifrostContext, key schemas.Key, request *schemas.BifrostTranscriptionRequest) (*schemas.BifrostTranscriptionResponse, *schemas.BifrostError) {
-	return nil, providerUtils.NewUnsupportedOperationError(schemas.TranscriptionRequest, provider.GetProviderKey())
+	return openai.HandleOpenAITranscriptionRequest(
+		ctx,
+		provider.client,
+		provider.networkConfig.BaseURL+providerUtils.GetPathFromContext(ctx, "/v1/audio/transcriptions"),
+		request,
+		key,
+		provider.networkConfig.ExtraHeaders,
+		nil,
+		provider.GetProviderKey(),
+		providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse),
+		nil,
+		provider.logger,
+	)
 }
 
 // TranscriptionStream is not supported by the OpenRouter provider.
@@ -494,6 +569,11 @@ func (provider *OpenRouterProvider) VideoDelete(_ *schemas.BifrostContext, _ sch
 // VideoList is not supported by OpenRouter provider.
 func (provider *OpenRouterProvider) VideoList(_ *schemas.BifrostContext, _ schemas.Key, _ *schemas.BifrostVideoListRequest) (*schemas.BifrostVideoListResponse, *schemas.BifrostError) {
 	return nil, providerUtils.NewUnsupportedOperationError(schemas.VideoListRequest, provider.GetProviderKey())
+}
+
+// VideoEdit is not supported by the OpenRouter provider.
+func (provider *OpenRouterProvider) VideoEdit(_ *schemas.BifrostContext, _ schemas.Key, _ *schemas.BifrostVideoEditRequest) (*schemas.BifrostVideoEditResponse, *schemas.BifrostError) {
+	return nil, providerUtils.NewUnsupportedOperationError(schemas.VideoEditRequest, provider.GetProviderKey())
 }
 
 // VideoRemix is not supported by OpenRouter provider.

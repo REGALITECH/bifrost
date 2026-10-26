@@ -119,24 +119,24 @@ request > 90               // Switch providers when request limit near max
 #### Complexity Routing
 
 ```cel
-complexity_tier   // Automatically-classified request tier: "SIMPLE", "MEDIUM", "COMPLEX", or "REASONING"
+complexity_tier   // Automatically-classified request tier: "SIMPLE", "MEDIUM", or "COMPLEX"
 ```
 
-Bifrost analyzes each request's prompt content and assigns a tier before routing rules are evaluated. This lets you route cheap/fast requests to small models and deep reasoning tasks to frontier models with no application-side changes.
+Bifrost embeds each request and assigns it the tier of its nearest reference phrase before routing rules are evaluated. This lets you route cheap/fast requests to small models and deep reasoning tasks to frontier models with no application-side changes.
 
 <Note>
-If complexity analysis is unavailable for a request (e.g. unparseable body), `complexity_tier` is treated as **unknown** by the evaluator — the rule does not match and evaluation falls through. Rules using other variables are unaffected.
+If complexity classification is unavailable for a request (classifier not configured or not ready, unsupported input, or a match below the similarity floor), `complexity_tier` is treated as **unknown** by the evaluator — the rule does not match and evaluation falls through. Rules using other variables are unaffected.
 </Note>
 
 **Examples:**
 ```cel
-complexity_tier == "REASONING"                              // Only frontier-worthy tasks
-complexity_tier in ["COMPLEX", "REASONING"]                 // Complex and above
-!(complexity_tier in ["SIMPLE", "MEDIUM"])                  // Same as above, negated form
-complexity_tier == "REASONING" && team_name == "research"   // Scoped to a team
+complexity_tier == "COMPLEX"                                // Only frontier-worthy tasks
+complexity_tier in ["MEDIUM", "COMPLEX"]                    // Medium and above
+!(complexity_tier in ["SIMPLE", "MEDIUM"])                  // Complex only, negated form
+complexity_tier == "COMPLEX" && team_name == "research"     // Scoped to a team
 ```
 
-See [Complexity Router](/features/governance/complexity-router) for how tiers are computed and how to tune the thresholds and keyword lists.
+See [Complexity Router](/features/governance/complexity-router) for how tiers are computed and how to tune the reference phrases and embedding configuration.
 
 #### How Capacity Metrics Are Resolved
 
@@ -300,9 +300,17 @@ The dashboard includes a visual query builder for CEL expressions:
 
 <Tab title="API">
 
+<Info>The `/api/routing/*` endpoints are available in **Bifrost v2.0.0 and above**. On earlier versions use the `/api/governance/*` paths.</Info>
+
+<Note>
+  These endpoints moved to `/api/routing/*` when routing became its own plugin. The previous
+  `/api/governance/*` paths still work and behave identically, so existing scripts keep
+  running, but they are deprecated and new integrations should use the paths shown here.
+</Note>
+
 ### List Routing Rules
 ```bash
-GET /api/governance/routing-rules
+GET /api/routing/rules
 
 # Optional query parameters:
 ?scope=global&scope_id=<id>&from_memory=true
@@ -337,12 +345,12 @@ GET /api/governance/routing-rules
 
 ### Get Single Rule
 ```bash
-GET /api/governance/routing-rules/{rule_id}
+GET /api/routing/rules/{rule_id}
 ```
 
 ### Create Rule
 ```bash
-POST /api/governance/routing-rules
+POST /api/routing/rules
 
 Content-Type: application/json
 ```
@@ -374,7 +382,7 @@ Content-Type: application/json
 
 ### Update Rule
 ```bash
-PUT /api/governance/routing-rules/{rule_id}
+PUT /api/routing/rules/{rule_id}
 
 Content-Type: application/json
 ```
@@ -391,7 +399,7 @@ Content-Type: application/json
 
 ### Delete Rule
 ```bash
-DELETE /api/governance/routing-rules/{rule_id}
+DELETE /api/routing/rules/{rule_id}
 ```
 
 **Response:** `200 OK`
@@ -458,7 +466,10 @@ Define routing rules in your `config.json` file under the governance configurati
   - `model` (string, optional): Target model - omit to use the incoming request model
   - `key_id` (string, optional): UUID of the API key to pin - requires `provider` to be present; omit for load-balanced key selection
   - `weight` (number, required): Probability weight - all weights in a rule must sum to 1 (e.g. 0.7 + 0.3 = 1.0)
-- **fallbacks** (array[string]): Fallback providers in "provider/model" format
+- **fallbacks** (array, optional): Ordered fallback chain, tried after every target fails. Each entry is either the string `"provider/model"` (use `"provider/"` to keep the incoming model), or an object:
+  - `provider` (string, required): Fallback provider
+  - `model` (string, optional): Fallback model - omit to use the incoming request model
+  - `key_id` (string, optional): UUID of the API key to pin - omit for load-balanced key selection. In `config.json` use `provider_key_name` instead, which resolves to a key ID at load time. A fallback whose pinned key is missing from that provider's pool is skipped, and the chain moves on
 - **scope** (string): Scope level - "global", "customer", "team", or "virtual_key"
 - **scope_id** (string, optional): ID of scoped entity (null for global scope)
 - **priority** (number): Rule evaluation order within scope (lower = evaluated first)
@@ -785,6 +796,22 @@ If OpenAI fails:
 1. Level 2 load balancing evaluates Azure keys
 2. If all Azure keys fail, tries Groq
 
+A fallback can pin its own provider key, which skips load balancing for that attempt:
+
+```json
+{
+  "provider": "openai",
+  "fallbacks": [
+    "azure/gpt-4o",
+    { "provider": "vertex", "model": "gemini-2.5-pro", "key_id": "8f3c1d2e-..." }
+  ]
+}
+```
+
+Each attempt is pinned independently, so an unpinned fallback later in the chain still load balances normally. If the pinned key is not in that provider's pool, the attempt is skipped and the chain moves to the next entry.
+
+A pin stays with its provider when [session affinity](/providers/session-affinity) reorders the chain. A session that moves the primary to another provider carries the target's pin onto that provider's fallback entry, and a fallback the session promotes brings its own pin to the primary attempt.
+
 ---
 
 ## Execution & Performance
@@ -908,7 +935,7 @@ Priority 0 → Priority 5 → Priority 10 → Priority 100 (first match wins)
 **Solutions**:
 ```bash
 # Get current routing rules in memory
-GET /api/governance/routing-rules?from_memory=true
+GET /api/routing/rules?from_memory=true
 
 # Check if your variables are present
 # Example: Is team_name actually set?
@@ -974,6 +1001,70 @@ Enable debug logging to see routing rule evaluation:
 [RoutingEngine] Rule matched! Selected target: provider=groq, model=gpt-3.5-turbo (weight=1), fallbacks=[azure/gpt-4o]
 ```
 
+### Routing Stops Working After a Downgrade
+
+<Info>
+This only affects a downgrade across the release that added key-pinned fallbacks, and only when a rule has a `key_id` (or, in `config.json`, a `provider_key_name`) on a fallback.
+
+- OSS: rolling back from 2.2.3 or later to 2.2.2 or earlier
+- Enterprise: rolling back from v2.2.3 or later to v2.2.2 or earlier
+
+Staying on either side of that line, or downgrading with no pinned fallback in any rule, is unaffected.
+</Info>
+
+**Symptom**: After the rollback, the log shows `failed to load plugin routing` at startup, the routing plugin reports an error status, and `GET /api/routing/rules` returns 500. If the pinned fallback is in `config.json` rather than the database, Bifrost exits at startup with `failed to unmarshal config` instead.
+
+**Cause**: Since 2.2.3, a fallback with a pinned key is a JSON object, both in `config.json` and in the `fallbacks` column of the `routing_rules` table. Earlier versions only decode string entries. In the database, the decode fails for the whole row, and because rules load in one query, that single row takes every routing rule down with it, including rules that never had a pinned fallback. In `config.json`, the decode fails for the whole file.
+
+**Solution**: Rewrite each object entry back to its `"provider/model"` string, then restart Bifrost. The pinned key is dropped, so that fallback goes back to load-balanced key selection. Every other entry is left as it is.
+
+If `config.json` defines routing rules, edit the file first: replace each fallback object under `governance.routing_rules[].fallbacks` with its `"provider/model"` string. Then run the statement for your config store backend once against the database; rows without an object entry are not touched.
+
+<Tabs>
+<Tab title="PostgreSQL">
+```sql
+UPDATE routing_rules
+SET fallbacks = (
+  SELECT jsonb_agg(
+    CASE jsonb_typeof(e.value)
+      WHEN 'object' THEN to_jsonb((e.value ->> 'provider') || '/' || COALESCE(e.value ->> 'model', ''))
+      ELSE e.value
+    END
+    ORDER BY e.ord
+  )::text
+  FROM jsonb_array_elements(routing_rules.fallbacks::jsonb) WITH ORDINALITY AS e(value, ord)
+)
+WHERE fallbacks IS NOT NULL
+  AND EXISTS (
+    SELECT 1 FROM jsonb_array_elements(routing_rules.fallbacks::jsonb) AS e
+    WHERE jsonb_typeof(e.value) = 'object'
+  );
+```
+</Tab>
+<Tab title="SQLite">
+```sql
+UPDATE routing_rules
+SET fallbacks = (
+  SELECT json_group_array(entry)
+  FROM (
+    SELECT CASE e.type
+      WHEN 'object' THEN json_extract(e.value, '$.provider') || '/' || COALESCE(json_extract(e.value, '$.model'), '')
+      ELSE e.value
+    END AS entry
+    FROM json_each(routing_rules.fallbacks) AS e
+    ORDER BY e.key
+  )
+)
+WHERE fallbacks IS NOT NULL
+  AND EXISTS (
+    SELECT 1 FROM json_each(routing_rules.fallbacks) AS e WHERE e.type = 'object'
+  );
+```
+</Tab>
+</Tabs>
+
+A fallback object without a `model` becomes `"provider/"`, which keeps the incoming model, the same as the string form. Back up the database before running the update. If you upgrade again later, pin the key on those fallbacks a second time through the API or UI.
+
 ---
 
 ## API Reference
@@ -982,7 +1073,7 @@ Enable debug logging to see routing rule evaluation:
 
 #### Create Capacity-Based Rule
 ```bash
-curl -X POST http://localhost:8080/api/governance/routing-rules \
+curl -X POST http://localhost:8080/api/routing/rules \
   -H "Content-Type: application/json" \
   -d '{
     "name": "High Budget Fallback",
@@ -1000,7 +1091,7 @@ curl -X POST http://localhost:8080/api/governance/routing-rules \
 
 #### Create Probabilistic Split Rule
 ```bash
-curl -X POST http://localhost:8080/api/governance/routing-rules \
+curl -X POST http://localhost:8080/api/routing/rules \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Premium Tier Split",
@@ -1016,7 +1107,7 @@ curl -X POST http://localhost:8080/api/governance/routing-rules \
 
 #### Create Rule with Pinned API Key
 ```bash
-curl -X POST http://localhost:8080/api/governance/routing-rules \
+curl -X POST http://localhost:8080/api/routing/rules \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Pin Production Key for Premium Tier",
@@ -1038,7 +1129,7 @@ curl -X POST http://localhost:8080/api/governance/routing-rules \
 
 #### List Rules by Team Scope
 ```bash
-curl http://localhost:8080/api/governance/routing-rules \
+curl http://localhost:8080/api/routing/rules \
   -H "Authorization: Bearer your-token" \
   -G \
   --data-urlencode "scope=team" \
@@ -1047,7 +1138,7 @@ curl http://localhost:8080/api/governance/routing-rules \
 
 #### Get In-Memory Rules (Debug)
 ```bash
-curl http://localhost:8080/api/governance/routing-rules?from_memory=true \
+curl http://localhost:8080/api/routing/rules?from_memory=true \
   -H "Authorization: Bearer your-token"
 ```
 

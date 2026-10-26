@@ -142,6 +142,9 @@ func createBedrockInvokeWithResponseStreamRouteConfig(pathPrefix string, handler
 					if err != nil {
 						return nil, fmt.Errorf("failed to convert invoke messages stream request: %w", err)
 					}
+					// Lets the Bedrock provider serve thinking requests with InvokeModel
+					// upstream, the only Bedrock API that reports thinking tokens (#7649).
+					ctx.SetValue(bedrock.BedrockContextKeyAnthropicInvokeIngress, true)
 					return &schemas.BifrostRequest{ResponsesRequest: responsesReq}, nil
 				}
 				// Prompt-based → Text Completion path (streaming)
@@ -246,6 +249,9 @@ func createBedrockInvokeRouteConfig(pathPrefix string, handlerStore lib.HandlerS
 				if err != nil {
 					return nil, fmt.Errorf("failed to convert invoke messages request: %w", err)
 				}
+				// Lets the Bedrock provider serve thinking requests with InvokeModel
+				// upstream, the only Bedrock API that reports thinking tokens (#7649).
+				ctx.SetValue(bedrock.BedrockContextKeyAnthropicInvokeIngress, true)
 				return &schemas.BifrostRequest{ResponsesRequest: responsesReq}, nil
 
 			default:
@@ -296,12 +302,12 @@ func createBedrockRerankRouteConfig(pathPrefix string, handlerStore lib.HandlerS
 			return nil, errors.New("invalid rerank request type")
 		},
 		RerankResponseConverter: func(ctx *schemas.BifrostContext, resp *schemas.BifrostRerankResponse) (interface{}, error) {
-			if resp.ExtraFields.Provider == schemas.Bedrock {
-				if resp.ExtraFields.RawResponse != nil {
-					return resp.ExtraFields.RawResponse, nil
-				}
+			// Only return raw response for native Bedrock calls
+			// For cross-provider routing, always convert to Bedrock format
+			if resp.ExtraFields.RawResponse != nil && resp.ExtraFields.Provider == schemas.Bedrock {
+				return resp.ExtraFields.RawResponse, nil
 			}
-			return resp, nil
+			return bedrock.ToBedrockRerankResponse(resp), nil
 		},
 		ErrorConverter: func(ctx *schemas.BifrostContext, err *schemas.BifrostError) interface{} {
 			return bedrock.ToBedrockError(err)
@@ -703,13 +709,13 @@ func extractBedrockJobArnFromPath(handlerStore lib.HandlerStore) PreRequestCallb
 }
 
 // NewBedrockRouter creates a new BedrockRouter with the given bifrost client
-func NewBedrockRouter(client *bifrost.Bifrost, handlerStore lib.HandlerStore, logger schemas.Logger) *BedrockRouter {
+func NewBedrockRouter(client *bifrost.Bifrost, handlerStore lib.HandlerStore, accessResolver AccessResolver, logger schemas.Logger) *BedrockRouter {
 	routes := CreateBedrockRouteConfigs("/bedrock", handlerStore)
 	routes = append(routes, createBedrockBatchRouteConfigs("/bedrock", handlerStore)...)
 	routes = append(routes, createBedrockFilesRouteConfigs("/bedrock/files", handlerStore)...)
 
 	return &BedrockRouter{
-		GenericRouter: NewGenericRouter(client, handlerStore, routes, nil, logger),
+		GenericRouter: NewGenericRouter(client, handlerStore, accessResolver, routes, nil, logger),
 	}
 }
 

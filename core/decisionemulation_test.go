@@ -259,7 +259,6 @@ func TestEmulateDecisionRejectsAnswerOutsideStructuredOptions(t *testing.T) {
 	}
 }
 
-
 // TestEmulateDecisionRefusesPassthroughExtensions pins #7599's "never text-only"
 // rule: when native extensions (e.g. images) were asked to reach the wire, an
 // emulating chat model refuses instead of silently answering without them.

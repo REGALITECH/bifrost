@@ -11,22 +11,11 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { ProviderIconType, RenderProviderIcon } from "@/lib/constants/icons";
 import { getProviderLabel, RequestTypeLabels } from "@/lib/constants/logs";
-import {
-	getErrorMessage,
-	useCreatePricingOverrideMutation,
-	useGetProvidersQuery,
-	useUpdatePricingOverrideMutation,
-} from "@/lib/store";
+import { getErrorMessage, useCreatePricingOverrideMutation, useGetProvidersQuery, useUpdatePricingOverrideMutation } from "@/lib/store";
 import { useGetAllKeysQuery } from "@/lib/store/apis/providersApi";
 import { getUserPicker } from "@/lib/registries/userPicker";
 import { ModelProvider, RequestType } from "@/lib/types/config";
-import {
-	CreatePricingOverrideRequest,
-	PricingOverride,
-	PricingOverrideMatchType,
-	PricingOverridePatch,
-	PricingOverrideScopeKind,
-} from "@/lib/types/governance";
+import { CreatePricingOverrideRequest, PricingOverride, PricingOverrideMatchType, PricingOverrideScopeKind } from "@/lib/types/governance";
 import { cn } from "@/lib/utils";
 import { ChevronDown, Save, X } from "lucide-react";
 import { Dispatch, SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -36,307 +25,31 @@ import { PricingFieldSelector } from "./pricingFieldSelector";
 // Side-effect import: registers the enterprise user picker (no-op in OSS builds).
 import "@enterprise/lib/registrations/userPicker";
 
-export const REQUEST_TYPE_GROUPS = [
-	{
-		label: "Chat / Text / Responses",
-		types: ["chat_completion", "text_completion", "responses"],
-	},
-	{
-		label: "Embedding",
-		types: ["embedding"],
-	},
-	{
-		label: "Rerank",
-		types: ["rerank"],
-	},
-	{
-		label: "Decisions",
-		types: ["decisions"],
-	},
-	{
-		label: "Audio",
-		types: ["speech", "transcription"],
-	},
-	{
-		label: "Image",
-		types: ["image_generation", "image_variation", "image_edit"],
-	},
-	{
-		label: "Video",
-		types: ["video_generation", "video_remix"],
-	},
-	{
-		label: "OCR",
-		types: ["ocr"],
-	},
-] as const;
-
-export const REQUEST_TYPE_OPTIONS = REQUEST_TYPE_GROUPS.flatMap((g) => g.types);
-
-export function getRequestTypeGroup(rt: string): string | undefined {
-	return REQUEST_TYPE_GROUPS.find((g) => (g.types as readonly string[]).includes(rt))?.label;
-}
-
-export const PRICING_FIELDS = [
-	// Chat / Text / Responses fields
-	{
-		key: "input_cost_per_token",
-		label: "Input / token",
-		group: "chat",
-		requestTypeGroups: ["chat", "embedding", "rerank", "decisions", "audio", "image", "video"],
-	},
-	{
-		key: "output_cost_per_token",
-		label: "Output / token",
-		group: "chat",
-		requestTypeGroups: ["chat", "rerank", "decisions", "audio", "image", "video"],
-	},
-	{ key: "input_cost_per_token_batches", label: "Input / token (batch)", group: "chat", requestTypeGroups: ["chat"] },
-	{ key: "output_cost_per_token_batches", label: "Output / token (batch)", group: "chat", requestTypeGroups: ["chat"] },
-	{ key: "input_cost_per_token_priority", label: "Input / token (priority)", group: "chat", requestTypeGroups: ["chat"] },
-	{ key: "output_cost_per_token_priority", label: "Output / token (priority)", group: "chat", requestTypeGroups: ["chat"] },
-	{ key: "input_cost_per_token_flex", label: "Input / token (flex)", group: "chat", requestTypeGroups: ["chat"] },
-	{ key: "output_cost_per_token_flex", label: "Output / token (flex)", group: "chat", requestTypeGroups: ["chat"] },
-	{ key: "input_cost_per_token_fast", label: "Input / token (fast)", group: "chat", requestTypeGroups: ["chat"] },
-	{ key: "output_cost_per_token_fast", label: "Output / token (fast)", group: "chat", requestTypeGroups: ["chat"] },
-	{
-		key: "input_cost_per_token_above_128k_tokens",
-		label: "Input / token (>128k)",
-		group: "chat",
-		requestTypeGroups: ["chat", "embedding", "rerank"],
-	},
-	{
-		key: "output_cost_per_token_above_128k_tokens",
-		label: "Output / token (>128k)",
-		group: "chat",
-		requestTypeGroups: ["chat", "rerank", "audio"],
-	},
-	{
-		key: "input_cost_per_token_above_200k_tokens",
-		label: "Input / token (>200k)",
-		group: "chat",
-		requestTypeGroups: ["chat", "embedding", "rerank"],
-	},
-	{
-		key: "input_cost_per_token_above_200k_tokens_priority",
-		label: "Input / token (>200k, priority)",
-		group: "chat",
-		requestTypeGroups: ["chat"],
-	},
-	{
-		key: "output_cost_per_token_above_200k_tokens",
-		label: "Output / token (>200k)",
-		group: "chat",
-		requestTypeGroups: ["chat", "rerank", "audio"],
-	},
-	{
-		key: "output_cost_per_token_above_200k_tokens_priority",
-		label: "Output / token (>200k, priority)",
-		group: "chat",
-		requestTypeGroups: ["chat"],
-	},
-	{
-		key: "input_cost_per_token_above_272k_tokens",
-		label: "Input / token (>272k)",
-		group: "chat",
-		requestTypeGroups: ["chat"],
-	},
-	{
-		key: "input_cost_per_token_above_272k_tokens_priority",
-		label: "Input / token (>272k, priority)",
-		group: "chat",
-		requestTypeGroups: ["chat"],
-	},
-	{
-		key: "output_cost_per_token_above_272k_tokens",
-		label: "Output / token (>272k)",
-		group: "chat",
-		requestTypeGroups: ["chat"],
-	},
-	{
-		key: "output_cost_per_token_above_272k_tokens_priority",
-		label: "Output / token (>272k, priority)",
-		group: "chat",
-		requestTypeGroups: ["chat"],
-	},
-	{
-		key: "input_cost_per_token_flex_above_272k_tokens",
-		label: "Input / token (>272k, flex)",
-		group: "chat",
-		requestTypeGroups: ["chat"],
-	},
-	{
-		key: "output_cost_per_token_flex_above_272k_tokens",
-		label: "Output / token (>272k, flex)",
-		group: "chat",
-		requestTypeGroups: ["chat"],
-	},
-	{ key: "cache_creation_input_token_cost", label: "Cache creation / token", group: "chat", requestTypeGroups: ["chat"] },
-	{ key: "cache_read_input_token_cost", label: "Cache read / token", group: "chat", requestTypeGroups: ["chat"] },
-	{
-		key: "cache_creation_input_token_cost_above_200k_tokens",
-		label: "Cache creation / token (>200k)",
-		group: "chat",
-		requestTypeGroups: ["chat"],
-	},
-	{ key: "cache_read_input_token_cost_above_200k_tokens", label: "Cache read / token (>200k)", group: "chat", requestTypeGroups: ["chat"] },
-	{ key: "cache_creation_input_token_cost_above_1hr", label: "Cache creation / token (>1hr)", group: "chat", requestTypeGroups: ["chat"] },
-	{
-		key: "cache_creation_input_token_cost_above_1hr_above_200k_tokens",
-		label: "Cache creation / token (>1hr, >200k)",
-		group: "chat",
-		requestTypeGroups: ["chat"],
-	},
-	{ key: "cache_read_input_token_cost_priority", label: "Cache read / token (priority)", group: "chat", requestTypeGroups: ["chat"] },
-	{ key: "cache_read_input_token_cost_flex", label: "Cache read / token (flex)", group: "chat", requestTypeGroups: ["chat"] },
-	{ key: "cache_creation_input_token_cost_fast", label: "Cache creation / token (fast)", group: "chat", requestTypeGroups: ["chat"] },
-	{
-		key: "cache_creation_input_token_cost_above_1hr_fast",
-		label: "Cache creation / token (>1hr, fast)",
-		group: "chat",
-		requestTypeGroups: ["chat"],
-	},
-	{ key: "cache_read_input_token_cost_fast", label: "Cache read / token (fast)", group: "chat", requestTypeGroups: ["chat"] },
-	{
-		key: "cache_read_input_token_cost_above_200k_tokens_priority",
-		label: "Cache read / token (>200k, priority)",
-		group: "chat",
-		requestTypeGroups: ["chat"],
-	},
-	{ key: "cache_read_input_token_cost_above_272k_tokens", label: "Cache read / token (>272k)", group: "chat", requestTypeGroups: ["chat"] },
-	{
-		key: "cache_read_input_token_cost_above_272k_tokens_priority",
-		label: "Cache read / token (>272k, priority)",
-		group: "chat",
-		requestTypeGroups: ["chat"],
-	},
-	{
-		key: "cache_read_input_token_cost_flex_above_272k_tokens",
-		label: "Cache read / token (>272k, flex)",
-		group: "chat",
-		requestTypeGroups: ["chat"],
-	},
-	{
-		key: "cache_creation_input_token_cost_priority",
-		label: "Cache creation / token (priority)",
-		group: "chat",
-		requestTypeGroups: ["chat"],
-	},
-	{ key: "cache_creation_input_token_cost_flex", label: "Cache creation / token (flex)", group: "chat", requestTypeGroups: ["chat"] },
-	{
-		key: "cache_creation_input_token_cost_above_272k_tokens",
-		label: "Cache creation / token (>272k)",
-		group: "chat",
-		requestTypeGroups: ["chat"],
-	},
-	{
-		key: "cache_creation_input_token_cost_flex_above_272k_tokens",
-		label: "Cache creation / token (>272k, flex)",
-		group: "chat",
-		requestTypeGroups: ["chat"],
-	},
-	{ key: "search_context_cost_per_query", label: "Search context / query", group: "chat", requestTypeGroups: ["chat", "rerank"] },
-	{ key: "code_interpreter_cost_per_session", label: "Code interpreter / session", group: "chat", requestTypeGroups: ["chat"] },
-	{ key: "inference_geo_us_multiplier", label: "Inference geo US multiplier", group: "chat", requestTypeGroups: ["chat"] },
-	// Audio fields
-	{ key: "input_cost_per_character", label: "Input / character", group: "audio", requestTypeGroups: ["audio"] },
-	{ key: "input_cost_per_audio_token", label: "Input / audio token", group: "audio", requestTypeGroups: ["audio"] },
-	{ key: "input_cost_per_audio_per_second", label: "Input / audio second", group: "audio", requestTypeGroups: ["audio"] },
-	{
-		key: "input_cost_per_audio_per_second_above_128k_tokens",
-		label: "Input / audio second (>128k)",
-		group: "audio",
-		requestTypeGroups: ["audio"],
-	},
-	{ key: "input_cost_per_second", label: "Input / second", group: "audio", requestTypeGroups: ["audio", "video"] },
-	{ key: "output_cost_per_audio_token", label: "Output / audio token", group: "audio", requestTypeGroups: ["audio"] },
-	{ key: "output_cost_per_second", label: "Output / second", group: "audio", requestTypeGroups: ["audio", "video"] },
-	{ key: "cache_creation_input_audio_token_cost", label: "Cache creation / audio token", group: "audio", requestTypeGroups: ["audio"] },
-	// Image fields
-	{ key: "input_cost_per_image_token", label: "Input / image token", group: "image", requestTypeGroups: ["image"] },
-	{ key: "input_cost_per_image", label: "Input / image", group: "image", requestTypeGroups: ["image"] },
-	{ key: "input_cost_per_image_above_128k_tokens", label: "Input / image (>128k)", group: "image", requestTypeGroups: ["image"] },
-	{ key: "input_cost_per_pixel", label: "Input / pixel", group: "image", requestTypeGroups: ["image"] },
-	{ key: "output_cost_per_image_token", label: "Output / image token", group: "image", requestTypeGroups: ["image"] },
-	{ key: "output_cost_per_image", label: "Output / image", group: "image", requestTypeGroups: ["image"] },
-	{ key: "output_cost_per_pixel", label: "Output / pixel", group: "image", requestTypeGroups: ["image"] },
-	{ key: "output_cost_per_image_premium_image", label: "Output / image (premium)", group: "image", requestTypeGroups: ["image"] },
-	{ key: "output_cost_per_image_above_512_and_512_pixels", label: "Output / image (>512px)", group: "image", requestTypeGroups: ["image"] },
-	{
-		key: "output_cost_per_image_above_512_and_512_pixels_and_premium_image",
-		label: "Output / image (>512px, premium)",
-		group: "image",
-		requestTypeGroups: ["image"],
-	},
-	{
-		key: "output_cost_per_image_above_1024_and_1024_pixels",
-		label: "Output / image (>1024px)",
-		group: "image",
-		requestTypeGroups: ["image"],
-	},
-	{
-		key: "output_cost_per_image_above_1024_and_1024_pixels_and_premium_image",
-		label: "Output / image (>1024px, premium)",
-		group: "image",
-		requestTypeGroups: ["image"],
-	},
-	{ key: "output_cost_per_image_above_2048_and_2048_pixels", label: "Output / image (>2048px)", group: "image", requestTypeGroups: ["image"] },
-	{ key: "output_cost_per_image_above_4096_and_4096_pixels", label: "Output / image (>4096px)", group: "image", requestTypeGroups: ["image"] },
-	{ key: "output_cost_per_image_low_quality", label: "Output / image (low quality)", group: "image", requestTypeGroups: ["image"] },
-	{ key: "output_cost_per_image_medium_quality", label: "Output / image (medium quality)", group: "image", requestTypeGroups: ["image"] },
-	{ key: "output_cost_per_image_high_quality", label: "Output / image (high quality)", group: "image", requestTypeGroups: ["image"] },
-	{ key: "output_cost_per_image_auto_quality", label: "Output / image (auto quality)", group: "image", requestTypeGroups: ["image"] },
-	{ key: "cache_read_input_image_token_cost", label: "Cache read / image token", group: "image", requestTypeGroups: ["image"] },
-	// Video fields
-	{ key: "input_cost_per_video_per_second", label: "Input / video second", group: "video", requestTypeGroups: ["video"] },
-	{
-		key: "input_cost_per_video_per_second_above_128k_tokens",
-		label: "Input / video second (>128k)",
-		group: "video",
-		requestTypeGroups: ["video"],
-	},
-	{ key: "output_cost_per_video_per_second", label: "Output / video second", group: "video", requestTypeGroups: ["video"] },
-	// OCR fields
-	{ key: "ocr_cost_per_page", label: "OCR / page", group: "ocr", requestTypeGroups: ["ocr"] },
-	{ key: "annotation_cost_per_page", label: "Annotation / page", group: "ocr", requestTypeGroups: ["ocr"] },
-] as const;
-
-export type PricingFieldKey = (typeof PRICING_FIELDS)[number]["key"];
-export type FieldErrors = Partial<Record<PricingFieldKey | "name" | "scope" | "pattern" | "patch", string>>;
-
-type ScopeRoot = "global" | "virtual_key" | "user";
-
-export interface FormState {
-	name: string;
-	scopeRoot: ScopeRoot;
-	userID: string;
-	virtualKeyID: string;
-	providerID: string;
-	providerKeyID: string;
-	matchType: PricingOverrideMatchType;
-	pattern: string;
-	requestTypes: RequestType[];
-	pricingValues: Partial<Record<PricingFieldKey, string>>;
-}
-
-export const defaultFormState: FormState = {
-	name: "",
-	scopeRoot: "global",
-	userID: "",
-	virtualKeyID: "",
-	providerID: "",
-	providerKeyID: "",
-	matchType: "exact",
-	pattern: "",
-	requestTypes: [],
-	pricingValues: {},
-};
-
-export const fieldLabelByKey = Object.fromEntries(PRICING_FIELDS.map((field) => [field.key, field.label])) as Record<
-	PricingFieldKey,
-	string
->;
-export const patchKeys = PRICING_FIELDS.map((field) => field.key) as PricingFieldKey[];
+// Field metadata lives in ./pricingFields; re-exported here so existing
+// importers of this module keep working unchanged.
+export {
+	fieldLabelByKey,
+	getRequestTypeGroup,
+	patchKeys,
+	PRICING_FIELDS,
+	REQUEST_TYPE_GROUPS,
+	REQUEST_TYPE_OPTIONS,
+} from "./pricingFields";
+export { buildPatchFromForm, defaultFormState } from "./pricingFields";
+export type { FieldErrors, FormState, PricingFieldKey, ScopeRoot } from "./pricingFields";
+import {
+	buildPatchFromForm,
+	defaultFormState,
+	fieldLabelByKey,
+	isUnsafePatchKey,
+	patchKeys,
+	PRESERVED_PATCH_KEYS,
+	PRICING_FIELDS,
+	REQUEST_TYPE_GROUPS,
+	REQUEST_TYPE_OPTIONS,
+	pricingFieldError,
+} from "./pricingFields";
+import type { FieldErrors, FormState, PricingFieldKey, ScopeRoot } from "./pricingFields";
 
 export function patternError(matchType: PricingOverrideMatchType, pattern: string): string | undefined {
 	const trimmed = pattern.trim();
@@ -352,28 +65,6 @@ export function patternError(matchType: PricingOverrideMatchType, pattern: strin
 	return undefined;
 }
 
-export function buildPatchFromForm(form: FormState): { patch: PricingOverridePatch; errors: FieldErrors } {
-	const errors: FieldErrors = {};
-	const patch: PricingOverridePatch = {};
-
-	for (const key of patchKeys) {
-		const raw = form.pricingValues[key];
-		if (raw == null || raw.trim() === "") continue;
-		const parsed = Number(raw);
-		if (!Number.isFinite(parsed)) {
-			errors[key] = "Must be a number";
-			continue;
-		}
-		if (parsed < 0) {
-			errors[key] = "Must be >= 0";
-			continue;
-		}
-		(patch as Record<string, number>)[key] = parsed;
-	}
-
-	return { patch, errors };
-}
-
 function toFormState(override: PricingOverride): FormState {
 	const values: Partial<Record<PricingFieldKey, string>> = {};
 	let parsedPatch: Record<string, unknown> = {};
@@ -382,9 +73,18 @@ function toFormState(override: PricingOverride): FormState {
 	} catch {
 		// malformed patch — leave values empty
 	}
-	for (const key of patchKeys) {
-		const val = parsedPatch[key];
-		if (typeof val === "number") values[key] = String(val);
+	// Existing overrides are read leniently: an unrecognized key the API stored
+	// is carried through rather than dropped on save. Unsafe keys are the one
+	// exception, since assigning them here would mutate the prototype instead
+	// of storing anything.
+	const preservedPatch: Record<string, unknown> = {};
+	for (const [key, val] of Object.entries(parsedPatch)) {
+		if (isUnsafePatchKey(key)) continue;
+		if (patchKeys.includes(key as PricingFieldKey) && typeof val === "number") {
+			values[key as PricingFieldKey] = String(val);
+		} else {
+			preservedPatch[key] = val;
+		}
 	}
 	const scopeKind = resolveScopeKind(override);
 
@@ -406,6 +106,7 @@ function toFormState(override: PricingOverride): FormState {
 		pattern: override.pattern,
 		requestTypes: override.request_types ?? [],
 		pricingValues: values,
+		preservedPatch,
 	};
 }
 
@@ -568,6 +269,7 @@ export default function PricingOverrideSheet({ open, onOpenChange, editingOverri
 	const matchType = watch("matchType");
 	const requestTypes = watch("requestTypes");
 	const pricingValues = watch("pricingValues");
+	const preservedPatch = watch("preservedPatch");
 
 	const shouldLockScope = useMemo(() => !editingOverride && isCompleteScopeLock(scopeLock), [editingOverride, scopeLock]);
 
@@ -619,8 +321,8 @@ export default function PricingOverrideSheet({ open, onOpenChange, editingOverri
 				providerKeyID: scopeLock.providerKeyID ?? "",
 				scopeRoot:
 					scopeLock.scopeKind === "virtual_key" ||
-						scopeLock.scopeKind === "virtual_key_provider" ||
-						scopeLock.scopeKind === "virtual_key_provider_key"
+					scopeLock.scopeKind === "virtual_key_provider" ||
+					scopeLock.scopeKind === "virtual_key_provider_key"
 						? "virtual_key"
 						: scopeLock.scopeKind === "user" || scopeLock.scopeKind === "user_provider" || scopeLock.scopeKind === "user_provider_key"
 							? "user"
@@ -671,11 +373,8 @@ export default function PricingOverrideSheet({ open, onOpenChange, editingOverri
 	const pricingFieldErrors = useMemo<FieldErrors>(() => {
 		const errs: FieldErrors = {};
 		for (const key of patchKeys) {
-			const raw = pricingValues[key];
-			if (!raw || raw.trim() === "") continue;
-			const parsed = Number(raw);
-			if (!Number.isFinite(parsed)) errs[key] = "Must be a number";
-			else if (parsed < 0) errs[key] = "Must be >= 0";
+			const err = pricingFieldError(key, pricingValues[key]);
+			if (err) errs[key] = err;
 		}
 		return errs;
 	}, [pricingValues]);
@@ -687,7 +386,7 @@ export default function PricingOverrideSheet({ open, onOpenChange, editingOverri
 			setJSONPatch(json);
 			setJSONError(undefined);
 		}
-	}, [pricingValues, getValues]);
+	}, [pricingValues, preservedPatch, getValues]);
 
 	const handleJSONChange = useCallback(
 		(value: string) => {
@@ -696,6 +395,7 @@ export default function PricingOverrideSheet({ open, onOpenChange, editingOverri
 			const trimmed = value.trim();
 			if (!trimmed) {
 				setJSONError(undefined);
+				setValue("preservedPatch", {});
 				setValue("pricingValues", {});
 				return;
 			}
@@ -706,18 +406,39 @@ export default function PricingOverrideSheet({ open, onOpenChange, editingOverri
 					return;
 				}
 				const newPricingValues: Partial<Record<PricingFieldKey, string>> = {};
+				const newPreserved: Record<string, unknown> = {};
 				for (const [key, val] of Object.entries(parsed)) {
-					if (!patchKeys.includes(key as PricingFieldKey)) {
-						setJSONError(`Unknown field: ${key}`);
+					if (isUnsafePatchKey(key)) {
+						setJSONError(`Unsupported field: ${key}`);
 						return;
 					}
-					if (typeof val !== "number" || Number.isNaN(val) || val < 0) {
-						setJSONError(`${key} must be a non-negative number`);
+					// Keys the form cannot render as a number (today only the
+					// peak_hours schedule object) ride through untouched so an
+					// override authored via the API stays editable here. Anything
+					// else unrecognized is a typo and is rejected: the pricing
+					// engine ignores unknown keys, so accepting one would save a
+					// setting that silently never takes effect.
+					if (!patchKeys.includes(key as PricingFieldKey)) {
+						if (!PRESERVED_PATCH_KEYS.includes(key)) {
+							setJSONError(`Unknown field: ${key}`);
+							return;
+						}
+						newPreserved[key] = val;
+						continue;
+					}
+					if (typeof val !== "number" || Number.isNaN(val)) {
+						setJSONError(`${key} must be a number`);
+						return;
+					}
+					const err = pricingFieldError(key as PricingFieldKey, String(val));
+					if (err) {
+						setJSONError(`${key}: ${err}`);
 						return;
 					}
 					newPricingValues[key as PricingFieldKey] = String(val);
 				}
 				setJSONError(undefined);
+				setValue("preservedPatch", newPreserved);
 				setValue("pricingValues", newPricingValues);
 			} catch {
 				setJSONError("Invalid JSON");
@@ -854,13 +575,13 @@ export default function PricingOverrideSheet({ open, onOpenChange, editingOverri
 	return (
 		<Sheet open={open} onOpenChange={(o) => (o ? onOpenChange(true) : handleCloseDrawer())}>
 			<SheetContent side="right" className="dark:bg-card flex w-full flex-col overflow-x-hidden bg-white p-0 pt-4 sm:max-w-2xl">
-				<SheetHeader className="flex flex-col items-start px-8 py-4" headerClassName="mb-0 sticky -top-4 bg-card z-10">
+				<SheetHeader className="flex flex-col items-start py-4" headerClassName="mb-0 sticky -top-4 bg-card z-10 px-4 md:px-8">
 					<SheetTitle className="">{editingOverride ? "Edit Pricing Override" : "Create Pricing Override"}</SheetTitle>
 				</SheetHeader>
 
 				<Form {...methods}>
 					<form onSubmit={handleSubmit(onSubmit)} className="flex min-h-0 flex-1 flex-col">
-						<div className="flex-1 space-y-6 px-8 pb-4">
+						<div className="flex-1 space-y-6 px-4 pb-4 md:px-8">
 							<div className="space-y-4">
 								<FormField
 									control={control}
@@ -995,7 +716,7 @@ export default function PricingOverrideSheet({ open, onOpenChange, editingOverri
 											/>
 										)}
 
-										<div className="grid grid-cols-2 gap-2">
+										<div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
 											<FormField
 												control={control}
 												name="providerID"
@@ -1258,7 +979,7 @@ export default function PricingOverrideSheet({ open, onOpenChange, editingOverri
 							</div>
 						</div>
 
-						<div className="bg-card sticky bottom-0 flex justify-end gap-3 border-t px-7 py-4">
+						<div className="bg-card sticky bottom-0 flex justify-end gap-3 border-t px-4 py-4 md:px-7">
 							<Button
 								data-testid="pricing-override-cancel-btn"
 								type="button"

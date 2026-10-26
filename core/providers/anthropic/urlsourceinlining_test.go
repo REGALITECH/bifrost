@@ -210,15 +210,43 @@ func TestInlineURLContentSources_NoURLSourcesIsAPassthrough(t *testing.T) {
 	}
 }
 
-// BedrockMantle is the provider that needs this; native Anthropic fetches URLs itself
-// and must not pay for a redundant download.
-func TestInlineURLSourcesEnabledOnlyForBedrockMantle(t *testing.T) {
-	if !AnthropicProviderRequestDefaultsMap[schemas.BedrockMantle].InlineURLSources {
-		t.Error("BedrockMantle must inline URL sources")
+// AWS-hosted Claude has no URL fetcher, so both the Bedrock InvokeModel entry and
+// Bedrock Mantle inline URL sources; native Anthropic fetches URLs itself and must
+// not pay for a redundant download.
+func TestInlineURLSourcesEnabledOnlyForAWSHostedClaude(t *testing.T) {
+	for _, provider := range []schemas.ModelProvider{schemas.Bedrock, schemas.BedrockMantle} {
+		if !AnthropicProviderRequestDefaultsMap[provider].InlineURLSources {
+			t.Errorf("%s must inline URL sources", provider)
+		}
 	}
-	for _, provider := range []schemas.ModelProvider{schemas.Anthropic, schemas.Azure, schemas.Vertex, schemas.Bedrock} {
+	for _, provider := range []schemas.ModelProvider{schemas.Anthropic, schemas.Azure, schemas.Vertex} {
 		if AnthropicProviderRequestDefaultsMap[provider].InlineURLSources {
 			t.Errorf("%s must not inline URL sources", provider)
 		}
+	}
+}
+
+// TestInlineURLContentSourcesForwardsUnfetchableSchemes: bifrost inlines only what it can
+// download. A source it cannot fetch is left in the body as {"type":"url"} and the platform
+// answers for itself - which keeps working if AWS-hosted Claude ever gains URL support.
+func TestInlineURLContentSourcesForwardsUnfetchableSchemes(t *testing.T) {
+	for _, tc := range []struct{ name, url string }{
+		{name: "s3", url: "s3://my-bucket/doc.pdf"},
+		{name: "gcs", url: "gs://my-bucket/doc.pdf"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"messages":[{"role":"user","content":[{"type":"document","source":{"type":"url","url":"` + tc.url + `"}}]}]}`)
+
+			out, err := InlineURLContentSources(nil, body)
+			if err != nil {
+				t.Fatalf("expected pass-through for %q, got error: %v", tc.url, err)
+			}
+			if got := gjson.GetBytes(out, "messages.0.content.0.source.url").String(); got != tc.url {
+				t.Errorf("url = %q, want %q left untouched", got, tc.url)
+			}
+			if got := gjson.GetBytes(out, "messages.0.content.0.source.type").String(); got != "url" {
+				t.Errorf("source.type = %q, want it to stay url", got)
+			}
+		})
 	}
 }

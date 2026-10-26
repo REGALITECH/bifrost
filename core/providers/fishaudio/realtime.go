@@ -8,6 +8,7 @@ import (
 
 	"github.com/vmihailenco/msgpack/v5"
 
+	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
 	"github.com/maximhq/bifrost/core/schemas"
 )
 
@@ -39,14 +40,37 @@ func (provider *FishAudioProvider) RealtimeUsesBinaryProtocol() bool {
 	return true
 }
 
+// Compile-time guards: the realtime transport discovers these interfaces by
+// runtime type assertion, so a signature drift would otherwise silently turn
+// Fish realtime into "provider does not support realtime".
+var (
+	_ schemas.RealtimeProvider             = (*FishAudioProvider)(nil)
+	_ schemas.RealtimeBinaryProvider       = (*FishAudioProvider)(nil)
+	_ schemas.RealtimeInputUsageProvider   = (*FishAudioProvider)(nil)
+	_ schemas.RealtimeModelHeadersProvider = (*FishAudioProvider)(nil)
+)
+
 // RealtimeWebSocketURL returns the tts-live endpoint. The model variant is sent
-// as a header (see RealtimeHeaders), not in the URL.
-func (provider *FishAudioProvider) RealtimeWebSocketURL(_ schemas.Key, _ string) string {
-	return fishWebSocketURL(provider.networkConfig.BaseURL)
+// as a header (see RealtimeHeadersForModel), not in the URL. Fish tts-live is
+// TTS only, so transcription sessions are rejected as unsupported.
+func (provider *FishAudioProvider) RealtimeWebSocketURL(_ schemas.Key, _, intent string) (string, *schemas.BifrostError) {
+	if intent == "transcription" {
+		return "", providerUtils.NewUnsupportedOperationError(schemas.RealtimeRequest, provider.GetProviderKey())
+	}
+	return fishWebSocketURL(provider.networkConfig.BaseURL), nil
 }
 
-// RealtimeHeaders returns the auth + model headers for the tts-live handshake.
-func (provider *FishAudioProvider) RealtimeHeaders(_ *schemas.BifrostContext, key schemas.Key, model string) (map[string]string, *schemas.BifrostError) {
+// RealtimeHeaders returns the tts-live handshake headers for Fish's default
+// model. The realtime transport calls RealtimeHeadersForModel instead, so a
+// session gets the model it requested.
+func (provider *FishAudioProvider) RealtimeHeaders(ctx *schemas.BifrostContext, key schemas.Key) (map[string]string, *schemas.BifrostError) {
+	return provider.RealtimeHeadersForModel(ctx, key, "")
+}
+
+// RealtimeHeadersForModel returns the auth + model headers for the tts-live
+// handshake. model is the requested model after key alias resolution; an
+// empty model falls back to Fish's recommended default.
+func (provider *FishAudioProvider) RealtimeHeadersForModel(_ *schemas.BifrostContext, key schemas.Key, model string) (map[string]string, *schemas.BifrostError) {
 	if model == "" {
 		model = fishDefaultModel
 	}

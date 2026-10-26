@@ -297,6 +297,7 @@ func TestFishRealtime_Capabilities(t *testing.T) {
 	var _ schemas.RealtimeProvider = provider
 	var _ schemas.RealtimeBinaryProvider = provider
 	var _ schemas.RealtimeInputUsageProvider = provider
+	var _ schemas.RealtimeModelHeadersProvider = provider
 }
 
 func TestFishRealtime_HeadersModel(t *testing.T) {
@@ -311,15 +312,29 @@ func TestFishRealtime_HeadersModel(t *testing.T) {
 		{name: "default model", want: fishDefaultModel},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			headers, err := provider.RealtimeHeaders(nil, schemas.Key{}, tt.model)
+			headers, err := provider.RealtimeHeadersForModel(nil, schemas.Key{}, tt.model)
 			if err != nil {
-				t.Fatalf("RealtimeHeaders() error = %v", err)
+				t.Fatalf("RealtimeHeadersForModel() error = %v", err)
 			}
 			if got := headers["model"]; got != tt.want {
-				t.Fatalf("RealtimeHeaders() model = %q, want %q", got, tt.want)
+				t.Fatalf("RealtimeHeadersForModel() model = %q, want %q", got, tt.want)
 			}
 		})
 	}
+
+	// RealtimeHeaders is the upstream interface method, which carries no model.
+	t.Run("RealtimeHeaders uses default model", func(t *testing.T) {
+		headers, err := provider.RealtimeHeaders(nil, schemas.Key{Value: *schemas.NewSecretVar("fish-key")})
+		if err != nil {
+			t.Fatalf("RealtimeHeaders() error = %v", err)
+		}
+		if got := headers["model"]; got != fishDefaultModel {
+			t.Fatalf("RealtimeHeaders() model = %q, want %q", got, fishDefaultModel)
+		}
+		if got := headers["Authorization"]; got != "Bearer fish-key" {
+			t.Fatalf("RealtimeHeaders() Authorization = %q, want %q", got, "Bearer fish-key")
+		}
+	})
 }
 
 func TestFishRealtime_InputUsage(t *testing.T) {
@@ -333,5 +348,22 @@ func TestFishRealtime_InputUsage(t *testing.T) {
 
 	if provider.RealtimeInputUsage("") != nil {
 		t.Fatal("RealtimeInputUsage(\"\") should be nil")
+	}
+}
+
+func TestFishRealtime_WebSocketURL(t *testing.T) {
+	provider := &FishAudioProvider{networkConfig: schemas.NetworkConfig{BaseURL: fishDefaultBaseURL}}
+
+	url, err := provider.RealtimeWebSocketURL(schemas.Key{}, "s2-pro", "")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if want := "wss://api.fish.audio" + fishTTSLivePath; url != want {
+		t.Fatalf("url = %q, want %q", url, want)
+	}
+
+	// Fish tts-live is TTS only: a transcription session must be rejected.
+	if url, err := provider.RealtimeWebSocketURL(schemas.Key{}, "s2-pro", "transcription"); err == nil || url != "" {
+		t.Fatalf("expected unsupported error for transcription intent, got url=%q err=%v", url, err)
 	}
 }

@@ -48,8 +48,11 @@ func RunRealtimeTest(t *testing.T, client *bifrost.Bifrost, ctx context.Context,
 			t.Fatalf("failed to select key for provider %s: %v", testConfig.Provider, err)
 		}
 
-		wsURL := rtProvider.RealtimeWebSocketURL(key, testConfig.RealtimeModel)
-		hdrs, headerErr := rtProvider.RealtimeHeaders(bfCtx, key, testConfig.RealtimeModel)
+		wsURL, urlErr := rtProvider.RealtimeWebSocketURL(key, testConfig.RealtimeModel, "")
+		if urlErr != nil {
+			t.Fatalf("failed to build realtime URL for provider %s: %v", testConfig.Provider, urlErr)
+		}
+		hdrs, headerErr := rtProvider.RealtimeHeaders(bfCtx, key)
 		if headerErr != nil {
 			t.Fatalf("failed to build realtime headers for provider %s: %v", testConfig.Provider, headerErr)
 		}

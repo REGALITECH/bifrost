@@ -155,12 +155,15 @@ func (h *HybridLogStore) processUpload(work *uploadWork) {
 	h.droppedUploads.Add(1)
 }
 
-// isPayloadEmpty returns true when every value in the payload map is empty.
-// Skipping uploads for empty payloads avoids wasted S3 PUTs (e.g. initial
-// "processing" entries that carry no input/output data yet).
+// isPayloadEmpty returns true when the payload carries no offloadable content.
+// Only the large TEXT payload fields count: metadata like provider, model,
+// status and timestamp is populated on every entry (see ExtractPayload), so
+// checking the whole map would never report empty and would defeat the skip
+// for initial "processing" rows that have no input/output data yet. Skipping
+// uploads for empty payloads avoids wasted S3 PUTs.
 func isPayloadEmpty(payload map[string]string) bool {
-	for _, v := range payload {
-		if v != "" {
+	for _, f := range payloadFields {
+		if payload[f] != "" {
 			return false
 		}
 	}
@@ -236,12 +239,12 @@ func (h *HybridLogStore) enqueueRawUpload(logID string, timestamp time.Time, key
 // Must be called after SerializeFields() populates the Parsed fields.
 func prepareDBEntry(dbEntry *Log, excluded map[string]struct{}) {
 	tokenUsage := dbEntry.TokenUsage
-	cacheDebug := dbEntry.CacheDebug
+	cacheMetadata := dbEntry.CacheDebug
 	tokenUsageParsed := dbEntry.TokenUsageParsed
 	cacheDebugParsed := dbEntry.CacheDebugParsed
 	restorePricingMetadata := func() {
 		dbEntry.TokenUsage = tokenUsage
-		dbEntry.CacheDebug = cacheDebug
+		dbEntry.CacheDebug = cacheMetadata
 		dbEntry.TokenUsageParsed = tokenUsageParsed
 		dbEntry.CacheDebugParsed = cacheDebugParsed
 	}
@@ -973,9 +976,10 @@ func (h *HybridLogStore) GetDimensionLatencyHistogram(ctx context.Context, filte
 	return h.inner.GetDimensionLatencyHistogram(ctx, filters, bucketSizeSeconds, dimension)
 }
 
-// BulkUpdateCost delegates to the inner store and updates the cost column
-// for each (logID -> cost) pair in a single round trip.
-func (h *HybridLogStore) BulkUpdateCost(ctx context.Context, updates map[string]float64) error {
+// BulkUpdateCost delegates to the inner store and updates the cost columns
+// (total + input/output/additional split) for each (logID -> CostUpdate) pair
+// in a single round trip.
+func (h *HybridLogStore) BulkUpdateCost(ctx context.Context, updates map[string]CostUpdate) error {
 	return h.inner.BulkUpdateCost(ctx, updates)
 }
 
@@ -1024,10 +1028,44 @@ func (h *HybridLogStore) GetDistinctRoutingEngines(ctx context.Context, limit in
 	return h.inner.GetDistinctRoutingEngines(ctx, limit, query)
 }
 
+// GetDistinctToolCallNames delegates to the inner store. tool_call_names is
+// not a payload field, so the inner row carries it even when content is offloaded.
+func (h *HybridLogStore) GetDistinctToolCallNames(ctx context.Context, limit int, query string) ([]string, error) {
+	return h.inner.GetDistinctToolCallNames(ctx, limit, query)
+}
+
 // GetDistinctStopReasons delegates to the inner store and returns distinct
 // stop-reason values matching query, capped at limit.
 func (h *HybridLogStore) GetDistinctStopReasons(ctx context.Context, limit int, query string) ([]string, error) {
 	return h.inner.GetDistinctStopReasons(ctx, limit, query)
+}
+
+// GetDistinctUserAgents delegates to the inner store and returns distinct
+// raw User-Agent strings for the logs "App" filter, capped at limit.
+func (h *HybridLogStore) GetDistinctUserAgents(ctx context.Context, limit int, query string) ([]string, error) {
+	return h.inner.GetDistinctUserAgents(ctx, limit, query)
+}
+
+// GetDistinctApps delegates to the inner store and returns distinct backend-
+// detected app labels from recent logs.
+func (h *HybridLogStore) GetDistinctApps(ctx context.Context, limit int, query string) ([]string, error) {
+	return h.inner.GetDistinctApps(ctx, limit, query)
+}
+
+func (h *HybridLogStore) CreateUserAgentMapping(ctx context.Context, mapping *UserAgentMapping) error {
+	return h.inner.CreateUserAgentMapping(ctx, mapping)
+}
+
+func (h *HybridLogStore) UpdateUserAgentMapping(ctx context.Context, id string, mapping *UserAgentMapping) error {
+	return h.inner.UpdateUserAgentMapping(ctx, id, mapping)
+}
+
+func (h *HybridLogStore) DeleteUserAgentMapping(ctx context.Context, id string) error {
+	return h.inner.DeleteUserAgentMapping(ctx, id)
+}
+
+func (h *HybridLogStore) ListUserAgentMappings(ctx context.Context, activeOnly bool) ([]UserAgentMapping, error) {
+	return h.inner.ListUserAgentMappings(ctx, activeOnly)
 }
 
 // GetDistinctMetadataKeys delegates to the inner store and returns distinct
@@ -1128,6 +1166,10 @@ func applyMCPToolLogUpdateMap(target *MCPToolLog, updates map[string]interface{}
 				target.Metadata = v
 				target.MetadataParsed = nil
 			}
+		case "redaction_mapping":
+			if v, ok := value.(string); ok {
+				target.RedactionMapping = v
+			}
 		case "latency":
 			if v, ok := numericToFloat64(value); ok {
 				target.Latency = &v
@@ -1192,6 +1234,9 @@ func applyMCPToolLogUpdateStruct(target *MCPToolLog, update *MCPToolLog) error {
 	if update.Metadata != "" {
 		target.Metadata = update.Metadata
 		target.MetadataParsed = nil
+	}
+	if update.RedactionMapping != "" {
+		target.RedactionMapping = update.RedactionMapping
 	}
 	if !update.CreatedAt.IsZero() {
 		target.CreatedAt = update.CreatedAt
@@ -1273,6 +1318,9 @@ func prepareMCPToolLogDBUpdatesFromStruct(update MCPToolLog) (map[string]any, er
 	}
 	if update.Metadata != "" {
 		out["metadata"] = update.Metadata
+	}
+	if update.RedactionMapping != "" {
+		out["redaction_mapping"] = update.RedactionMapping
 	}
 	if !update.CreatedAt.IsZero() {
 		out["created_at"] = update.CreatedAt
@@ -1463,6 +1511,17 @@ func (h *HybridLogStore) GetAvailableToolNames(ctx context.Context, limit int, q
 	return h.inner.GetAvailableToolNames(ctx, limit, query)
 }
 
+// GetAvailableMCPUserAgents returns distinct raw User-Agent strings from MCP tool logs.
+func (h *HybridLogStore) GetAvailableMCPUserAgents(ctx context.Context, limit int, query string) ([]string, error) {
+	return h.inner.GetAvailableMCPUserAgents(ctx, limit, query)
+}
+
+// GetAvailableMCPApps delegates to the inner store and returns distinct backend-
+// detected app labels from MCP tool logs.
+func (h *HybridLogStore) GetAvailableMCPApps(ctx context.Context, limit int, query string) ([]string, error) {
+	return h.inner.GetAvailableMCPApps(ctx, limit, query)
+}
+
 // GetAvailableServerLabels returns a list of server labels that match the given query.
 func (h *HybridLogStore) GetAvailableServerLabels(ctx context.Context, limit int, query string) ([]string, error) {
 	return h.inner.GetAvailableServerLabels(ctx, limit, query)
@@ -1513,9 +1572,9 @@ func (h *HybridLogStore) FindWebhookDeliveryByID(ctx context.Context, id string)
 	return h.inner.FindWebhookDeliveryByID(ctx, id)
 }
 
-// SearchWebhookDeliveries returns one page of delivery history for an endpoint.
-func (h *HybridLogStore) SearchWebhookDeliveries(ctx context.Context, endpointID string, pagination PaginationOptions) (*WebhookDeliverySearchResult, error) {
-	return h.inner.SearchWebhookDeliveries(ctx, endpointID, pagination)
+// SearchWebhookDeliveries returns one page of matching delivery history.
+func (h *HybridLogStore) SearchWebhookDeliveries(ctx context.Context, filters *WebhookDeliverySearchFilters, pagination PaginationOptions) (*WebhookDeliverySearchResult, error) {
+	return h.inner.SearchWebhookDeliveries(ctx, filters, pagination)
 }
 
 // DeleteExpiredWebhookDeliveries deletes delivery history whose expiry has passed.

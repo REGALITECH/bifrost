@@ -54,15 +54,21 @@ Set `enabled: false` to stop delivery.
 }
 ```
 
-Increase the plugin's `version` on every startup configuration change, including
-activation or deactivation: the default merge preserves stored configuration
-unless the file has a higher version. When migrating a previous dynamic-plugin
-configuration, remove `path` and increment `version` before restarting.
+With `source_of_truth: "config.json"` (the ETLA setting), every restart applies
+the file entry as written. Under the default merge, a restart applies an edited
+entry, including activation or deactivation, because its hash no longer matches
+the one recorded at the last sync. A stored row without a recorded hash (every
+row right after the upgrade to v2) keeps its stored configuration on that start
+and only records the baseline, so repeat the edit (for example, increment
+`version`) after it. When migrating a previous dynamic-plugin configuration,
+remove `path` and increment `version` before restarting.
 
 Legacy `dry_run` settings are rejected, including `false` and `null`, so an
 upgrade cannot silently start sending usage. To migrate, remove `dry_run` from
-the plugin configuration, explicitly set `enabled: false` to keep delivery off
-or `enabled: true` to send usage, and increment `version` above the stored value.
+the plugin configuration and explicitly set `enabled: false` to keep delivery off
+or `enabled: true` to send usage. The edit changes the entry's configuration
+hash, so a restart applies it; on the first start after the upgrade to v2,
+repeat the edit as described above.
 Enabled instances require an `api_key` environment reference such as
 `env.METRONOME_API_KEY`; literal keys and `vault.*` references are rejected.
 Disabled instances may omit `api_key`.
@@ -126,8 +132,9 @@ This changes the usage event's customer identifier. Before enabling the new vers
 2. Remove `customer_mapping` and `default_customer_id` from the plugin config,
    including empty values. The plugin rejects these legacy settings to avoid
    silently changing an existing installation's billing identity.
-3. Increase the plugin configuration's `version` above the stored version and
-   restart using an image with this change.
+3. Restart using an image with this change. Removing the legacy fields changes
+   the entry's configuration hash, so the restart applies it; on the first start
+   after the upgrade to v2, repeat the edit as described above.
 4. Send fresh usage from two tenant keys and inspect each event's matched customer
    and billable metrics, then verify each customer's draft invoice.
 
@@ -353,9 +360,11 @@ https://docs.metronome.com/api-reference/idempotency
   older usage needs a separate operational process.
 - The local logging/governance hooks finish before delivery. A 503 can therefore
   coexist with a usage log / budget update. Logging is asynchronous, so 202 is
-  not a durable-log acknowledgment. Governance's approximately 5-minute in-memory
-  deduplication does not guarantee unique local budget updates after restart or
-  across Pods. The stable ID protects Metronome metering, not those local counters.
+  not a durable-log acknowledgment. Governance bills a retry with the same VK and
+  `x-request-id` once only while the first report is still in its in-memory
+  deduplication window (about 5 minutes, per Bifrost process). A later retry, a
+  restart, or another Pod bills the local budget again. The stable ID protects
+  Metronome metering, not those local counters.
 - Outbox persistence, durable local accounting deduplication, conflict detection,
   and billing reconciliation remain follow-up work for production use.
 

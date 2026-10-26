@@ -8,13 +8,19 @@ on:
   pull_request:
     paths:
       - ".github/workflows/**"
+      # The checker reads these files too. Classify new hosts in the PR that
+      # introduces them, before an unrelated workflow change hits the failure.
+      - "tests/e2e/api/collections/provider-harness.json"
+      - "tests/integrations/python/config.json"
+      - "core/providers/**/*.go"
+      - "!core/providers/**/*_test.go"
 
 permissions:
   contents: read
 
 jobs:
   check-egress-allowlist:
-    name: Egress allowlist covers apt usage
+    name: Egress allowlist covers apt + provider-harness hosts
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -34,8 +40,18 @@ jobs:
 
       # PyYAML only - deliberately no apt-get here, so this job needs no Ubuntu
       # mirror access and stays outside the very rule it enforces.
+      #
+      # --require-hashes against a checked-in pin: an unpinned `pip install pyyaml`
+      # takes whatever the index serves at run time, which is what Scorecard's
+      # Pinned-Dependencies check flags. pip verifies every downloaded artifact
+      # against requirements/pyyaml.txt and fails closed on a mismatch.
       - name: Install PyYAML
-        run: python3 -m pip install --user --disable-pip-version-check pyyaml
+        run: |
+          python3 -m pip install --user --disable-pip-version-check \
+            --require-hashes -r .github/workflows/requirements/pyyaml.txt
+
+      - name: Test egress allowlist checker
+        run: bash ./.github/workflows/scripts/check-egress-allowlist.test.sh
 
       - name: Check egress allowlists
         run: ./.github/workflows/scripts/check-egress-allowlist.sh

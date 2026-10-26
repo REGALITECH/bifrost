@@ -1,3 +1,4 @@
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -5,19 +6,44 @@ import { DottedSeparator } from "@/components/ui/separator";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import { RenderProviderIcon } from "@/lib/constants/icons";
-import { ProviderLabels, ProviderName } from "@/lib/constants/logs";
-import { getErrorMessage, ModelDetails, useGetCoreConfigQuery, useUpsertModelCatalogEntriesMutation } from "@/lib/store";
+import { ProviderLabels, ProviderName, RequestTypeLabels } from "@/lib/constants/logs";
+import {
+	getErrorMessage,
+	ModelDetails,
+	ModelPricingOverrideSummary,
+	useGetCoreConfigQuery,
+	useUpsertModelCatalogEntriesMutation,
+} from "@/lib/store";
 import { KnownProvider } from "@/lib/types/config";
-import { formatTokenPriceFull } from "@/lib/utils/numbers";
+import { PeakHoursSchedule, PricingOverrideScopeKind } from "@/lib/types/governance";
+import { formatCharacterPriceFull, formatTokenPriceFull } from "@/lib/utils/numbers";
 import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
+import { Link } from "@tanstack/react-router";
 import { ExternalLink, Plus, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
+import { fieldLabelByKey, PricingFieldKey, pricingFieldUnit } from "../../custom-pricing/overrides/pricingFields";
+import OverriddenPrice from "./overriddenPrice";
 
 const DEFAULT_PRICING_SOURCE_URL = "https://getbifrost.ai/datasheet";
 
+// Scopes whose overrides can't be resolved from the model catalog alone — they
+// only apply to requests carrying the matching virtual key, user, or provider
+// key, so they are listed here but never change the displayed price.
+const SCOPE_CAVEATS: Partial<Record<PricingOverrideScopeKind, string>> = {
+	provider_key: "Applies only to requests routed through the matching provider key.",
+	virtual_key: "Applies only to requests using the matching virtual key.",
+	virtual_key_provider: "Applies only to requests using the matching virtual key and provider.",
+	virtual_key_provider_key: "Applies only to requests using the matching virtual key and provider key.",
+	user: "Applies only to requests from the matching user.",
+	user_provider: "Applies only to requests from the matching user and provider.",
+	user_provider_key: "Applies only to requests from the matching user and provider key.",
+};
+
 interface AttributeSheetProps {
 	model: ModelDetails;
+	/** Overrides referenced by `model.pricing_override_ids`, keyed by ID. */
+	overrides?: Record<string, ModelPricingOverrideSummary>;
 	onClose: () => void;
 }
 
@@ -58,7 +84,58 @@ function getPricingSourceUrl(configuredUrl: string | undefined, modelName: strin
 	return url.toString();
 }
 
-export default function AttributeSheet({ model, onClose }: AttributeSheetProps) {
+const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+// formatPeakHours renders a peak-hours schedule as a compact one-liner, e.g.
+// "Mon-Fri 01:00-04:00, 06:00-10:00 UTC".
+// The patch arrives as parsed API JSON, so the TypeScript type is a claim
+// rather than a guarantee. A non-array `windows`, or a null entry inside it,
+// would throw here and take the whole sheet's render down with it, so every
+// level is checked before it is walked.
+function formatPeakHours(value: PeakHoursSchedule): string {
+	const windows = Array.isArray(value.windows) ? value.windows : [];
+	if (windows.length === 0) return "—";
+	const tz = typeof value.timezone === "string" && value.timezone ? value.timezone : "UTC";
+	const rendered = windows
+		.map((w) => {
+			if (!w || typeof w !== "object") return null;
+			const days = (Array.isArray(w.days) ? w.days : [])
+				.filter((d) => typeof d === "number" && d >= 0 && d <= 6)
+				.map((d) => WEEKDAY_LABELS[d])
+				.join(",");
+			const start = typeof w.start === "string" ? w.start : "?";
+			const end = typeof w.end === "string" ? w.end : "?";
+			return days ? `${days} ${start}-${end}` : `${start}-${end}`;
+		})
+		.filter((w): w is string => w !== null);
+	if (rendered.length === 0) return "—";
+	return `${rendered.join("; ")} ${tz}`;
+}
+
+// formatPatchValue renders a patch value in its field's own unit: the way the
+// pricing table does for token-priced fields, as a bare multiplier for the geo
+// and off-peak multipliers, and as a plain dollar amount for everything else
+// (per-image, per-second, per-page, …). Non-numeric patch fields — currently
+// only the peak_hours schedule object — get their own rendering; falling
+// through to the dollar branch would print "$[object Object]".
+function formatPatchValue(key: string, value: unknown): string {
+	if (key === "peak_hours" && typeof value === "object" && value !== null) {
+		return formatPeakHours(value as PeakHoursSchedule);
+	}
+	if (typeof value !== "number") return String(value);
+	switch (pricingFieldUnit(key)) {
+		case "token":
+			return formatTokenPriceFull(value);
+		case "character":
+			return formatCharacterPriceFull(value);
+		case "multiplier":
+			return `${value}×`;
+		default:
+			return `$${value}`;
+	}
+}
+
+export default function AttributeSheet({ model, overrides, onClose }: AttributeSheetProps) {
 	const [isOpen, setIsOpen] = useState(true);
 	const hasUpdateAccess = useRbac(RbacResource.ModelProvider, RbacOperation.Update);
 	const { data: bifrostConfig } = useGetCoreConfigQuery({ fromDB: true });
@@ -67,6 +144,14 @@ export default function AttributeSheet({ model, onClose }: AttributeSheetProps) 
 
 	const initialDescription = model.additional_attributes?.description ?? "";
 	const [description, setDescription] = useState(initialDescription);
+
+	// Overrides arrive as IDs into a response-level index; skip any that went
+	// missing (e.g. deleted in another tab before this list refreshed).
+	const matchingOverrides = useMemo(
+		() => (model.pricing_override_ids ?? []).map((id) => overrides?.[id]).filter((o): o is ModelPricingOverrideSummary => !!o),
+		[model.pricing_override_ids, overrides],
+	);
+	const appliedOverrideName = model.applied_override_id ? overrides?.[model.applied_override_id]?.name : undefined;
 
 	const initialRows = useMemo(() => rowsFromAttributes(model.additional_attributes), [model.additional_attributes]);
 	const stripIds = (rows: AttributeRow[]) => rows.map(({ key, value }) => ({ key, value }));
@@ -146,7 +231,7 @@ export default function AttributeSheet({ model, onClose }: AttributeSheetProps) 
 				}}
 				data-testid="model-catalog-attribute-sheet"
 			>
-				<SheetHeader className="flex flex-col items-start p-0 px-8 py-4" headerClassName="mb-0 sticky -top-4 bg-card z-10">
+				<SheetHeader className="flex flex-col items-start p-0 py-4" headerClassName="mb-0 sticky -top-4 bg-card z-10 px-4 md:px-8">
 					<SheetTitle>Edit Model Attributes</SheetTitle>
 					<SheetDescription>
 						Update the description and other attributes for this model. These attributes are stored on the pricing row and preserved across
@@ -155,9 +240,9 @@ export default function AttributeSheet({ model, onClose }: AttributeSheetProps) 
 				</SheetHeader>
 
 				<div className="flex h-full flex-col gap-6">
-					<div className="grow space-y-4 px-8">
+					<div className="grow space-y-4 px-4 md:px-8">
 						{/* Read-only provider / model header */}
-						<div className="grid grid-cols-2 gap-4">
+						<div className="grid grid-cols-1 gap-4 md:grid-cols-2">
 							<div>
 								<Label className="text-sm font-medium">Provider</Label>
 								<div className="bg-muted/30 mt-2 flex items-center gap-2 rounded-sm border px-3 py-2 text-sm">
@@ -194,33 +279,113 @@ export default function AttributeSheet({ model, onClose }: AttributeSheetProps) 
 									</span>
 								)}
 							</div>
-							<div className="grid grid-cols-2 gap-4">
+							<div className="grid grid-cols-1 gap-4 md:grid-cols-2">
 								<div className="bg-muted/30 rounded-sm border px-3 py-2">
 									<p className="text-muted-foreground text-xs">Input</p>
 									<p className="mt-1 font-mono text-sm" data-testid="model-catalog-input-cost">
-										{formatTokenPriceFull(model.input_cost_per_token)}
+										<OverriddenPrice
+											variant="full"
+											base={model.input_cost_per_token}
+											override={model.overridden_pricing?.input_cost_per_token}
+											overrideName={appliedOverrideName}
+										/>
 									</p>
 								</div>
 								<div className="bg-muted/30 rounded-sm border px-3 py-2">
 									<p className="text-muted-foreground text-xs">Output</p>
 									<p className="mt-1 font-mono text-sm" data-testid="model-catalog-output-cost">
-										{formatTokenPriceFull(model.output_cost_per_token)}
+										<OverriddenPrice
+											variant="full"
+											base={model.output_cost_per_token}
+											override={model.overridden_pricing?.output_cost_per_token}
+											overrideName={appliedOverrideName}
+										/>
 									</p>
 								</div>
 								<div className="bg-muted/30 rounded-sm border px-3 py-2">
 									<p className="text-muted-foreground text-xs">Cache Write</p>
 									<p className="mt-1 font-mono text-sm" data-testid="model-catalog-cache-write-cost">
-										{formatTokenPriceFull(model.cache_creation_input_token_cost)}
+										<OverriddenPrice
+											variant="full"
+											base={model.cache_creation_input_token_cost}
+											override={model.overridden_pricing?.cache_creation_input_token_cost}
+											overrideName={appliedOverrideName}
+										/>
 									</p>
 								</div>
 								<div className="bg-muted/30 rounded-sm border px-3 py-2">
 									<p className="text-muted-foreground text-xs">Cache Read</p>
 									<p className="mt-1 font-mono text-sm" data-testid="model-catalog-cache-read-cost">
-										{formatTokenPriceFull(model.cache_read_input_token_cost)}
+										<OverriddenPrice
+											variant="full"
+											base={model.cache_read_input_token_cost}
+											override={model.overridden_pricing?.cache_read_input_token_cost}
+											overrideName={appliedOverrideName}
+										/>
 									</p>
 								</div>
 							</div>
 						</div>
+
+						{matchingOverrides.length > 0 && (
+							<>
+								<DottedSeparator />
+
+								{/* Pricing overrides */}
+								<div className="space-y-3" data-testid="model-catalog-pricing-overrides">
+									<div className="flex items-center justify-between gap-3">
+										<Label className="text-sm font-medium">Pricing overrides</Label>
+										<Link
+											to="/workspace/custom-pricing/overrides"
+											className="text-muted-foreground hover:text-foreground inline-flex items-center gap-1 text-xs"
+										>
+											Manage
+											<ExternalLink className="h-3 w-3" />
+										</Link>
+									</div>
+									{matchingOverrides.map((override) => {
+										const caveat = SCOPE_CAVEATS[override.scope_kind];
+										const patchEntries = Object.entries(override.patch).filter(([, value]) => value !== undefined && value !== null);
+										return (
+											<div
+												key={override.id}
+												className="bg-muted/30 space-y-2 rounded-sm border px-3 py-2"
+												data-testid={`model-catalog-pricing-override-${override.id}`}
+											>
+												<div className="flex flex-wrap items-center gap-2">
+													<span className="text-sm font-medium">{override.name || override.id}</span>
+													<Badge variant="secondary">{override.scope_kind}</Badge>
+													{override.id === model.applied_override_id && <Badge variant="outline">Applied</Badge>}
+												</div>
+												<p className="text-muted-foreground font-mono text-xs">
+													{override.match_type === "wildcard" ? "Matches" : "Exact"} {override.pattern}
+												</p>
+												{caveat && <p className="text-muted-foreground text-xs">{caveat}</p>}
+												{override.request_types && override.request_types.length > 0 && (
+													<div className="flex flex-wrap gap-1">
+														{override.request_types.map((rt) => (
+															<Badge key={rt} variant="outline" className="text-[10px]">
+																{RequestTypeLabels[rt as keyof typeof RequestTypeLabels] ?? rt}
+															</Badge>
+														))}
+													</div>
+												)}
+												{patchEntries.length > 0 && (
+													<div className="space-y-1">
+														{patchEntries.map(([key, value]) => (
+															<div key={key} className="flex items-baseline justify-between gap-3 text-xs">
+																<span className="text-muted-foreground">{fieldLabelByKey[key as PricingFieldKey] || key}</span>
+																<span className="font-mono">{formatPatchValue(key, value)}</span>
+															</div>
+														))}
+													</div>
+												)}
+											</div>
+										);
+									})}
+								</div>
+							</>
+						)}
 
 						<DottedSeparator />
 
@@ -286,7 +451,7 @@ export default function AttributeSheet({ model, onClose }: AttributeSheetProps) 
 						</div>
 					</div>
 
-					<div className="bg-card sticky bottom-0 shrink-0 border-t px-8 py-4">
+					<div className="bg-card sticky bottom-0 shrink-0 border-t px-4 py-4 md:px-8">
 						<div className="flex items-center justify-end gap-3">
 							{!hasUpdateAccess && <p className="text-destructive text-sm">You don't have permission to perform this action</p>}
 							<Button type="button" variant="outline" onClick={handleClose} data-testid="model-catalog-attribute-cancel">

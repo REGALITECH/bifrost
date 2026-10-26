@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 	"time"
 )
 
@@ -13,6 +14,30 @@ import (
 // Kubernetes platforms (e.g. EKS), so it must not be reachable. netip's
 // IsPrivate() does not cover it.
 var cgnat = netip.MustParsePrefix("100.64.0.0/10")
+
+// teredo is the RFC 4380 Teredo tunnelling prefix. Note the /32: only
+// 2001:0000::/32 is Teredo, so ordinary global unicast under 2001::/16 (e.g.
+// 2001:4860::/32) is untouched.
+//
+// Rejected wholesale rather than unwrapped-and-reclassified the way 6to4 and
+// NAT64 are, for two reasons. Teredo carries two IPv4 addresses - the client's
+// in bits 96-127 (obfuscated by XOR with 0xFFFFFFFF) and the relay server's in
+// bits 32-63 - so reclassifying on one still leaves the other attacker-chosen.
+// And unlike 6to4, Teredo has no legitimate server-to-server use: it is a
+// consumer NAT-traversal mechanism, deprecated and off by default on modern
+// systems, so nothing is lost by refusing the range outright.
+var teredo = netip.MustParsePrefix("2001:0000::/32")
+
+// metadataEndpoints are cloud instance-metadata service addresses that sit
+// outside the link-local range, so the link-local block alone does not cover
+// them. 169.254.169.254 (AWS, GCP, Azure, Oracle, DigitalOcean) is already
+// refused as link-local. These two fall inside ranges the private-network
+// policy otherwise permits: Alibaba Cloud ECS serves metadata from CGNAT
+// space, and the AWS IMDS IPv6 endpoint is a unique-local address.
+var metadataEndpoints = []netip.Addr{
+	netip.MustParseAddr("100.100.100.200"), // Alibaba Cloud ECS
+	netip.MustParseAddr("fd00:ec2::254"),   // AWS IMDS over IPv6
+}
 
 // IsPublicIP reports whether ip is safe to dial from server-side code that
 // fetches user-controlled URLs: not loopback, private, CGNAT, link-local,
@@ -52,6 +77,13 @@ func IsPublicIP(ip net.IP) bool {
 	if addr.Is6() {
 		b := addr.As16()
 		if b[0] == 0xfe && (b[1]&0xc0) == 0xc0 {
+			return false
+		}
+		// Teredo. Checked after the transition unwrap above so a Teredo address
+		// is judged as itself: none of the stdlib predicates match it, and its
+		// embedded IPv4 is obfuscated, so without this an internal target
+		// wrapped as 2001:0000:...:5601:5601 reads as ordinary global unicast.
+		if teredo.Contains(addr) {
 			return false
 		}
 	}
@@ -102,12 +134,34 @@ type ipLookuper interface {
 // runs per dial, it also holds across redirects and connection-pool re-dials.
 func SSRFSafeDialContext(dialTimeout time.Duration) func(ctx context.Context, netw, addr string) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: dialTimeout}
-	return ssrfSafeDialContext(net.DefaultResolver, dialer.DialContext)
+	return ssrfSafeDialContext(net.DefaultResolver, dialer.DialContext, nil)
 }
 
-// ssrfSafeDialContext is the seam behind SSRFSafeDialContext with injectable
-// resolver and dial for tests.
-func ssrfSafeDialContext(resolver ipLookuper, dial func(ctx context.Context, network, addr string) (net.Conn, error)) func(ctx context.Context, netw, addr string) (net.Conn, error) {
+// SSRFSafeDialContextWithAllowlist is the allowlist-aware variant of
+// SSRFSafeDialContext, for callers that must reach specific
+// operator-declared private hosts (e.g. downloading custom plugin binaries
+// from an internal artifact server). allow may be nil, in which case
+// behavior is identical to SSRFSafeDialContext.
+//
+// Every resolved IP must satisfy IsPublicIP OR allow.Permits(host, ip); the
+// winning IP is dialed directly and this check re-runs on every dial
+// (redirects, pooled-connection re-dials), preserving
+// SSRFSafeDialContext's DNS-rebinding protection.
+//
+// This is the only place allowlist behavior exists - do not add an
+// allowlist parameter to SSRFSafeDialContext itself, and do not use this
+// function at SSRF-guarded call sites other than plugin downloads (provider
+// fetch, webhooks, skills serving); those must keep blocking all private
+// targets unconditionally.
+func SSRFSafeDialContextWithAllowlist(dialTimeout time.Duration, allow *Allowlist) func(ctx context.Context, netw, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: dialTimeout}
+	return ssrfSafeDialContext(net.DefaultResolver, dialer.DialContext, allow)
+}
+
+// ssrfSafeDialContext is the seam behind SSRFSafeDialContext and
+// SSRFSafeDialContextWithAllowlist, with injectable resolver and dial for
+// tests. allow may be nil.
+func ssrfSafeDialContext(resolver ipLookuper, dial func(ctx context.Context, network, addr string) (net.Conn, error), allow *Allowlist) func(ctx context.Context, netw, addr string) (net.Conn, error) {
 	return func(ctx context.Context, netw, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
@@ -121,10 +175,254 @@ func ssrfSafeDialContext(resolver ipLookuper, dial func(ctx context.Context, net
 			return nil, fmt.Errorf("DNS lookup for %s returned no addresses", host)
 		}
 		for _, ip := range ips {
-			if !IsPublicIP(ip) {
+			if !IsPublicIP(ip) && !allow.Permits(host, ip) {
 				return nil, fmt.Errorf("blocked connection to non-public address %s (host %s)", ip, host)
 			}
 		}
 		return dial(ctx, netw, net.JoinHostPort(ips[0].String(), port))
+	}
+}
+
+// Allowlist is a static, deploy-time-validated set of hosts/CIDRs permitted
+// to bypass IsPublicIP's private/loopback/CGNAT/link-local block, for
+// callers that explicitly opt in via SSRFSafeDialContextWithAllowlist. It
+// never affects SSRFSafeDialContext or its other callers.
+type Allowlist struct {
+	hostnames map[string]struct{}
+	prefixes  []netip.Prefix
+}
+
+// NewAllowlist parses entries (each a bare hostname, bare IP, or CIDR) into
+// an Allowlist. It fails on the first entry that is none of the three: this
+// is security-relaxing config, so a typo must fail loudly (e.g. abort
+// server startup) rather than silently becoming a no-op. Blank entries are
+// skipped. There is no wildcard/glob support - unlike CORS allowlists,
+// wrongly matching here means Bifrost fetches-and-dlopen()s from an
+// unintended host, so operators must enumerate hosts exactly.
+func NewAllowlist(entries []string) (*Allowlist, error) {
+	al := &Allowlist{hostnames: make(map[string]struct{})}
+	for _, raw := range entries {
+		e := strings.TrimSpace(raw)
+		if e == "" {
+			continue
+		}
+		if prefix, err := netip.ParsePrefix(e); err == nil {
+			al.prefixes = append(al.prefixes, prefix)
+			continue
+		}
+		if addr, err := netip.ParseAddr(e); err == nil {
+			bits := 32
+			if addr.Is6() {
+				bits = 128
+			}
+			al.prefixes = append(al.prefixes, netip.PrefixFrom(addr, bits))
+			continue
+		}
+		if looksLikeIPLiteral(e) {
+			return nil, fmt.Errorf("invalid allowlist entry %q: looks like an IP address but failed to parse", raw)
+		}
+		if isValidHostnameLiteral(e) {
+			al.hostnames[strings.ToLower(e)] = struct{}{}
+			continue
+		}
+		return nil, fmt.Errorf("invalid allowlist entry %q: not a valid hostname, IP address, or CIDR (schemes and ports are not supported, host only)", raw)
+	}
+	return al, nil
+}
+
+// looksLikeIPLiteral reports whether s has the shape of an IPv4/IPv6 address
+// (four dot-separated all-numeric labels, or contains a colon) even though it
+// failed to parse as one. NewAllowlist uses this to reject likely IP typos
+// (e.g. an out-of-range octet) with a clear error instead of silently
+// accepting them as a dead hostname entry that can never match a dial host.
+func looksLikeIPLiteral(s string) bool {
+	if strings.Contains(s, ":") {
+		return true
+	}
+	labels := strings.Split(s, ".")
+	if len(labels) != 4 {
+		return false
+	}
+	for _, label := range labels {
+		if label == "" {
+			return false
+		}
+		for _, r := range label {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// Permits reports whether host or resolvedIP is covered by the allowlist:
+// host matches an allowlisted hostname exactly (case-insensitive), or
+// resolvedIP falls inside an allowlisted CIDR/bare-IP entry. The same
+// IPv4-in-IPv6 transition unwrapping IsPublicIP applies is applied to
+// resolvedIP, so a 6to4/NAT64-wrapped form of an allowlisted IPv4 also
+// matches. Nil-safe: a nil *Allowlist permits nothing.
+func (a *Allowlist) Permits(host string, resolvedIP net.IP) bool {
+	if a == nil {
+		return false
+	}
+	if _, ok := a.hostnames[strings.ToLower(host)]; ok {
+		return true
+	}
+	addr, ok := netip.AddrFromSlice(resolvedIP)
+	if !ok {
+		return false
+	}
+	addr = addr.Unmap()
+	if embedded, ok := embeddedIPv4(addr); ok {
+		addr = embedded
+	}
+	for _, prefix := range a.prefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// isValidHostnameLiteral reports whether s is a syntactically valid DNS
+// hostname (RFC 1123 labels), rejecting anything with a scheme, port, path,
+// or invalid characters so a config typo fails NewAllowlist loudly instead
+// of silently parsing as a hostname that will never match anything.
+func isValidHostnameLiteral(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		for i, r := range label {
+			switch {
+			case r == '-':
+				if i == 0 || i == len(label)-1 {
+					return false
+				}
+			case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			default:
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// checkPrivateNetworkPolicy applies the PrivateNetworkDialContext destination
+// policy to one address: unspecified, link-local, and cloud metadata
+// endpoints are refused; everything else, loopback and private ranges
+// included, is permitted. IPv6 forms that embed an IPv4 address (IPv4-mapped,
+// 6to4, NAT64) are judged by the embedded IPv4 as well, as IsPublicIP does,
+// so a blocked endpoint cannot be reached through a transition
+// representation.
+func checkPrivateNetworkPolicy(ip net.IP, host string) error {
+	if ip.IsUnspecified() {
+		return fmt.Errorf("blocked connection to unspecified address %s (host %s)", ip, host)
+	}
+	if IsLinkLocal(ip) {
+		return fmt.Errorf("blocked connection to link-local address %s (host %s)", ip, host)
+	}
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return fmt.Errorf("blocked connection to unparseable address %s (host %s)", ip, host)
+	}
+	addr = addr.Unmap()
+	if embedded, ok := embeddedIPv4(addr); ok {
+		addr = embedded
+		if addr.IsLinkLocalUnicast() {
+			return fmt.Errorf("blocked connection to link-local address %s (host %s)", ip, host)
+		}
+	}
+	for _, ep := range metadataEndpoints {
+		if addr == ep {
+			return fmt.Errorf("blocked connection to cloud metadata endpoint %s (host %s)", ip, host)
+		}
+	}
+	return nil
+}
+
+// ResolvePrivateNetworkTarget resolves host and applies the
+// PrivateNetworkDialContext destination policy to every address it resolves
+// to, returning the validated addresses for the caller to dial. It is the
+// resolve step of that dialer, kept separate so it can be tested on its own.
+// An IP literal resolves to itself without a DNS query.
+func ResolvePrivateNetworkTarget(ctx context.Context, host string) ([]net.IP, error) {
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		return nil, fmt.Errorf("DNS lookup failed for %s: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("DNS lookup for %s returned no addresses", host)
+	}
+	for _, ip := range ips {
+		if err := checkPrivateNetworkPolicy(ip, host); err != nil {
+			return nil, err
+		}
+	}
+	return ips, nil
+}
+
+// CheckPrivateNetworkLiteral applies the PrivateNetworkDialContext destination
+// policy to host without any DNS lookup: an IP literal (with or without IPv6
+// brackets) is checked, and a hostname is accepted as-is. It exists for the
+// case where the connection is handed to an intermediary, such as an HTTP
+// proxy, that resolves names on its own side: resolving locally there would
+// make the request depend on DNS the host may not have (a proxy-only
+// deployment), and would still not bind what the proxy connects to. So the
+// caller enforces what it can verify without DNS, and name resolution for the
+// proxied path is left to the proxy, which is operator configuration.
+func CheckPrivateNetworkLiteral(host string) error {
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil {
+		return nil
+	}
+	return checkPrivateNetworkPolicy(ip, host)
+}
+
+// PrivateNetworkDialContext returns a DialContext that, unlike
+// SSRFSafeDialContext, permits loopback, RFC1918/unique-local, and CGNAT
+// destinations. It still blocks link-local addresses (including the
+// 169.254.169.254 cloud metadata endpoint), the cloud metadata endpoints that
+// live outside link-local (see metadataEndpoints), and unspecified addresses,
+// which have no legitimate destination under any deployment topology. Same
+// DNS-rebinding protection as SSRFSafeDialContext: resolves once and dials
+// the validated IP directly.
+//
+// Use this only for features where connecting to a self-hosted or
+// private-network target is the primary, documented use case (e.g. an MCP
+// server running on the same host or inside the same private network) AND
+// that capability is already gated by genuine authentication elsewhere - this
+// function is a defense-in-depth backstop against link-local/metadata
+// targets, not an authorization check.
+func PrivateNetworkDialContext(dialTimeout time.Duration) func(ctx context.Context, netw, addr string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: dialTimeout}
+	return func(ctx context.Context, netw, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid dial address %q: %w", addr, err)
+		}
+		ips, err := ResolvePrivateNetworkTarget(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		// Every address resolved above passed the policy, so trying them in
+		// turn is no weaker than dialing just the first: nothing outside this
+		// one validated set is ever dialed, which is what defeats rebinding.
+		// Pinning ips[0] instead would break the feature's primary documented
+		// target: "localhost" resolves to [::1, 127.0.0.1] on a dual-stack
+		// host, and an MCP server bound only to IPv4 is unreachable at ::1.
+		var lastErr error
+		for _, ip := range ips {
+			conn, err := dialer.DialContext(ctx, netw, net.JoinHostPort(ip.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+		}
+		return nil, lastErr
 	}
 }

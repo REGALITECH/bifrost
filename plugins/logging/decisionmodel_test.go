@@ -23,7 +23,7 @@ func TestDecisionResponseModelSurvivesLogPersistence(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newTestStore(t)
-			plugin, err := Init(context.Background(), &Config{DisableContentLogging: &tc.disableContent}, testLogger{}, store, nil, nil)
+			plugin, err := Init(context.Background(), &Config{DisableContentLogging: &tc.disableContent}, testLogger{}, store, nil, nil, nil)
 			require.NoError(t, err)
 			t.Cleanup(func() { require.NoError(t, plugin.Cleanup()) })
 

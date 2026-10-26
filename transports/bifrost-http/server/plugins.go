@@ -15,6 +15,7 @@ import (
 	"github.com/maximhq/bifrost/plugins/modelcatalogresolver"
 	"github.com/maximhq/bifrost/plugins/otel"
 	"github.com/maximhq/bifrost/plugins/prompts"
+	"github.com/maximhq/bifrost/plugins/routing"
 	"github.com/maximhq/bifrost/plugins/semanticcache"
 	"github.com/maximhq/bifrost/plugins/telemetry"
 	"github.com/maximhq/bifrost/transports/bifrost-http/handlers"
@@ -70,6 +71,12 @@ func loadBuiltinPlugin(ctx context.Context, name string, pluginConfig any, bifro
 				if extraConfig.MetricsEnabled != nil {
 					telConfig.MetricsEnabled = extraConfig.MetricsEnabled
 				}
+				if extraConfig.OverheadBreakdownEnabled != nil {
+					telConfig.OverheadBreakdownEnabled = extraConfig.OverheadBreakdownEnabled
+				}
+				if extraConfig.UserLabelsEnabled != nil {
+					telConfig.UserLabelsEnabled = extraConfig.UserLabelsEnabled
+				}
 			}
 		}
 		return telemetry.Init(telConfig, bifrostConfig.ModelCatalog, logger)
@@ -87,7 +94,7 @@ func loadBuiltinPlugin(ctx context.Context, name string, pluginConfig any, bifro
 				bifrostConfig.LogsStoreConfig.ObjectStorage != nil
 		}
 		return logging.Init(ctx, loggingConfig, logger, bifrostConfig.LogsStore,
-			bifrostConfig.ModelCatalog, bifrostConfig.MCPCatalog)
+			bifrostConfig.ConfigStore, bifrostConfig.ModelCatalog, bifrostConfig.MCPCatalog)
 
 	case governance.PluginName:
 		governanceConfig, err := MarshalPluginConfig[governance.Config](pluginConfig)
@@ -95,9 +102,34 @@ func loadBuiltinPlugin(ctx context.Context, name string, pluginConfig any, bifro
 			return nil, fmt.Errorf("failed to marshal governance plugin config: %w", err)
 		}
 		inMemoryStore := &GovernanceInMemoryStore{Config: bifrostConfig}
-		return governance.Init(ctx, governanceConfig, logger, bifrostConfig.ConfigStore,
+		governancePlugin, err := governance.Init(ctx, governanceConfig, logger, bifrostConfig.ConfigStore,
 			bifrostConfig.GovernanceConfig, bifrostConfig.ModelCatalog,
 			bifrostConfig.MCPCatalog, inMemoryStore)
+		if err != nil {
+			return nil, err
+		}
+		governancePlugin.StartResetWorkers(ctx)
+		return governancePlugin, nil
+
+	case routing.PluginName:
+		routingConfig, err := MarshalPluginConfig[routing.Config](pluginConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal routing plugin config: %w", err)
+		}
+		if routingConfig == nil {
+			routingConfig = &routing.Config{}
+		}
+		// Session complexity state uses the same process-wide store as core
+		// session routing. The field is runtime-only and is never persisted in
+		// plugin configuration.
+		routingConfig.KVStore = bifrostConfig.KVStore
+		// Routing rules read the virtual key and its live budget/rate-limit usage, so the
+		// governance plugin must already be registered when this runs.
+		governancePlugin, err := lib.FindPluginAs[governance.BaseGovernancePlugin](bifrostConfig, governancePluginNameFromContext(ctx))
+		if err != nil {
+			return nil, fmt.Errorf("routing plugin requires the governance plugin: %w", err)
+		}
+		return routing.Init(ctx, routingConfig, logger, bifrostConfig.ConfigStore, governancePlugin)
 
 	case metronome.PluginName:
 		config, err := MarshalPluginConfig[metronome.Config](pluginConfig)
@@ -227,7 +259,6 @@ func (s *BifrostHTTPServer) loadBuiltinPlugins(ctx context.Context) error {
 			IsVkMandatory:         &s.Config.ClientConfig.EnforceAuthOnInference,
 			RequiredHeaders:       &s.Config.ClientConfig.RequiredHeaders,
 			DisableAutoToolInject: &s.Config.ClientConfig.MCPDisableAutoToolInject,
-			RoutingChainMaxDepth:  &s.Config.ClientConfig.RoutingChainMaxDepth,
 		}
 		s.registerPluginWithStatus(ctx, governance.PluginName, nil, config, false)
 	} else {
@@ -235,52 +266,66 @@ func (s *BifrostHTTPServer) loadBuiltinPlugins(ctx context.Context) error {
 	}
 	s.Config.SetPluginOrderInfo(governance.PluginName, builtinPlacement, schemas.Ptr(4))
 
-	// 5. OTEL (if configured in PluginConfigs)
+	// 5. Routing rules. Runs after governance so rules evaluate against a fully stamped
+	// context, and drives the rest of the routing pipeline itself: it publishes the virtual
+	// key's provider allowlist and load balances its providers once a rule has decided.
+	if s.Config.IsPluginLoaded(s.getGovernancePluginName()) {
+		config := &routing.Config{
+			ChainMaxDepth: &s.Config.ClientConfig.RoutingChainMaxDepth,
+		}
+		s.registerPluginWithStatus(ctx, routing.PluginName, nil, config, false)
+	} else {
+		s.markPluginDisabled(routing.PluginName)
+	}
+	s.Config.SetPluginOrderInfo(routing.PluginName, builtinPlacement, schemas.Ptr(5))
+
+	// 6. OTEL (if configured in PluginConfigs)
 	otelConfig := s.getPluginConfig(otel.PluginName)
 	if otelConfig != nil && otelConfig.Enabled {
 		s.registerPluginWithStatus(ctx, otel.PluginName, nil, otelConfig.Config, false)
 	} else {
 		s.markPluginDisabled(otel.PluginName)
 	}
-	s.Config.SetPluginOrderInfo(otel.PluginName, builtinPlacement, schemas.Ptr(5))
+	s.Config.SetPluginOrderInfo(otel.PluginName, builtinPlacement, schemas.Ptr(6))
 
-	// 6. Semantic Cache (if configured in PluginConfigs)
+	// 7. Semantic Cache (if configured in PluginConfigs)
 	semanticCacheConfig := s.getPluginConfig(semanticcache.PluginName)
 	if semanticCacheConfig != nil && semanticCacheConfig.Enabled {
 		s.registerPluginWithStatus(ctx, semanticcache.PluginName, nil, semanticCacheConfig.Config, false)
 	} else {
 		s.markPluginDisabled(semanticcache.PluginName)
 	}
-	s.Config.SetPluginOrderInfo(semanticcache.PluginName, builtinPlacement, schemas.Ptr(6))
+	s.Config.SetPluginOrderInfo(semanticcache.PluginName, builtinPlacement, schemas.Ptr(7))
 
-	// 7. Compat (if any compat feature is enabled in ClientConfig)
+	// 8. Compat (if any compat feature is enabled in ClientConfig)
 	cc := s.Config.ClientConfig.Compat
 	compatCfg := &compat.Config{
 		ConvertTextToChat:      cc.ConvertTextToChat,
 		ConvertChatToResponses: cc.ConvertChatToResponses,
 		ShouldDropParams:       cc.ShouldDropParams,
 		ShouldConvertParams:    cc.ShouldConvertParams,
+		AzureDeepseek:          cc.AzureDeepseek,
 	}
 	s.registerPluginWithStatus(ctx, compat.PluginName, nil, compatCfg, false)
-	s.Config.SetPluginOrderInfo(compat.PluginName, builtinPlacement, schemas.Ptr(7))
+	s.Config.SetPluginOrderInfo(compat.PluginName, builtinPlacement, schemas.Ptr(8))
 
-	// 8. Maxim (if configured in PluginConfigs)
+	// 9. Maxim (if configured in PluginConfigs)
 	maximConfig := s.getPluginConfig(maxim.PluginName)
 	if maximConfig != nil && maximConfig.Enabled {
 		s.registerPluginWithStatus(ctx, maxim.PluginName, nil, maximConfig.Config, false)
 	} else {
 		s.markPluginDisabled(maxim.PluginName)
 	}
-	s.Config.SetPluginOrderInfo(maxim.PluginName, builtinPlacement, schemas.Ptr(8))
+	s.Config.SetPluginOrderInfo(maxim.PluginName, builtinPlacement, schemas.Ptr(9))
 
-	// 9. Metronome (opt-in usage export)
+	// Metronome (opt-in usage export). Order 10, right after maxim (9).
 	metronomeConfig := s.getPluginConfig(metronome.PluginName)
 	if metronomeConfig != nil && metronomeConfig.Enabled {
 		s.registerPluginWithStatus(ctx, metronome.PluginName, nil, metronomeConfig.Config, false)
 	} else {
 		s.markPluginDisabled(metronome.PluginName)
 	}
-	s.Config.SetPluginOrderInfo(metronome.PluginName, builtinPlacement, schemas.Ptr(9))
+	s.Config.SetPluginOrderInfo(metronome.PluginName, builtinPlacement, schemas.Ptr(10))
 
 	// 10. ModelCatalogResolver (last routing layer — fills req.Provider from catalog only when
 	// no earlier routing plugin (governance routing rules, governance VK LB, enterprise LB)

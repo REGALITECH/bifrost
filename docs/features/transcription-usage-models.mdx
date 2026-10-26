@@ -101,6 +101,12 @@ Send `POST /v1/audio/transcriptions/usage` with `x-bf-vk` and a stable
 }
 ```
 
+Logging deduplicates a retry by its `x-request-id`. Governance bills a retry
+with the same VK and `x-request-id` once, but only while the first report is
+still in its in-memory deduplication window (about 5 minutes, per Bifrost
+process): a later retry, or one handled by another replica, is billed again.
+A report without `x-request-id` is billed every time.
+
 Success is 202. The existing logging queue writes the usage asynchronously;
 a successful response is not a synchronous durable-write acknowledgement.
 Unknown models or a deleted provider return 400; missing VK returns 401.

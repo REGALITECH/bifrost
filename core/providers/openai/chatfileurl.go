@@ -2,8 +2,10 @@ package openai
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"mime"
+	"net/http"
 	"net/url"
 	"path"
 	"strings"
@@ -140,6 +142,15 @@ func ResolveChatFileURLs(ctx *schemas.BifrostContext, provider schemas.ModelProv
 				continue
 			}
 
+			// Leave references bifrost cannot download in place. Bifrost inlines only
+			// what it can actually fetch; whether the surface accepts the reference is
+			// the provider's call, and it now travels on the wire (MarshalJSON no longer
+			// drops file_url) so the provider can answer for itself instead of the block
+			// arriving empty.
+			if scheme := urlSourceScheme(*file.FileURL); scheme != "http" && scheme != "https" {
+				continue
+			}
+
 			mediaType, encoded, err := providerUtils.FetchAndEncodeURL(fetchCtx, *file.FileURL)
 			if err != nil {
 				return fmt.Errorf("failed to fetch document at %s for messages[%d].content[%d]: %w",
@@ -157,4 +168,94 @@ func ResolveChatFileURLs(ctx *schemas.BifrostContext, provider schemas.ModelProv
 		}
 	}
 	return nil
+}
+
+// urlSourceScheme returns the lowercase scheme of rawURL, or "" when it has none or
+// does not parse. Used only to phrase the rejection in ResolveChatFileURLs;
+// FetchAndEncodeURL remains the actual gate on what gets dialled.
+func urlSourceScheme(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(parsed.Scheme)
+}
+
+// fileDataAsDataURL folds Bifrost's file_type extension into file_data, because the OpenAI
+// wire has no file_type field and MarshalJSON strips it. OpenAI and OpenAI-shaped surfaces
+// (Databricks among them) require file_data as a data URL, so bare base64 with its media type
+// named only in file_type used to go upstream with no media type at all and be rejected
+// ("Invalid base64 data URL format"). Native converters read file_type directly and never
+// hit this.
+//
+// Follows the conventions the native converters already apply to the same fields: a
+// text/plain (or "txt") file_type means file_data is plain text, and anything else without a
+// data: prefix is base64. A data URL is left as it is, and so is a payload that is not valid
+// base64, since there is no basis to guess what it is.
+func fileDataAsDataURL(fileData string, fileType *string) string {
+	if fileData == "" || strings.HasPrefix(fileData, "data:") {
+		return fileData
+	}
+
+	mediaType := ""
+	if fileType != nil {
+		mediaType = normalizeFileType(*fileType)
+	}
+	if mediaType == "text/plain" {
+		return "data:text/plain;base64," + base64.StdEncoding.EncodeToString([]byte(fileData))
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(fileData)
+	if err != nil {
+		return fileData
+	}
+	if mediaType == "" {
+		mediaType = sniffFileMediaType(decoded)
+	}
+	return "data:" + mediaType + ";base64," + fileData
+}
+
+// normalizeFileType turns a caller's file_type into a bare, lowercase media type. It accepts
+// both MIME types ("application/pdf; charset=binary") and the short extension names some
+// callers send ("pdf", "txt"). Returns "" when neither reading yields a media type.
+func normalizeFileType(fileType string) string {
+	fileType = strings.ToLower(strings.TrimSpace(fileType))
+	if fileType == "" {
+		return ""
+	}
+	if strings.Contains(fileType, "/") {
+		if parsed, _, err := mime.ParseMediaType(fileType); err == nil && parsed != "" {
+			return parsed
+		}
+		return fileType
+	}
+	if fileType == "txt" {
+		return "text/plain"
+	}
+	if byExt := mime.TypeByExtension("." + fileType); byExt != "" {
+		if parsed, _, err := mime.ParseMediaType(byExt); err == nil && parsed != "" {
+			return parsed
+		}
+	}
+	return ""
+}
+
+// sniffFileMediaType infers the media type of decoded file bytes when the caller named none.
+// PDF is the default when sniffing finds nothing specific, matching the Anthropic and Gemini
+// converters: documents are the dominant use of file blocks.
+func sniffFileMediaType(data []byte) string {
+	detected := http.DetectContentType(data)
+	if parsed, _, err := mime.ParseMediaType(detected); err == nil {
+		detected = parsed
+	}
+	if detected == "" || detected == "application/octet-stream" {
+		return "application/pdf"
+	}
+	return detected
+}
+
+// fileDataNeedsDataURL reports whether file_data is set without a data: prefix, so the
+// marshal gates copy the block even when the caller sent no file_type to strip.
+func fileDataNeedsDataURL(fileData *string) bool {
+	return fileData != nil && *fileData != "" && !strings.HasPrefix(*fileData, "data:")
 }

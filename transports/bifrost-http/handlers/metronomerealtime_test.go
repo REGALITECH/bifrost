@@ -81,7 +81,7 @@ func TestMetronomeFishRealtimeTurnUsage(t *testing.T) {
 	session.RecordRealtimeInput(itemID, summary, string(message))
 
 	fish := &fishaudio.FishAudioProvider{}
-	require.Nil(t, finalizeRealtimeTurnHooks(client, baseCtx, session, fish, schemas.FishAudio, "s2.1-pro", &schemas.Key{}, nil, ""))
+	require.Nil(t, finalizeRealtimeTurnHooks(client, baseCtx, session, fish, schemas.FishAudio, "s2.1-pro", &schemas.Key{}, nil, "", realtimeTurnFinalEvent(fish, false), false))
 	require.NoError(t, plugin.Cleanup()) // drains the queue
 
 	capture.mu.Lock()

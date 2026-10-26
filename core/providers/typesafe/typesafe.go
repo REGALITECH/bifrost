@@ -290,7 +290,15 @@ func (provider *TypesafeProvider) Decision(ctx *schemas.BifrostContext, key sche
 		return nil, providerUtils.EnrichError(ctx, parseTypesafeError(resp), jsonData, nil, sendBackRawRequest, sendBackRawResponse, latency)
 	}
 
+	ft, fh := providerUtils.StartPhaseSpan(ctx, "response-finalize")
 	respBody, err := providerUtils.CheckAndDecodeBody(resp)
+	if ft != nil {
+		if err != nil {
+			ft.EndSpan(fh, schemas.SpanStatusError, err.Error())
+		} else {
+			ft.EndSpan(fh, schemas.SpanStatusOk, "")
+		}
+	}
 	if err != nil {
 		rawErrBody := append([]byte(nil), resp.Body()...)
 		return nil, providerUtils.EnrichError(ctx, providerUtils.NewBifrostOperationError(schemas.ErrProviderResponseDecode, err), jsonData, rawErrBody, sendBackRawRequest, sendBackRawResponse, latency)
@@ -301,7 +309,7 @@ func (provider *TypesafeProvider) Decision(ctx *schemas.BifrostContext, key sche
 	}
 
 	var typesafeResp TypesafeDecisionResponse
-	rawRequest, rawResponse, bifrostErr := providerUtils.HandleProviderResponse(respBody, &typesafeResp, jsonData, sendBackRawRequest, sendBackRawResponse)
+	rawRequest, rawResponse, bifrostErr := providerUtils.HandleProviderResponseCtx(ctx, respBody, &typesafeResp, jsonData, sendBackRawRequest, sendBackRawResponse)
 	if bifrostErr != nil {
 		return nil, bifrostErr
 	}

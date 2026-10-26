@@ -18,9 +18,9 @@ type TypesafeRouter struct {
 }
 
 // NewTypesafeRouter creates a new TypesafeRouter with the given bifrost client.
-func NewTypesafeRouter(client *bifrost.Bifrost, handlerStore lib.HandlerStore, logger schemas.Logger) *TypesafeRouter {
+func NewTypesafeRouter(client *bifrost.Bifrost, handlerStore lib.HandlerStore, accessResolver AccessResolver, logger schemas.Logger) *TypesafeRouter {
 	return &TypesafeRouter{
-		GenericRouter: NewGenericRouter(client, handlerStore, CreateTypesafeRouteConfigs("/typesafe"), nil, logger),
+		GenericRouter: NewGenericRouter(client, handlerStore, accessResolver, CreateTypesafeRouteConfigs("/typesafe"), nil, logger),
 	}
 }
 
